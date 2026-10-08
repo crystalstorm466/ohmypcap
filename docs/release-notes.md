@@ -2,7 +2,32 @@
 
 ## 5.0.0
 
+### SHAR-CRATES
+
+Every PCAP analysis now has a second view: **SHAR-CRATES**, tshark's view
+of the capture, next to Suricata's - now called **SURI-CRATES** - with a
+tab for each above the search box. tshark decodes far more
+protocols than Suricata, but packet by packet; SHAR-CRATES turns its
+output into records shaped like Suricata's, so the same tabs, aggregation
+tables, Sankey diagram, search and pivot menu work on both:
+
+- **Flows** - one per conversation, with the protocol tshark found in it,
+  including the many protocols Suricata doesn't parse
+- **DNS, HTTP, TLS and Modbus** - one record per transaction, checked
+  against Suricata's on the same captures: they agree on every field they
+  share (see [SURI-CRATES and SHAR-CRATES](usage/exploring-results.md#suri-crates-and-shar-crates)
+  for the few counting differences)
+
+SHAR-CRATES builds itself in the background once Suricata finishes;
+captures over 250 MB wait until you ask. Switching views keeps your search
+and filters, and the pivot menu's **View in SHAR-CRATES** / **View in
+SURI-CRATES** finds the same flow in the other view by its Community ID.
+
 ### Fixes
+
+- When a refresh's data no longer has the open tab's type of event (a
+  search that matched none of them), the first tab now opens instead of
+  every section staying hidden
 
 - Suricata now caches its compiled rules between analyses, so a PCAP
   analysis no longer spends about 16 seconds rebuilding them every time -

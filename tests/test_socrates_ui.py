@@ -3591,6 +3591,8 @@ class TestThemeAndMenu(unittest.TestCase):
             '.detail-value-pivot.keyboard-selected',
             '.autocomplete-item.keyboard-selected',
             '.agg-page-btn.keyboard-selected',
+            '.view-toggle-btn.active',
+            '.view-toggle-btn:focus-visible',
         )
         fallback = 'var(--interactive-highlight, var(--accent))'
         for selector in documented_consumers:
@@ -14819,7 +14821,7 @@ class TestSearchUI(unittest.TestCase):
                       'Search button CSS must exist')
 
     def test_search_fetches_stats_with_q(self):
-        self.assertIn("'/api/stats?md5=' + encodeURIComponent(currentMd5) + qParam", JS_CONTENT,
+        self.assertIn("'/api/stats?md5=' + encodeURIComponent(currentMd5) + viewParam() + qParam", JS_CONTENT,
                       'refreshAnalysisData must fetch stats with q parameter')
 
     def test_search_fetches_events_with_q(self):
@@ -14954,7 +14956,7 @@ class TestSearchUI(unittest.TestCase):
                       'refreshAnalysisData must query visible section before rebuild')
         self.assertIn("const activeType = visibleSection ? visibleSection.id.replace('section-', '') : ''", func,
                       'refreshAnalysisData must extract active type from visible section')
-        self.assertIn("if (activeType && activeType !== eventTypes[0])", func,
+        self.assertIn("const sectionEl = activeType && activeType !== eventTypes[0]", func,
                       'refreshAnalysisData must conditionally restore non-default active type')
         self.assertIn("sectionEl.classList.remove('section-hidden')", func,
                       'refreshAnalysisData must unhide the restored section')
@@ -21418,6 +21420,241 @@ class TestEmailAnalysisUI(unittest.TestCase):
         self.assertIn('Attachment', result['file'])
         self.assertEqual(result['cyberchef'], 1)
         self.assertNotIn('Source', result['pcapLabels'], 'no blank Source row for a pcap file')
+
+class TestSharkCratesUI(unittest.TestCase):
+    """The SURI-CRATES | SHAR-CRATES toggle on a PCAP analysis: which
+    database every data request reads, the toggle's states, switching, and
+    what's different about the SHAR-CRATES view."""
+
+    def test_every_data_request_carries_the_view(self):
+        """REGRESSION GUARD: a data request without viewParam() reads
+        Suricata's events.db even in the SHAR-CRATES view - one forgotten
+        call site would mix the two views' data on one page."""
+        calls = re.findall(r"fetch\((`|')(/api/(?:events|count|stats|sankey-data|aggregation-data|aggregation-totals)\?md5=[^\n]*)", JS_CONTENT)
+        self.assertGreaterEqual(len(calls), 15)
+        for _, call in calls:
+            self.assertIn('viewParam()', call, call)
+        self.assertEqual(len(re.findall(r"fetch\(`\$\{(?:endpoint|countEndpoint)\}\?md5=\$\{encodeURIComponent\(currentMd5\)\}\$\{viewParam\(\)\}", JS_CONTENT)), 2)
+
+    def test_view_param(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""
+            var before = viewParam();
+            currentView = 'shark';
+            window.__jsdom_result = {before: before, shark: viewParam()};
+        """)
+        self.assertEqual(result, {'before': '', 'shark': '&view=shark'})
+
+    def test_toggle_titles_explain_each_state(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""
+            window.__jsdom_result = [
+                sharkToggleTitle({status: 'ready', flows: 10, app_protos: {dns: 4, tls: 2, '': 1}}),
+                sharkToggleTitle({status: 'ready', flows: 1, app_protos: {http: 1}}),
+                sharkToggleTitle({status: 'running'}),
+                sharkToggleTitle({status: 'too_large'}),
+                sharkToggleTitle({status: 'error', message: 'tshark failed: boom'}),
+                sharkToggleTitle(null),
+            ];
+        """)
+        self.assertEqual(result[0], "SHAR-CRATES: tshark's view of this capture - 10 flows, 2 protocols",
+                         "flows with no application protocol ('') aren't a protocol")
+        self.assertEqual(result[1], "SHAR-CRATES: tshark's view of this capture - 1 flow, 1 protocol")
+        self.assertIn('tshark is analyzing', result[2])
+        self.assertIn('click to analyze it', result[3])
+        self.assertEqual(result[4], 'SHAR-CRATES failed: tshark failed: boom - click to try again')
+        self.assertIn('SHAR-CRATES', result[5])
+
+    def test_status_text_spells_out_each_state_with_a_link_when_it_needs_a_click(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""
+            document.getElementById('viewBarContainer').innerHTML = viewBarHtml();
+            function shown(status) {
+                sharkStatus = status;
+                updateViewToggle();
+                var el = document.getElementById('viewBarStatus');
+                var link = el.querySelector('a');
+                return {text: el.textContent, link: link ? [link.dataset.action, link.dataset.arg] : null};
+            }
+            window.__jsdom_result = {
+                ready: shown({status: 'ready', flows: 1234, app_protos: {dns: 1, tls: 1, '': 2}}),
+                running: shown({status: 'running'}),
+                tooLarge: shown({status: 'too_large'}),
+                error: shown({status: 'error', message: '<b>boom</b>'}),
+            };
+        """)
+        self.assertEqual(result['ready'], {'text': 'tshark: 1,234 flows, 2 protocols', 'link': None})
+        self.assertEqual(result['running']['text'], 'Analyzing with tshark\u2026')
+        self.assertIn('larger than SHAR-CRATES analyzes automatically', result['tooLarge']['text'])
+        self.assertEqual(result['tooLarge']['link'], ['switch-view', 'shark'], 'Analyze now starts it')
+        self.assertEqual(result['error']['text'], 'SHAR-CRATES failed: <b>boom</b> \u2013 Try again', 'the message is escaped')
+        self.assertEqual(result['error']['link'], ['switch-view', 'shark'])
+
+    def test_view_bar_sits_between_the_header_and_search_and_is_cleared_with_the_page(self):
+        html = HTML_CONTENT
+        self.assertLess(html.index('id="mainHeader"'), html.index('id="viewBarContainer"'))
+        self.assertLess(html.index('id="viewBarContainer"'), html.index('id="searchBarContainer"'))
+        clear = JS_CONTENT[JS_CONTENT.index('function clearAnalysisContainers()'):]
+        self.assertIn("document.getElementById('viewBarContainer').innerHTML = '';", clear[:clear.index('\n        }\n')])
+
+    def _toggle(self, status, view='suricata'):
+        from tests.jsdom_helper import js_statements
+        return js_statements(f"""
+            document.getElementById('viewBarContainer').innerHTML = viewBarHtml();
+            currentView = {json.dumps(view)};
+            sharkStatus = {json.dumps(status)};
+            updateViewToggle();
+            var shark = document.querySelector('[data-arg="shark"]');
+            window.__jsdom_result = {{
+                active: document.querySelector('.view-toggle-btn.active').dataset.arg,
+                sharkPressed: shark.getAttribute('aria-pressed'),
+                busy: shark.classList.contains('view-toggle-busy'),
+                attention: shark.classList.contains('view-toggle-attention'),
+            }};
+        """)
+
+    def test_toggle_marks_the_active_view_and_shark_crates_state(self):
+        self.assertEqual(self._toggle({'status': 'running'}),
+                         {'active': 'suricata', 'sharkPressed': 'false', 'busy': True, 'attention': False})
+        self.assertEqual(self._toggle({'status': 'too_large'})['attention'], True)
+        self.assertEqual(self._toggle({'status': 'error', 'message': 'x'})['attention'], True)
+        self.assertEqual(self._toggle({'status': 'ready', 'flows': 1, 'app_protos': {}}, 'shark'),
+                         {'active': 'shark', 'sharkPressed': 'true', 'busy': False, 'attention': False})
+
+    def test_switching_to_a_capture_too_large_to_run_unasked_starts_it(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""
+            var calls = [];
+            window.fetch = function(url, opts) {
+                calls.push([url, opts && opts.method]);
+                return Promise.resolve({json: () => Promise.resolve({status: 'queued', position: 1})});
+            };
+            currentMd5 = 'a'.repeat(32);
+            document.getElementById('viewBarContainer').innerHTML = viewBarHtml();
+            sharkStatus = {status: 'too_large'};
+            await switchAnalysisView('shark');
+            stopSharkPolling();
+            window.__jsdom_result = {calls: calls, view: currentView, status: sharkStatus.status};
+        """)
+        self.assertEqual([c for c in result['calls'] if 'shark' in c[0]], [['/api/shark-start', 'POST']])
+        self.assertEqual(result['view'], 'suricata', 'stays on SURI-CRATES until SHAR-CRATES is ready')
+        self.assertEqual(result['status'], 'queued')
+
+    def test_switching_while_shark_crates_is_busy_does_nothing_but_explain(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""
+            var calls = 0;
+            window.fetch = function() { calls++; return Promise.resolve({json: () => Promise.resolve({})}); };
+            document.getElementById('viewBarContainer').innerHTML = viewBarHtml();
+            sharkStatus = {status: 'running'};
+            await switchAnalysisView('shark');
+            window.__jsdom_result = {calls: calls, view: currentView, toast: (document.querySelector('.socrates-toast') || {}).textContent || ''};
+        """)
+        self.assertEqual(result['calls'], 0)
+        self.assertEqual(result['view'], 'suricata')
+        self.assertIn('tshark is analyzing', result['toast'])
+
+    def test_a_status_reply_for_an_analysis_the_user_left_is_dropped(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""
+            window.fetch = function() { currentMd5 = 'b'.repeat(32); return Promise.resolve({json: () => Promise.resolve({status: 'ready', flows: 1, app_protos: {}})}); };
+            currentMd5 = 'a'.repeat(32);
+            sharkStatus = null;
+            await refreshSharkStatus('a'.repeat(32));
+            window.__jsdom_result = sharkStatus;
+        """)
+        self.assertIsNone(result)
+
+    def test_shark_crates_flows_show_their_protocol_instead_of_suricata_state(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""
+            var suri = getColumnsForType('flow');
+            currentView = 'shark';
+            var shark = getColumnsForType('flow');
+            var e = {id: 1, event_type: 'flow', proto: 'TCP', app_proto: 's7comm', src_ip: '10.0.0.1', dest_ip: '10.0.0.2',
+                     flow: {pkts_toserver: 2, pkts_toclient: 3, bytes_toserver: 100, bytes_toclient: 200, age: 1},
+                     shark: {protocols: {s7comm: 4, cotp: 1}}};
+            var tr = document.createElement('tbody');
+            tr.innerHTML = buildRowForEvent(e);
+            window.__jsdom_result = {
+                suri: suri, shark: shark,
+                cells: [...tr.querySelector('tr').children].map(td => td.textContent),
+                appProto: extractValue(e, 'App Proto'),
+                details: renderFlowDetails(e),
+            };
+        """)
+        self.assertIn('State', result['suri'])
+        self.assertNotIn('State', result['shark'])
+        self.assertNotIn('Alerted', result['shark'])
+        self.assertEqual(result['shark'][6], 'App Proto')
+        self.assertEqual(len(result['cells']), len(result['shark']) + 1, 'one cell per column, plus the row-note cell')
+        self.assertEqual(result['cells'][6], 's7comm')
+        self.assertEqual(result['appProto'], 's7comm')
+        self.assertIn('s7comm (4 packets), cotp (1 packet)', result['details'])
+        self.assertNotIn('Alerted', result['details'])
+
+    def test_row_notes_are_off_in_the_shark_crates_view(self):
+        """Row notes are stored against events.db's row ids - one added to
+        a SHAR-CRATES row would land on whichever Suricata row has the same
+        number."""
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""
+            var suri = rowNoteDetailHtml('events', 5, '');
+            currentView = 'shark';
+            var opened = false;
+            showNotesModal = function() { opened = true; };
+            openRowNoteEditor('events', '5', '');
+            window.__jsdom_result = {suri: suri, shark: rowNoteDetailHtml('events', 5, ''), opened: opened,
+                                     toast: (document.querySelector('.socrates-toast') || {}).textContent || ''};
+        """)
+        self.assertIn('Add Note', result['suri'])
+        self.assertEqual(result['shark'], '')
+        self.assertFalse(result['opened'])
+        self.assertIn('switch back', result['toast'])
+
+    def test_toggle_only_on_pcap_analyses_and_every_analysis_opens_on_suri_crates(self):
+        load = JS_CONTENT[JS_CONTENT.index('async function loadAnalysis(md5)'):]
+        load = load[:load.index('\n        }\n')]
+        self.assertIn("document.getElementById('viewBarContainer').innerHTML = isPcap ? viewBarHtml() : '';", load)
+        self.assertLess(load.index("currentView = 'suricata';"), load.index("fetch('/api/stats?md5="))
+        welcome = JS_CONTENT[JS_CONTENT.index('async function showWelcome()'):]
+        self.assertIn("currentView = 'suricata';", welcome[:welcome.index('\n        }\n')])
+
+    def test_pivot_menu_offers_the_same_flow_in_the_other_view(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""
+            document.getElementById('viewBarContainer').innerHTML = viewBarHtml();
+            function items() {
+                return [...document.querySelectorAll('.pivot-menu .pivot-menu-item')].map(b => b.textContent.trim());
+            }
+            sharkStatus = {status: 'running'};
+            showPivotMenu({clientX: 1, clientY: 1}, null, 'Dest IP', '10.0.0.2', false, null, '1:abc=');
+            var notReady = items();
+            sharkStatus = {status: 'ready', flows: 1, app_protos: {}};
+            showPivotMenu({clientX: 1, clientY: 1}, null, 'Dest IP', '10.0.0.2', false, null, '1:abc=');
+            var ready = items();
+            currentView = 'shark';
+            showPivotMenu({clientX: 1, clientY: 1}, null, 'Dest IP', '10.0.0.2', false, null, '1:abc=');
+            var fromShark = items();
+            showPivotMenu({clientX: 1, clientY: 1}, null, 'Dest IP', '10.0.0.2', false, null, null);
+            var noCid = items();
+            window.__jsdom_result = {notReady: notReady, ready: ready, fromShark: fromShark, noCid: noCid};
+        """)
+        self.assertNotIn('View in SHAR-CRATES', result['notReady'])
+        self.assertIn('View in SHAR-CRATES', result['ready'])
+        self.assertIn('View in SURI-CRATES', result['fromShark'])
+        self.assertFalse(any(i.startswith('View in') for i in result['noCid']), 'needs a Community ID to match on')
+
+    def test_refresh_falls_back_to_the_first_tab_when_the_open_one_is_gone(self):
+        """REGRESSION: with the open tab's type missing from the new data
+        (Network Alerts open, then switching to SHAR-CRATES, which has no
+        alerts), every section was hidden and nothing loaded."""
+        body = JS_CONTENT[JS_CONTENT.index('async function refreshAnalysisData()'):]
+        body = body[:body.index('updateFilterBarVisibility();\n            // See seedVerticalNavSelectionIfStale')]
+        self.assertIn("const sectionEl = activeType && activeType !== eventTypes[0]\n                    ? document.getElementById('section-' + activeType) : null;", body)
+        self.assertIn('if (sectionEl) {', body)
+        self.assertIn('} else if (eventTypes[0]) {\n                    await loadTabData(eventTypes[0], null);', body)
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

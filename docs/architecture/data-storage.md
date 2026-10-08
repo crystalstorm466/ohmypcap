@@ -25,6 +25,8 @@
     .meta                  # Analysis metadata (file type, extracted name, version)
     eve.json               # Suricata JSON output (newline-delimited, PCAP only)
     events.db              # SQLite index (auto-created after analysis)
+    shark.db               # SHAR-CRATES (tshark) records - same schema as events.db, built in the background after Suricata (PCAP only)
+    .shark_error           # Present only if the last SHAR-CRATES run failed; contains the error message
     name.txt               # Human-readable display name
     notes.txt              # Freeform per-analysis notes (optional, written by POST /api/analysis-notes)
     filestore/             # Extracted files from Suricata file-store (PCAP), or an email's message and decoded attachments (email)

@@ -1303,6 +1303,19 @@
         .app-header-filename-input:focus { outline: none; border-color: var(--interactive-highlight, var(--accent)); }
         .app-header-right { display: flex; align-items: center; gap: 15px; flex-wrap: wrap; justify-content: flex-end; }
         .app-header-meta { display: flex; align-items: center; gap: 15px; margin-left: 15px; }
+        /* View bar (PCAP analyses): SURI-CRATES and SHAR-CRATES as two tabs between the header and the search box, SHAR-CRATES' status beside them */
+        .view-bar { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; border-bottom: 1px solid var(--border-color); margin-bottom: 15px; }
+        .view-toggle { display: inline-flex; flex-shrink: 0; }
+        .view-toggle-btn { background: none; border: none; border-bottom: 2px solid transparent; margin-bottom: -1px; color: var(--text-muted); padding: 8px 14px; font-size: 0.8rem; font-weight: 600; letter-spacing: 1px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; font-family: inherit; }
+        .view-toggle-btn:hover { color: var(--text-primary); }
+        .view-toggle-btn.active { color: var(--text-primary); border-bottom-color: var(--interactive-highlight, var(--accent)); }
+        .view-toggle-btn:focus-visible { outline: 2px solid var(--interactive-highlight, var(--accent)); outline-offset: -2px; }
+        .view-bar-status { color: var(--text-muted); font-size: 0.8rem; padding: 8px 0; }
+        .view-bar-status a { color: var(--accent); font-weight: 600; }
+        /* SHAR-CRATES' state on its tab: a spinning ring while tshark works, a dot when it needs a click (too large to run unasked, or failed) */
+        .view-toggle-status { display: none; width: 8px; height: 8px; border-radius: 50%; box-sizing: border-box; }
+        .view-toggle-busy .view-toggle-status { display: inline-block; border: 2px solid var(--text-muted); border-top-color: transparent; animation: spin 1s linear infinite; }
+        .view-toggle-attention .view-toggle-status { display: inline-block; background: var(--accent); }
         /* Centers in the full header bar (.app-header is position: fixed,
            so it's the containing block here), independent of how wide the
            left-side icon/filename group happens to be - same reasoning as

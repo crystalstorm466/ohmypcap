@@ -13,6 +13,23 @@ After analysis completes, the UI displays different views depending on the file 
 - **Search** - full-text search across all event data using SQLite FTS5 (falls back to `LIKE` if FTS5 is unavailable)
 - **Filtering** - filter via the pivot menu's Include/Exclude/Only actions on any table cell or aggregation value; filter chips show active filters; filters persist across all tabs and the Sankey diagram
 
+### SURI-CRATES and SHAR-CRATES
+
+A PCAP analysis has two views of the same capture, switched with the **SURI-CRATES** and **SHAR-CRATES** tabs above the search box:
+
+- **SURI-CRATES** is Suricata's view - alerts, flows and protocol records - and is what every PCAP analysis opens on
+- **SHAR-CRATES** is tshark's view. tshark (Wireshark's command-line engine) decodes far more protocols than Suricata, but packet by packet; SHAR-CRATES groups those packets into records shaped like Suricata's: one **Flow** per conversation, showing the protocol tshark found in it (**App Proto**), plus one record per transaction for DNS, HTTP, TLS and Modbus. The same tabs, aggregation tables, Sankey diagram, search and pivot menu work on both. SHAR-CRATES has no alerts - detection is Suricata's
+
+SHAR-CRATES starts by itself in the background as soon as Suricata finishes, so it's usually ready by the time you want it. Beside the tabs, SO-CRATES says where it is: "Analyzing with tshark…" while it works (with a spinning ring on its tab), then how many flows and protocols tshark found. A capture over 250 MB isn't analyzed until you ask, because tshark's memory use grows with the capture - click **Analyze now** (or the SHAR-CRATES tab) to start it. If a run fails, the reason is shown with a **Try again** link.
+
+Switching views keeps your search and filters, so you land on the same slice of traffic in the other view. To follow one flow from one view to the other, open the pivot menu on any of its rows and choose **View in SHAR-CRATES** (or **View in SURI-CRATES**) - it finds the same flow by its Community ID, which both views compute identically.
+
+Where both views decode a protocol, they agree on every field they share, with a few differences in how they count:
+
+- **DNS** - Suricata logs a query and its response as two records; SHAR-CRATES makes them one, so its DNS count is the number of queries
+- **HTTP** - for a response with no `Content-Length` header, Suricata counts the body's length itself; SHAR-CRATES leaves the length empty
+- **Row notes** are kept with SURI-CRATES, so a SHAR-CRATES row can't have one
+
 **For log files (`.evtx`, `.json`, `.jsonl`, `.csv`, `.xml`, `.log`):**
 
 - **Sigma Alerts** - detections matched by Sigma rules, with severity, MITRE techniques, and rule metadata

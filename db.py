@@ -1068,6 +1068,9 @@ AGGREGATION_JSON_PATHS = {
         'Bytes ←': ['$.flow.bytes_toclient'],
         'State': ['$.flow.state'],
         'Alerted': ['$.flow.alerted'],
+        # SHAR-CRATES' flow table shows this in place of State/Alerted,
+        # which only Suricata records.
+        'App Proto': ['$.app_proto'],
     },
     'fileinfo': {
         'Filename': ['$.fileinfo.filename'],
@@ -1364,12 +1367,13 @@ _FLOW_JSON_INDEX_NAMES = {
     'Pkts →': 'idx_flow_pkts_toserver', 'Pkts ←': 'idx_flow_pkts_toclient',
     'Bytes →': 'idx_flow_bytes_toserver', 'Bytes ←': 'idx_flow_bytes_toclient',
     'State': 'idx_flow_state', 'Alerted': 'idx_flow_alerted',
+    'App Proto': 'idx_flow_app_proto',
 }
 
 
 def _ensure_flow_json_indexes(conn):
-    """Backfill covering indexes for flow's 6 JSON-extracted aggregation
-    columns (Pkts/Bytes/State/Alerted) - measured as the standout bottleneck
+    """Backfill covering indexes for flow's 7 JSON-extracted aggregation
+    columns (Pkts/Bytes/State/Alerted, and App Proto for SHAR-CRATES) - measured as the standout bottleneck
     at 1M+ rows (~2s per column, unindexed json_extract() over the full
     json_data blob). event_type leads each index, matching the real-column
     fix in _ensure_ip_port_indexes. Built from the real _aggregation_expr()

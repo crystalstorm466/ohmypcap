@@ -3042,6 +3042,13 @@
             const correlateHtml = (communityId && String(value) !== String(communityId))
                 ? `<button type="button" class="pivot-menu-item" data-pivot-action="correlate" title="${escapeHtml(correlateTitle)}"><span class="pivot-menu-icon">${LINK_ICON_SVG}</span>Correlate</button>`
                 : '';
+            // The same flow in the other view (PCAP analyses only, once
+            // SHAR-CRATES has something to show) - see viewFlowInOtherView.
+            const otherViewName = currentView === 'shark' ? 'SURI-CRATES' : 'SHAR-CRATES';
+            const otherViewHtml = (communityId && document.getElementById('viewToggle')
+                    && (currentView === 'shark' || (sharkStatus && sharkStatus.status === 'ready')))
+                ? `<button type="button" class="pivot-menu-item" data-pivot-action="other-view" title="${escapeHtml(`Show this flow (Community ID ${communityId}) in ${otherViewName}`)}"><span class="pivot-menu-icon">${LINK_ICON_SVG}</span>View in ${otherViewName}</button>`
+                : '';
             menu.innerHTML = `
                 <div class="pivot-menu-label" title="${escapeHtml(fullLabel)}">${escapeHtml(col)}: ${escapeHtml(valueLabel)}</div>
                 ${expandRowHtml}
@@ -3049,6 +3056,7 @@
                 ${filterButtonsHtml}
                 <button type="button" class="pivot-menu-item" data-pivot-action="hunt" title="${escapeHtml(huntTitle)}"><span class="pivot-menu-icon">${SEARCH_ICON_SVG}</span>Hunt</button>
                 ${correlateHtml}
+                ${otherViewHtml}
                 <div class="pivot-menu-divider"></div>
                 <button type="button" class="pivot-menu-item" data-pivot-action="copy"><span class="pivot-menu-icon">${COPY_ICON_SVG}</span>Copy to Clipboard</button>
                 ${lookupSitesHtml}
@@ -3097,6 +3105,12 @@
                 menu.querySelector('[data-pivot-action="correlate"]').addEventListener('click', function() {
                     closePivotMenu();
                     huntFilterValue(communityId);
+                });
+            }
+            if (otherViewHtml) {
+                menu.querySelector('[data-pivot-action="other-view"]').addEventListener('click', function() {
+                    closePivotMenu();
+                    viewFlowInOtherView(communityId);
                 });
             }
             menu.querySelector('[data-pivot-action="copy"]').addEventListener('click', function() {
@@ -3673,6 +3687,7 @@
 
         function renderFlowDetails(e) {
             let html = htmlSection('Flow Details', COLORS.EVENT.flow);
+            if (e.shark) return html + renderSharkFlowDetails(e);
             html += htmlRowText('State', e.flow?.state);
             // An age of 0 is real (not missing) - only a missing one is blank.
             html += htmlRowText('Age', e.flow?.age == null ? '' : `${e.flow.age} seconds`);
@@ -3681,6 +3696,23 @@
             html += htmlRowText('Bytes to Server', (e.flow?.bytes_toserver || 0).toLocaleString());
             html += htmlRowText('Bytes to Client', (e.flow?.bytes_toclient || 0).toLocaleString());
             html += htmlRowText('Alerted', e.flow?.alerted ? 'Yes' : 'No');
+            return html;
+        }
+
+        // A SHAR-CRATES flow (shark_analyzer.py): no Suricata state or
+        // alerts, but every protocol tshark found in the flow, with how many
+        // packets carried each.
+        function renderSharkFlowDetails(e) {
+            let html = htmlRowText('App Proto', e.app_proto, 'mono');
+            html += htmlRowText('Age', e.flow?.age == null ? '' : `${e.flow.age} seconds`);
+            html += htmlRowText('Pkts to Server', (e.flow?.pkts_toserver || 0).toLocaleString());
+            html += htmlRowText('Pkts to Client', (e.flow?.pkts_toclient || 0).toLocaleString());
+            html += htmlRowText('Bytes to Server', (e.flow?.bytes_toserver || 0).toLocaleString());
+            html += htmlRowText('Bytes to Client', (e.flow?.bytes_toclient || 0).toLocaleString());
+            const protocols = Object.entries(e.shark?.protocols || {});
+            if (protocols.length) {
+                html += htmlRowText('Protocols', protocols.map(([name, n]) => `${name} (${n} packet${n === 1 ? '' : 's'})`).join(', '), 'mono');
+            }
             return html;
         }
 
@@ -4059,6 +4091,7 @@
             document.getElementById('sections').innerHTML = '';
             document.getElementById('filterBarContainer').innerHTML = '';
             document.getElementById('filterBarContainer').style.display = 'none';
+            document.getElementById('viewBarContainer').innerHTML = '';
             document.querySelectorAll('.file-info-card').forEach(c => c.remove());
             const fileInfoContainer = document.getElementById('fileInfoContainer');
             if (fileInfoContainer) {
@@ -4409,6 +4442,8 @@
         async function showWelcome() {
             document.title = 'SO-CRATES';
             closeAllModals();
+            stopSharkPolling();
+            currentView = 'suricata';
             if (window.location.search.includes('file=') || window.location.search.includes('pcap=')) {
                 history.replaceState({}, '', window.location.pathname);
             }
@@ -6884,6 +6919,13 @@
                 case 'tls':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'SNI / Host', 'Version', 'Subject', 'Issuer'];
                 case 'flow':
+                    // SHAR-CRATES' flows have no State or Alerted (Suricata's
+                    // own flow tracking and detection) - and their protocol
+                    // is the point: it's what shows traffic Suricata doesn't
+                    // parse at all.
+                    if (currentView === 'shark') {
+                        return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'App Proto', 'Pkts →', 'Pkts ←', 'Bytes →', 'Bytes ←'];
+                    }
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Pkts →', 'Pkts ←', 'Bytes →', 'Bytes ←', 'State', 'Alerted'];
                 case 'fileinfo':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Filename'];
@@ -7028,6 +7070,10 @@
         // rowNoteIconHtml above); editing an existing one works from
         // either place.
         function rowNoteDetailHtml(table, id, note) {
+            // Row notes are stored against events.db's row ids - a
+            // SHAR-CRATES row's id belongs to shark.db, so a note there would
+            // land on whichever Suricata row has the same number.
+            if (currentView === 'shark') return '';
             return htmlSection('Notes', 'var(--accent)') + `<span class="detail-label">Note</span>${rowNoteDetailValueHtml(table, id, note)}`;
         }
 
@@ -7198,8 +7244,12 @@
                     const alerted = e.flow?.alerted || false;
                     const alertedColor = alerted ? 'var(--badge-danger-text)' : 'var(--badge-success-text)';
                     const alertedText = alerted ? 'Yes' : 'No';
-                    colSpan = 12;
-                    row = rowPrefixCells(e) + `<td>${escapeHtml(String(pktsTs.toLocaleString()))}</td><td>${escapeHtml(String(pktsTc.toLocaleString()))}</td><td>${escapeHtml(String(bytesTs.toLocaleString()))}</td><td>${escapeHtml(String(bytesTc.toLocaleString()))}</td><td>${escapeHtml(state)}</td><td>${valueDotSpan(alertedColor)}${escapeHtml(alertedText)}</td></tr>`;
+                    const countCells = `<td>${escapeHtml(String(pktsTs.toLocaleString()))}</td><td>${escapeHtml(String(pktsTc.toLocaleString()))}</td><td>${escapeHtml(String(bytesTs.toLocaleString()))}</td><td>${escapeHtml(String(bytesTc.toLocaleString()))}</td>`;
+                    // Same columns as getColumnsForType('flow') - see there.
+                    colSpan = currentView === 'shark' ? 11 : 12;
+                    row = currentView === 'shark'
+                        ? rowPrefixCells(e) + `<td class="mono">${escapeHtml(e.app_proto || '')}</td>` + countCells + '</tr>'
+                        : rowPrefixCells(e) + countCells + `<td>${escapeHtml(state)}</td><td>${valueDotSpan(alertedColor)}${escapeHtml(alertedText)}</td></tr>`;
                     break;
                 case 'fileinfo':
                     const filename = e.fileinfo?.filename || '';
@@ -8981,7 +9031,7 @@
                 // wrong dataset and then sticking with the wrong count
                 // once dnsHeuristicsCountStale flipped back to false.
                 const qParam = buildSearchQuery();
-                const resp = await fetch(`/api/events?md5=${encodeURIComponent(md5)}&type=dns&limit=${getUserQueryLimit()}${qParam}&t=${Date.now()}`);
+                const resp = await fetch(`/api/events?md5=${encodeURIComponent(md5)}${viewParam()}&type=dns&limit=${getUserQueryLimit()}${qParam}&t=${Date.now()}`);
                 const events = await resp.json();
                 if (currentMd5 !== md5) {
                     // The user switched analyses while this fetch was in
@@ -9018,7 +9068,7 @@
             const md5 = currentMd5;
             try {
                 const [alertResp, sigmaResp] = await Promise.all([
-                    fetch(`/api/count?md5=${encodeURIComponent(md5)}&type=alert&acknowledged=only&t=${Date.now()}`),
+                    fetch(`/api/count?md5=${encodeURIComponent(md5)}${viewParam()}&type=alert&acknowledged=only&t=${Date.now()}`),
                     fetch(`/api/sigma-count?md5=${encodeURIComponent(md5)}&acknowledged=only&t=${Date.now()}`)
                 ]);
                 const alertCount = (await alertResp.json()).count || 0;
@@ -9357,7 +9407,7 @@
             const qParam = buildSearchQuery();
             const limit = getUserQueryLimit();
             const [alertResp, sigmaResp] = await Promise.all([
-                fetch(`/api/events?md5=${encodeURIComponent(currentMd5)}&type=alert&acknowledged=only&limit=${limit}${qParam}&t=${Date.now()}`),
+                fetch(`/api/events?md5=${encodeURIComponent(currentMd5)}${viewParam()}&type=alert&acknowledged=only&limit=${limit}${qParam}&t=${Date.now()}`),
                 fetch(`/api/sigma-alerts?md5=${encodeURIComponent(currentMd5)}&acknowledged=only&limit=${limit}${qParam}&t=${Date.now()}`)
             ]);
             acknowledgedAlertsCache = {
@@ -9719,7 +9769,7 @@
                 case 'Reply': return (e.ftp?.reply || []).join(' | ');
                 case 'Event': return e.anomaly?.event || '';
                 case 'Layer': return e.anomaly?.layer || '';
-                case 'App Proto': return e.anomaly?.app_proto || '';
+                case 'App Proto': return e.event_type === 'anomaly' ? (e.anomaly?.app_proto || '') : (e.app_proto || '');
                 case 'Stratum': return e.ntp?.stratum !== undefined ? String(e.ntp.stratum) : '';
                 case 'Reference ID': return e.ntp?.reference_id || '';
                 case 'Opcode': {
@@ -9882,6 +9932,15 @@
         function bumpFetchGeneration() { return ++fetchGeneration; }
         function isStaleFetch(gen) { return gen !== fetchGeneration; }
 
+        // SHAR-CRATES: which of a PCAP analysis's two views is showing -
+        // 'suricata' (SURI-CRATES, events.db, the default) or 'shark'
+        // (SHAR-CRATES, the tshark view in shark.db). Every data request
+        // carries it through viewParam(), so the whole analysis page reads
+        // whichever database is selected; the server ignores it for
+        // anything but a PCAP.
+        var currentView = 'suricata';
+        function viewParam() { return currentView === 'shark' ? '&view=shark' : ''; }
+
         // Sankey gets its own, separate generation counter rather than
         // sharing fetchGeneration above. REGRESSION (recurring): every
         // unrelated caller of bumpFetchGeneration() (pagination, sort, a
@@ -9916,8 +9975,8 @@
                 ? `&order_by=${encodeURIComponent(getColumnsForType(eventType)[currentSort.colIndex])}&sort_dir=${currentSort.asc ? 'asc' : 'desc'}`
                 : '';
             const [rowsResp, countResp] = await Promise.all([
-                fetch(`/api/events?md5=${encodeURIComponent(currentMd5)}${typeParam}&offset=${offset}&limit=${CONFIG.TABLE_PAGE_SIZE}${qParam}${sortParam}&t=${Date.now()}`),
-                fetch(`/api/count?md5=${encodeURIComponent(currentMd5)}${typeParam}${qParam}&t=${Date.now()}`)
+                fetch(`/api/events?md5=${encodeURIComponent(currentMd5)}${viewParam()}${typeParam}&offset=${offset}&limit=${CONFIG.TABLE_PAGE_SIZE}${qParam}${sortParam}&t=${Date.now()}`),
+                fetch(`/api/count?md5=${encodeURIComponent(currentMd5)}${viewParam()}${typeParam}${qParam}&t=${Date.now()}`)
             ]);
             const items = await rowsResp.json();
             const { count } = await countResp.json();
@@ -9943,7 +10002,7 @@
         async function fetchSankeyData(eventType) {
             const qParam = buildSearchQuery();
             const typeParam = (eventType && eventType !== 'all') ? `&type=${eventType}` : '';
-            const resp = await fetch(`/api/sankey-data?md5=${encodeURIComponent(currentMd5)}${typeParam}${qParam}&t=${Date.now()}`);
+            const resp = await fetch(`/api/sankey-data?md5=${encodeURIComponent(currentMd5)}${viewParam()}${typeParam}${qParam}&t=${Date.now()}`);
             return await resp.json();
         }
 
@@ -10025,7 +10084,7 @@
             const typeParam = (eventType && eventType !== 'all') ? `&type=${eventType}` : '';
             const columnParam = column ? `&column=${encodeURIComponent(column)}` : '';
             const pageParam = page ? `&page=${page}` : '';
-            const resp = await fetch(`/api/aggregation-data?md5=${encodeURIComponent(currentMd5)}${typeParam}${columnParam}${pageParam}&page_size=${AGG_PAGE_SIZE}${qParam}&t=${Date.now()}`);
+            const resp = await fetch(`/api/aggregation-data?md5=${encodeURIComponent(currentMd5)}${viewParam()}${typeParam}${columnParam}${pageParam}&page_size=${AGG_PAGE_SIZE}${qParam}&t=${Date.now()}`);
             return await resp.json();
         }
 
@@ -10038,7 +10097,7 @@
         async function fetchAggregationTotals(eventType) {
             const qParam = buildSearchQuery();
             const typeParam = (eventType && eventType !== 'all') ? `&type=${eventType}` : '';
-            const resp = await fetch(`/api/aggregation-totals?md5=${encodeURIComponent(currentMd5)}${typeParam}${qParam}&t=${Date.now()}`);
+            const resp = await fetch(`/api/aggregation-totals?md5=${encodeURIComponent(currentMd5)}${viewParam()}${typeParam}${qParam}&t=${Date.now()}`);
             return await resp.json();
         }
 
@@ -10072,8 +10131,8 @@
             if (eventType === 'all') {
                 if (allEvents.length > 0) return;
                 const [resp, countResp] = await Promise.all([
-                    fetch(`/api/events?md5=${encodeURIComponent(currentMd5)}&limit=${getUserQueryLimit()}${qParam}&t=${Date.now()}`),
-                    fetch(`/api/count?md5=${encodeURIComponent(currentMd5)}${qParam}&t=${Date.now()}`)
+                    fetch(`/api/events?md5=${encodeURIComponent(currentMd5)}${viewParam()}&limit=${getUserQueryLimit()}${qParam}&t=${Date.now()}`),
+                    fetch(`/api/count?md5=${encodeURIComponent(currentMd5)}${viewParam()}${qParam}&t=${Date.now()}`)
                 ]);
                 allEvents = await resp.json();
                 const { count } = await countResp.json();
@@ -10086,8 +10145,8 @@
             const countEndpoint = eventType === 'sigmaalert' ? '/api/sigma-count' : '/api/count';
             const typeParam = eventType === 'sigmaalert' ? '' : `&type=${eventType}`;
             const [resp, countResp] = await Promise.all([
-                fetch(`${endpoint}?md5=${encodeURIComponent(currentMd5)}${typeParam}&limit=${limit}${qParam}&t=${Date.now()}`),
-                fetch(`${countEndpoint}?md5=${encodeURIComponent(currentMd5)}${typeParam}${qParam}&t=${Date.now()}`)
+                fetch(`${endpoint}?md5=${encodeURIComponent(currentMd5)}${viewParam()}${typeParam}&limit=${limit}${qParam}&t=${Date.now()}`),
+                fetch(`${countEndpoint}?md5=${encodeURIComponent(currentMd5)}${viewParam()}${typeParam}${qParam}&t=${Date.now()}`)
             ]);
             tabDataCache[eventType] = await resp.json();
             const { count } = await countResp.json();
@@ -10104,8 +10163,8 @@
         async function fetchBinaryEvents(qParam) {
             const q = qParam || '';
             const [fileAlertsResp, fileInfoResp] = await Promise.all([
-                fetch(`/api/events?md5=${encodeURIComponent(currentMd5)}&type=filealerts&limit=${getUserQueryLimit()}${q}&t=${Date.now()}`),
-                fetch(`/api/events?md5=${encodeURIComponent(currentMd5)}&type=fileinfo&limit=1${q}&t=${Date.now()}`)
+                fetch(`/api/events?md5=${encodeURIComponent(currentMd5)}${viewParam()}&type=filealerts&limit=${getUserQueryLimit()}${q}&t=${Date.now()}`),
+                fetch(`/api/events?md5=${encodeURIComponent(currentMd5)}${viewParam()}&type=fileinfo&limit=1${q}&t=${Date.now()}`)
             ]);
             const [fileAlerts, fileInfo] = await Promise.all([fileAlertsResp.json(), fileInfoResp.json()]);
             return [...fileInfo, ...fileAlerts];
@@ -11156,7 +11215,7 @@
         // scalable fetch).
         async function _fetchLogAnalysisCounts(qParam) {
             const [logResp, sigmaResp] = await Promise.all([
-                fetch(`/api/count?md5=${encodeURIComponent(currentMd5)}&type=log${qParam || ''}&t=${Date.now()}`),
+                fetch(`/api/count?md5=${encodeURIComponent(currentMd5)}${viewParam()}&type=log${qParam || ''}&t=${Date.now()}`),
                 fetch(`/api/sigma-count?md5=${encodeURIComponent(currentMd5)}${qParam || ''}&t=${Date.now()}`)
             ]);
             const { count: logCount } = await logResp.json();
@@ -11244,8 +11303,8 @@
                 const qParam = buildSearchQuery();
 
                 const [statsResp, baseStatsResp] = await Promise.all([
-                    fetch('/api/stats?md5=' + encodeURIComponent(currentMd5) + qParam + '&t=' + Date.now()),
-                    fetch('/api/stats?md5=' + encodeURIComponent(currentMd5) + '&t=' + Date.now())
+                    fetch('/api/stats?md5=' + encodeURIComponent(currentMd5) + viewParam() + qParam + '&t=' + Date.now()),
+                    fetch('/api/stats?md5=' + encodeURIComponent(currentMd5) + viewParam() + '&t=' + Date.now())
                 ]);
                 const statsCounts = (await statsResp.json()).counts;
                 const baseStatsCounts = (await baseStatsResp.json()).counts;
@@ -11341,28 +11400,31 @@
                 tabDataCache = {};
                 buildSections();
 
-                // Restore active section after rebuild
-                if (activeType && activeType !== eventTypes[0]) {
+                // Restore active section after rebuild - unless that tab is
+                // gone from the new data (switching to the SHAR-CRATES view,
+                // which has no alerts, or a search that matched none of its
+                // type), in which case the first tab opens as on a fresh
+                // load rather than every section staying hidden.
+                const sectionEl = activeType && activeType !== eventTypes[0]
+                    ? document.getElementById('section-' + activeType) : null;
+                if (sectionEl) {
                     document.querySelectorAll('.section').forEach(s => s.classList.add('section-hidden'));
-                    const sectionEl = document.getElementById('section-' + activeType);
-                    if (sectionEl) {
-                        sectionEl.classList.remove('section-hidden');
-                        await loadTabData(activeType, null);
-                        // Un-acknowledging the last remaining row (either
-                        // type) empties the tab the user is currently
-                        // looking at - staying there would just show its
-                        // own "No acknowledged ..." empty state, which
-                        // reads as "did that even work?" rather than the
-                        // clear confirmation of landing back on Network
-                        // Alerts and seeing the row reappear. section-alert
-                        // is guaranteed to exist here: buildSections() above
-                        // already re-ran off the fresh (post-un-acknowledge)
-                        // /api/stats counts, so the row just un-acknowledged
-                        // has already made 'alert' a real eventType again.
-                        if (activeType === 'acknowledged' && acknowledgedAlertsCache.alert.length === 0
-                                && acknowledgedAlertsCache.sigmaalert.length === 0 && document.getElementById('section-alert')) {
-                            showTab('section-alert');
-                        }
+                    sectionEl.classList.remove('section-hidden');
+                    await loadTabData(activeType, null);
+                    // Un-acknowledging the last remaining row (either
+                    // type) empties the tab the user is currently
+                    // looking at - staying there would just show its
+                    // own "No acknowledged ..." empty state, which
+                    // reads as "did that even work?" rather than the
+                    // clear confirmation of landing back on Network
+                    // Alerts and seeing the row reappear. section-alert
+                    // is guaranteed to exist here: buildSections() above
+                    // already re-ran off the fresh (post-un-acknowledge)
+                    // /api/stats counts, so the row just un-acknowledged
+                    // has already made 'alert' a real eventType again.
+                    if (activeType === 'acknowledged' && acknowledgedAlertsCache.alert.length === 0
+                            && acknowledgedAlertsCache.sigmaalert.length === 0 && document.getElementById('section-alert')) {
+                        showTab('section-alert');
                     }
                 } else if (eventTypes[0]) {
                     await loadTabData(eventTypes[0], null);
@@ -11465,6 +11527,151 @@
         }
 
         // Cheap "has notes" signal in the header, without opening the modal.
+        // SHAR-CRATES toggle (PCAP analyses only): SURI-CRATES is Suricata's
+        // view of the capture, SHAR-CRATES tshark's (shark_analyzer.py),
+        // built in the background once Suricata finishes. sharkStatus is
+        // the last GET /api/shark-status response for currentMd5; while
+        // tshark is still working it's polled until it settles.
+        var sharkStatus = null;
+        var sharkPollTimer = null;
+        const SHARK_POLL_MS = 2000;
+        const SHARK_BUSY_STATES = new Set(['queued', 'running', 'waiting']);
+
+        // The view bar: SURI-CRATES and SHAR-CRATES as two tabs, between
+        // the header and the search box (it switches everything below it,
+        // search included), with SHAR-CRATES' state spelled out beside them.
+        function viewBarHtml() {
+            return `<div class="view-bar">`
+                + `<span id="viewToggle" class="view-toggle" role="group" aria-label="Analysis view">`
+                + `<button type="button" class="view-toggle-btn" data-action="switch-view" data-arg="suricata" aria-pressed="true" title="SURI-CRATES: Suricata's view of this capture - alerts, flows and protocol records">SURI-CRATES</button>`
+                + `<button type="button" class="view-toggle-btn" data-action="switch-view" data-arg="shark" aria-pressed="false">SHAR-CRATES<span class="view-toggle-status" aria-hidden="true"></span></button>`
+                + `</span>`
+                + `<span id="viewBarStatus" class="view-bar-status" aria-live="polite"></span>`
+                + `</div>`;
+        }
+
+        function sharkToggleTitle(status) {
+            const st = status && status.status;
+            if (st === 'ready') {
+                const protocols = Object.keys(status.app_protos || {}).filter(p => p).length;
+                return `SHAR-CRATES: tshark's view of this capture - ${status.flows} flow${status.flows === 1 ? '' : 's'}, ${protocols} protocol${protocols === 1 ? '' : 's'}`;
+            }
+            if (st === 'waiting') return 'SHAR-CRATES: starts once Suricata finishes';
+            if (st === 'queued') return 'SHAR-CRATES: waiting for another capture\'s tshark analysis to finish';
+            if (st === 'running') return 'SHAR-CRATES: tshark is analyzing this capture';
+            if (st === 'too_large') return 'SHAR-CRATES: this capture is larger than SHAR-CRATES analyzes automatically - click to analyze it with tshark now (it can take a while, and uses more memory)';
+            if (st === 'error') return `SHAR-CRATES failed: ${status.message || 'tshark analysis failed'} - click to try again`;
+            return 'SHAR-CRATES: tshark\'s view of this capture';
+        }
+
+        // The status text beside the tabs - what sharkToggleTitle says, as
+        // HTML, with a link for the two states that need a click.
+        function sharkStatusHtml(status) {
+            const st = status && status.status;
+            if (st === 'ready') {
+                const protocols = Object.keys(status.app_protos || {}).filter(p => p).length;
+                return `tshark: ${escapeHtml(status.flows.toLocaleString())} flow${status.flows === 1 ? '' : 's'}, ${protocols} protocol${protocols === 1 ? '' : 's'}`;
+            }
+            if (st === 'waiting') return 'SHAR-CRATES starts once Suricata finishes';
+            if (st === 'queued') return 'SHAR-CRATES is waiting for another capture\'s tshark analysis to finish';
+            if (st === 'running') return 'Analyzing with tshark\u2026';
+            if (st === 'too_large') return 'This capture is larger than SHAR-CRATES analyzes automatically \u2013 <a href="#" data-action="switch-view" data-arg="shark">Analyze now</a>';
+            if (st === 'error') return `SHAR-CRATES failed: ${escapeHtml(status.message || 'tshark analysis failed')} \u2013 <a href="#" data-action="switch-view" data-arg="shark">Try again</a>`;
+            return '';
+        }
+
+        function updateViewToggle() {
+            const toggle = document.getElementById('viewToggle');
+            if (!toggle) return;
+            toggle.querySelectorAll('.view-toggle-btn').forEach(btn => {
+                const on = btn.dataset.arg === currentView;
+                btn.classList.toggle('active', on);
+                btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+            });
+            const shark = toggle.querySelector('[data-arg="shark"]');
+            const st = sharkStatus && sharkStatus.status;
+            shark.title = sharkToggleTitle(sharkStatus);
+            shark.classList.toggle('view-toggle-busy', SHARK_BUSY_STATES.has(st));
+            shark.classList.toggle('view-toggle-attention', st === 'too_large' || st === 'error');
+            const statusEl = document.getElementById('viewBarStatus');
+            if (statusEl) statusEl.innerHTML = sharkStatusHtml(sharkStatus);
+        }
+
+        function stopSharkPolling() {
+            if (sharkPollTimer) clearTimeout(sharkPollTimer);
+            sharkPollTimer = null;
+        }
+
+        // Fetches (or, with start, requests) this analysis's SHAR-CRATES
+        // status, re-polling while tshark is busy. md5 pins it to the
+        // analysis it was started for, so a reply or poll for an analysis
+        // the user has since left is dropped.
+        async function refreshSharkStatus(md5, start) {
+            stopSharkPolling();
+            let status;
+            try {
+                const resp = start
+                    ? await fetch('/api/shark-start', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({md5: md5})})
+                    : await fetch('/api/shark-status?md5=' + encodeURIComponent(md5) + '&t=' + Date.now());
+                status = await resp.json();
+            } catch (e) {
+                status = {status: 'error', message: 'Could not reach the server'};
+            }
+            if (md5 !== currentMd5) return;
+            sharkStatus = status;
+            updateViewToggle();
+            if (SHARK_BUSY_STATES.has(status.status)) {
+                sharkPollTimer = setTimeout(() => refreshSharkStatus(md5), SHARK_POLL_MS);
+            }
+        }
+
+        // Switches the open PCAP analysis between SURI-CRATES and
+        // SHAR-CRATES. The search and filters stay as they are -
+        // refreshAnalysisData() re-applies them to the other view's data -
+        // so an analyst lands on the same slice of traffic in the other
+        // tool. Anything cached from the old view is dropped first.
+        async function switchAnalysisView(view) {
+            if (view === currentView || !document.getElementById('viewToggle')) return;
+            if (view === 'shark') {
+                const st = sharkStatus && sharkStatus.status;
+                if (st === 'too_large' || st === 'error') {
+                    showToast(st === 'error' ? 'Retrying SHAR-CRATES...' : 'Analyzing this capture with tshark - SHAR-CRATES opens once it\'s ready');
+                    await refreshSharkStatus(currentMd5, true);
+                    return;
+                }
+                if (st !== 'ready') {
+                    showToast(sharkToggleTitle(sharkStatus));
+                    return;
+                }
+            }
+            setAnalysisView(view);
+            await refreshAnalysisData();
+        }
+
+        // Selects a view and drops everything cached from the other one -
+        // the caller then (re)loads the page's data.
+        function setAnalysisView(view) {
+            currentView = view;
+            updateViewToggle();
+            resetPagination();
+            aggPage = {}; aggFullCountsCache = {}; aggTotalsCache = {};
+            tabDataCache = {};
+        }
+
+        // The pivot menu's "View in SHAR-CRATES/SURI-CRATES": the same flow
+        // (by its Community ID, which both views compute identically) in the
+        // other view, through one search rather than a switch and then a
+        // second load.
+        async function viewFlowInOtherView(communityId) {
+            const other = currentView === 'shark' ? 'suricata' : 'shark';
+            if (other === 'shark' && !(sharkStatus && sharkStatus.status === 'ready')) {
+                showToast(sharkToggleTitle(sharkStatus));
+                return;
+            }
+            setAnalysisView(other);
+            await huntFilterValue(communityId);
+        }
+
         function notesIconHtml() {
             const color = currentNotes ? 'var(--accent)' : 'var(--text-muted)';
             const title = currentNotes ? 'View/edit notes' : 'Add notes';
@@ -11533,6 +11740,10 @@
         // rowNoteIconHtml/rowNoteDetailValueHtml). Parsed back to a real
         // number here before it's ever used as row-note state.
         function openRowNoteEditor(table, rowIdStr, note) {
+            if (currentView === 'shark') {
+                showToast('Row notes are kept with SURI-CRATES - switch back to add one');
+                return;
+            }
             showNotesModal(table, parseInt(rowIdStr, 10), note);
         }
 
@@ -11638,6 +11849,11 @@
 
                 if (result.success) {
                     currentMd5 = md5;
+                    // Every analysis opens on SURI-CRATES; SHAR-CRATES'
+                    // status is fetched below once we know it's a PCAP.
+                    currentView = 'suricata';
+                    sharkStatus = null;
+                    stopSharkPolling();
                     currentFileName = result.file_name || md5;
                     currentNotes = result.notes || '';
                     document.title = 'SO-CRATES - ' + currentFileName;
@@ -11673,7 +11889,7 @@
                     
                     showLoading('Loading events...');
                     
-                    const statsResp = await fetch('/api/stats?md5=' + encodeURIComponent(md5) + '&t=' + Date.now());
+                    const statsResp = await fetch('/api/stats?md5=' + encodeURIComponent(md5) + viewParam() + '&t=' + Date.now());
                     const statsData = await statsResp.json();
                     if (isStaleFetch(gen)) return;
                     eventStats = statsData.counts;
@@ -11716,7 +11932,12 @@
                         ${reanalyzeIconHtml()}
                         ${deleteIconHtml()}
                     `;
+                    document.getElementById('viewBarContainer').innerHTML = isPcap ? viewBarHtml() : '';
                     document.getElementById('appHeaderMd5').onclick = () => copyMd5ToClipboard(currentMd5);
+                    if (isPcap) {
+                        updateViewToggle();
+                        refreshSharkStatus(md5);
+                    }
                     document.getElementById('appHeaderRight').innerHTML = renderGearMenu();
                     updateThemeMenu();
                     showAnalysisUI();
@@ -12534,6 +12755,7 @@
             // Analysis header icons - all read the current-analysis
             // globals at click time, same as the old inline handlers did.
             'show-notes-modal': () => showNotesModal(),
+            'switch-view': (el) => switchAnalysisView(el.dataset.arg),
             'open-reanalyze-modal': () => openReanalyzeModal(currentMd5, currentFileName),
             'open-delete-analysis': () => openDeleteAnalysis(currentMd5, currentFileName),
         };
