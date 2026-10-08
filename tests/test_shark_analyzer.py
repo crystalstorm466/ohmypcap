@@ -354,6 +354,21 @@ class TestAnalyze(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(self.dir, shark_analyzer.SHARK_ERROR)))
         self.assertEqual(shark_analyzer.status(self.dir, self.pcap), {'status': 'ready'})
 
+    def test_shark_db_is_stamped_and_an_older_format_is_rebuilt(self):
+        """REGRESSION: shark.db existing meant 'ready' forever, so an
+        analysis built before a SHAR-CRATES change never got it - its
+        flows-only shark.db hid the protocol records added since."""
+        import sqlite3
+        shark_analyzer.analyze(self.dir, self.pcap)
+        db_path = shark_analyzer.shark_db_path(self.dir)
+        self.assertEqual(shark_analyzer.format_version(db_path), shark_analyzer.SHARK_FORMAT_VERSION)
+        conn = sqlite3.connect(db_path)
+        conn.execute('PRAGMA user_version = 1')
+        conn.commit()
+        conn.close()
+        self.assertEqual(shark_analyzer.status(self.dir, self.pcap), {'status': 'not_started'})
+        self.assertFalse(os.path.exists(db_path), 'the stale database is removed so it gets rebuilt')
+
     def test_a_failed_run_records_why_and_leaves_no_database(self):
         with open(self.pcap, 'wb') as f:
             f.write(b'not a pcap at all')

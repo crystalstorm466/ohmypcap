@@ -42,6 +42,8 @@ import time
 from collections import deque
 from datetime import datetime, timezone
 
+import sqlite3
+
 import config
 from db import create_shark_db
 from shark_protocols import PROTOCOLS, Packet
@@ -49,6 +51,11 @@ from shark_protocols import PROTOCOLS, Packet
 SHARK_DB = 'shark.db'
 SHARK_ERROR = '.shark_error'
 SHARK_ARTIFACTS = (SHARK_DB, SHARK_DB + '-wal', SHARK_DB + '-shm', SHARK_DB + '.tmp', SHARK_ERROR)
+# Stamped into each shark.db (SQLite's user_version). Bump it whenever a
+# change here or in shark_protocols changes what a run produces: a
+# shark.db stamped with an older version is rebuilt the next time its
+# status is asked for, so existing analyses pick up the change.
+SHARK_FORMAT_VERSION = 2
 
 # The fields every packet is read for, one per column of tshark's
 # tab-separated output, in this order - then each of shark_protocols'
@@ -384,6 +391,12 @@ def analyze(dir_path, pcap_path, on_start=None):
         events = run_tshark(pcap_path, on_start=on_start)
         _remove(tmp_path)
         create_shark_db(tmp_path, events)
+        conn = sqlite3.connect(tmp_path)
+        try:
+            conn.execute(f'PRAGMA user_version = {SHARK_FORMAT_VERSION}')
+            conn.commit()
+        finally:
+            conn.close()
         os.replace(tmp_path, db_path)
     except Exception as e:
         _remove(tmp_path)
@@ -485,12 +498,34 @@ def background_eligible(pcap_path):
         return False
 
 
+def format_version(db_path):
+    """The SHARK_FORMAT_VERSION a shark.db was built with (0 if unknown)."""
+    try:
+        conn = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
+        try:
+            return conn.execute('PRAGMA user_version').fetchone()[0]
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return 0
+
+
 def status(dir_path, pcap_path=None):
     """This analysis's SHAR-CRATES state: 'ready', 'queued', 'running',
     'error' (with 'message'), 'too_large' (over the background limit,
-    not yet asked for) or 'not_started'."""
-    if os.path.exists(shark_db_path(dir_path)):
-        return {'status': 'ready'}
+    not yet asked for) or 'not_started'. A shark.db built by an older
+    SHAR-CRATES (see SHARK_FORMAT_VERSION) is removed here, so the
+    analysis reads as not started and gets rebuilt."""
+    db_path = shark_db_path(dir_path)
+    if os.path.exists(db_path):
+        with _lock:
+            busy = dir_path == _running or dir_path in _pending
+        if busy or format_version(db_path) == SHARK_FORMAT_VERSION:
+            if not busy:
+                return {'status': 'ready'}
+        else:
+            for name in (SHARK_DB, SHARK_DB + '-wal', SHARK_DB + '-shm'):
+                _remove(os.path.join(dir_path, name))
     with _lock:
         if dir_path == _running:
             return {'status': 'running'}
