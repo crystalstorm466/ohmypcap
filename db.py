@@ -551,6 +551,31 @@ def create_email_analysis_db(db_path, events):
         conn.commit()
 
 
+def create_shark_db(db_path, events):
+    """Create shark.db for a SHAR-CRATES (tshark) view of a PCAP from the
+    events shark_analyzer built - the same schema as events.db, so every
+    query function here reads either one."""
+    with _db_connection(db_path) as conn:
+        has_fts = _init_db(conn)
+        for event in events:
+            _insert_event(conn, event, has_fts)
+        conn.execute('PRAGMA optimize;')
+        conn.commit()
+
+
+def get_shark_summary_sqlite(db_path):
+    """A SHAR-CRATES database's flow count and flows per application
+    protocol (most first) - what the SHAR-CRATES toggle shows before the
+    view is opened. Flows tshark found no application protocol in (bare
+    handshakes, undecoded payload) count under ''."""
+    with _db_connection(db_path) as conn:
+        rows = conn.execute(
+            "SELECT COALESCE(app_proto, ''), COUNT(*) FROM events WHERE event_type = 'flow' "
+            "GROUP BY 1 ORDER BY 2 DESC, 1"
+        ).fetchall()
+    return {'flows': sum(n for _, n in rows), 'app_protos': {proto: n for proto, n in rows}}
+
+
 def init_empty_db(db_path):
     """Create an empty events.db with the full schema (no events).
 

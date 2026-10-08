@@ -10,6 +10,7 @@ import time
 
 import config
 from db import create_sqlite_db
+import shark_analyzer
 from validators import is_host_reachable, is_epoch_stale, gunzip_atomically
 from yara_analyzer import run_yara_pipeline
 
@@ -904,6 +905,11 @@ def spawn_suricata(dir_path, pcap_path, suricata_config_path=None, data_dir=None
                 _set_error(dir_path, f'Database creation failed: {e}')
         # Clear phase only after DB (with YARA matches) is ready
         _clear_phase(dir_path)
+        # SHAR-CRATES: the analysis is ready on Suricata's data now; tshark's
+        # view of the same capture is built in the background, if it's small
+        # enough to do so unasked (see shark_analyzer).
+        if shark_analyzer.background_eligible(pcap_path):
+            shark_analyzer.enqueue(dir_path, pcap_path)
 
     try:
         proc = subprocess.Popen(

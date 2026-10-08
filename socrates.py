@@ -25,6 +25,7 @@ from db import (
     query_sigma_alerts_sqlite, get_sigma_stats_sqlite,
     get_sigma_alert_count_sqlite, get_event_date_range_sqlite,
     get_sankey_data_sqlite, get_aggregation_data_sqlite, get_aggregation_totals_sqlite,
+    get_shark_summary_sqlite,
     AGGREGATION_TOP_N, AGGREGATION_PAGE_SIZE_OPTIONS,
     set_row_note, has_row_notes,
     set_acknowledged, set_acknowledged_bulk,
@@ -64,6 +65,7 @@ from ohmydebn_colors import (
     derive_theme_colors, derive_theme_colors_from_alacritty, derive_theme_colors_from_named_palette,
 )
 from email_analyzer import analyze_message, remove_filestore
+import shark_analyzer
 from playbook_lookup import get_playbook
 from samples import SAMPLES
 from ai_summary_lookup import get_ai_summary
@@ -71,7 +73,7 @@ import config
 import cyberchef
 import tomllib
 
-VERSION = '4.4.0'
+VERSION = '5.0.0'
 GITHUB_RELEASES_API = 'https://api.github.com/repos/dougburks/so-crates/releases/latest'
 PORT = int(os.environ.get('PORT', 8000))
 BIND_ADDRESS = os.environ.get('BIND_ADDRESS', '127.0.0.1')
@@ -476,6 +478,25 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return None, 'Invalid path'
         return dir_path, None
 
+    def _view_db_file(self, dir_path, params):
+        """The database a read-only data request reads: events.db
+        (SURI-CRATES, the default) or, with view=shark, the SHAR-CRATES
+        shark.db - same schema, so every query function serves either.
+        Returns (db_file, error_message)."""
+        view = params.get('view', [''])[0]
+        if view in ('', 'suricata'):
+            return os.path.join(dir_path, 'events.db'), None
+        if view == 'shark':
+            return shark_analyzer.shark_db_path(dir_path), None
+        return None, 'Invalid view'
+
+    def _view_cache_key(self, params, md5, *rest):
+        """An analysis-cache key that keeps the two views apart. md5 stays
+        first either way, so evict_analysis_cache(md5) clears both."""
+        if params.get('view', [''])[0] == 'shark':
+            return (md5, 'shark') + rest
+        return (md5,) + rest
+
     def _resolve_existing_analysis_dir(self, md5):
         """Like _resolve_md5_dir, but also requires the directory to
         actually exist on disk - the "resolve this md5 to an existing
@@ -616,6 +637,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         '/api/sigma-count': 'handle_get_sigma_count',
         '/api/sigma-stats': 'handle_get_sigma_stats',
         '/api/status': 'handle_get_status',
+        '/api/shark-status': 'handle_get_shark_status',
         '/api/rule-update-status': 'handle_get_rule_update_status',
         '/api/rules-info': 'handle_get_rules_info',
         '/api/playbook': 'handle_get_playbook',
@@ -628,6 +650,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         '/api/load-sample': 'handle_post_load_sample',
         '/api/check-status': 'handle_post_check_status',
         '/api/reanalyze': 'handle_post_reanalyze',
+        '/api/shark-start': 'handle_post_shark_start',
         '/api/delete-analysis': 'handle_post_delete_analysis',
         '/api/rename-analysis': 'handle_post_rename_analysis',
         '/api/analysis-notes': 'handle_post_analysis_notes',
@@ -819,7 +842,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         # other tab relies on.
         acknowledged_only = params.get('acknowledged', [''])[0] == 'only'
 
-        db_file = os.path.join(dir_path, 'events.db')
+        db_file, view_error = self._view_db_file(dir_path, params)
+        if view_error:
+            self._send_error(400, view_error)
+            return
         if os.path.exists(db_file):
             try:
                 json_str, _ids = query_events_sqlite_json(db_file, event_type, offset, limit, q, order_by, sort_dir, acknowledged_only)
@@ -835,7 +861,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if error:
             self._send_error(400, error)
             return
-        db_file = os.path.join(dir_path, 'events.db')
+        db_file, view_error = self._view_db_file(dir_path, params)
+        if view_error:
+            self._send_error(400, view_error)
+            return
         q = self._parse_search_terms(params)
 
         counts = {}
@@ -859,7 +888,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         q = self._parse_search_terms(params)
         acknowledged_only = params.get('acknowledged', [''])[0] == 'only'
 
-        db_file = os.path.join(dir_path, 'events.db')
+        db_file, view_error = self._view_db_file(dir_path, params)
+        if view_error:
+            self._send_error(400, view_error)
+            return
 
         if os.path.exists(db_file):
             try:
@@ -880,14 +912,17 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         event_type = params.get('type', [''])[0] or None
         q = self._parse_search_terms(params)
 
-        db_file = os.path.join(dir_path, 'events.db')
+        db_file, view_error = self._view_db_file(dir_path, params)
+        if view_error:
+            self._send_error(400, view_error)
+            return
 
         if not os.path.exists(db_file):
             self._send_json({'nodes': [], 'links': []})
             return
         try:
             if q is None and cacheable_aggregation_key(event_type):
-                cache_key = (md5, event_type)
+                cache_key = self._view_cache_key(params, md5, event_type)
                 with CACHE_LOCK:
                     cached = SANKEY_CACHE.get(cache_key)
                 if cached is not None:
@@ -934,13 +969,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             page_size = AGGREGATION_TOP_N
         offset = (page - 1) * page_size
 
-        db_file = os.path.join(dir_path, 'events.db')
+        db_file, view_error = self._view_db_file(dir_path, params)
+        if view_error:
+            self._send_error(400, view_error)
+            return
         if not os.path.exists(db_file):
             self._send_json({})
             return
         try:
             if q is None and cacheable_aggregation_key(event_type, column):
-                cache_key = (md5, event_type, column, page, page_size)
+                cache_key = self._view_cache_key(params, md5, event_type, column, page, page_size)
                 with CACHE_LOCK:
                     cached = AGGREGATION_CACHE.get(cache_key)
                 if cached is not None:
@@ -970,13 +1008,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         event_type = params.get('type', [''])[0] or None
         q = self._parse_search_terms(params)
 
-        db_file = os.path.join(dir_path, 'events.db')
+        db_file, view_error = self._view_db_file(dir_path, params)
+        if view_error:
+            self._send_error(400, view_error)
+            return
         if not os.path.exists(db_file):
             self._send_json({})
             return
         try:
             if q is None and cacheable_aggregation_key(event_type):
-                cache_key = (md5, event_type)
+                cache_key = self._view_cache_key(params, md5, event_type)
                 with CACHE_LOCK:
                     cached = AGGREGATION_TOTALS_CACHE.get(cache_key)
                 if cached is not None:
@@ -1349,6 +1390,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self._send_error(*error)
             return
 
+        shark_analyzer.cancel(dir_path)
         shutil.rmtree(dir_path)
         evict_analysis_cache(md5)
         self._send_json({'success': True})
@@ -1642,6 +1684,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     errors.append(md5_dir)
                     continue
                 try:
+                    shark_analyzer.cancel(dir_path)
                     shutil.rmtree(dir_path)
                     deleted += 1
                 except Exception as e:
@@ -2564,6 +2607,52 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             response['hasRowNotes'] = False
         self._send_json(response)
 
+    def _shark_status(self, dir_path, start=False):
+        """SHAR-CRATES status for a PCAP analysis (see
+        shark_analyzer.status), with the flow summary once it's ready.
+
+        A capture small enough for the background that has never been
+        queued - analyzed before SHAR-CRATES existed, or whose queued run
+        was lost to a server restart - is queued here, on the first status
+        request. start=True (the user asked) queues it whatever its size.
+        'waiting' means Suricata hasn't finished; 'unavailable' that this
+        isn't a PCAP analysis."""
+        pcap_file = find_pcap_file(dir_path)
+        if not pcap_file:
+            return {'status': 'unavailable'}
+        if os.path.exists(os.path.join(dir_path, '.phase')):
+            return {'status': 'waiting'}
+        pcap_path = os.path.join(dir_path, pcap_file)
+        status = shark_analyzer.status(dir_path, pcap_path)
+        if status['status'] == 'not_started' or (start and status['status'] in ('too_large', 'error')):
+            shark_analyzer.enqueue(dir_path, pcap_path)
+            status = shark_analyzer.status(dir_path, pcap_path)
+        if status['status'] == 'ready':
+            try:
+                status.update(get_shark_summary_sqlite(shark_analyzer.shark_db_path(dir_path)))
+            except Exception:
+                return {'status': 'error', 'message': 'Database error'}
+        return status
+
+    def handle_get_shark_status(self, params):
+        dir_path, error = self._resolve_existing_analysis_dir(params.get('md5', [''])[0])
+        if error:
+            self._send_error(*error)
+            return
+        self._send_json(self._shark_status(dir_path))
+
+    def handle_post_shark_start(self):
+        """Build SHAR-CRATES for an analysis on request - for a capture over
+        the background size limit, or to retry after an error."""
+        data = self._read_json_body(config.MAX_REQUEST_BODY_SIZE)
+        if data is None:
+            return
+        dir_path, error = self._resolve_existing_analysis_dir(data.get('md5', ''))
+        if error:
+            self._send_error(*error)
+            return
+        self._send_json(self._shark_status(dir_path, start=True))
+
     def handle_post_check_status(self):
         data = self._read_json_body(config.MAX_REQUEST_BODY_SIZE)
         if data is None:
@@ -2645,6 +2734,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if pcap_file:
                 pcap_path = os.path.join(dir_path, pcap_file)
 
+                shark_analyzer.cancel(dir_path)
                 self._remove_artifacts(dir_path, PCAP_ANALYSIS_ARTIFACTS)
 
                 # Clean up extracted files from previous analysis

@@ -87,6 +87,9 @@ RESERVED_FILENAMES = {
     # to by Suricata while Suricata is reading it; 'filestore' is the
     # directory it extracts files into.
     'fast.log', 'stats.log', 'suricata.log', 'filestore',
+    # SHAR-CRATES (shark_analyzer.py): its database (and SQLite's WAL/SHM
+    # siblings), the one it builds before renaming, and its error file.
+    'shark.db', 'shark.db-wal', 'shark.db-shm', 'shark.db.tmp', '.shark_error',
 }
 
 

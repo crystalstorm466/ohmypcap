@@ -37,7 +37,7 @@ Redirects to `/socrates.html`.
 
 Returns the running SO-CRATES version.
 
-**Response:** `{"version": "4.4.0"}`
+**Response:** `{"version": "5.0.0"}`
 
 ---
 
@@ -74,6 +74,7 @@ Returns event data from Suricata's eve.json (via SQLite index or direct JSON par
 | Parameter | Required | Default | Description |
 |---|---|---|---|
 | `md5` | Yes | - | MD5 hash of a historical analysis (`400` if omitted) |
+| `view` | No | `suricata` | `shark` reads the analysis's SHAR-CRATES (tshark) records instead of Suricata's - see `GET /api/shark-status`. Anything else returns `400` |
 | `type` | No | all | Filter by event type - any `event_type` Suricata's eve.json can produce (see [Event Types](architecture/event-types.md)), plus the app's own synthetic types (`filealerts`, `log`, `protocol_decode`, and `email`/`link` in an email analysis). Sigma alerts live in their own table and are served by `GET /api/sigma-alerts`, not here. |
 | `q` | No | none | Full-text search query (searches all event JSON). Multiple `q` params AND together. |
 | `offset` | No | `0` | Pagination offset. A non-integer `offset` or `limit` returns an empty list (`200`), not an error |
@@ -106,6 +107,7 @@ Returns event-type counts for the current or specified analysis.
 | Parameter | Required | Default | Description |
 |---|---|---|---|
 | `md5` | Yes | - | MD5 hash of a historical analysis |
+| `view` | No | `suricata` | `shark` reads the analysis's SHAR-CRATES (tshark) records instead of Suricata's - see `GET /api/shark-status`. Anything else returns `400` |
 | `q` | No | none | Full-text search query (counts only matching events). Multiple `q` params AND together. |
 
 **Response:** `{"counts": <event type to count map>, "date_range": {"min": <timestamp or null>, "max": <timestamp or null>}}`
@@ -127,6 +129,7 @@ Returns total event count, optionally filtered by type or search query.
 | Parameter | Required | Default | Description |
 |---|---|---|---|
 | `md5` | Yes | - | MD5 hash of a historical analysis |
+| `view` | No | `suricata` | `shark` reads the analysis's SHAR-CRATES (tshark) records instead of Suricata's - see `GET /api/shark-status`. Anything else returns `400` |
 | `type` | No | all | Filter by event type |
 | `q` | No | none | Full-text search query (counts only matching events). Multiple `q` params AND together. |
 | `acknowledged` | No | none | `only` counts *only* acknowledged rows instead of excluding them - see `GET /api/events`'s own `acknowledged` param |
@@ -182,6 +185,7 @@ Returns a pre-aggregated `{nodes, links}` Sankey diagram (Source IP → Dest IP 
 | Parameter | Required | Default | Description |
 |---|---|---|---|
 | `md5` | Yes | - | MD5 hash of the analysis |
+| `view` | No | `suricata` | `shark` reads the analysis's SHAR-CRATES (tshark) records instead of Suricata's - see `GET /api/shark-status`. Anything else returns `400` |
 | `type` | No | all | Filter by event type |
 | `q` | No | none | Full-text search query. Multiple `q` params AND together. |
 
@@ -205,6 +209,7 @@ Returns per-column frequency tables (one page of values by count, 10 per page by
 | Parameter | Required | Default | Description |
 |---|---|---|---|
 | `md5` | Yes | - | MD5 hash of the analysis |
+| `view` | No | `suricata` | `shark` reads the analysis's SHAR-CRATES (tshark) records instead of Suricata's - see `GET /api/shark-status`. Anything else returns `400` |
 | `type` | No | all (merged view) | Event type (see [Event Types](architecture/event-types.md)), or omitted for the merged "All Events" view. Not supported for event types whose fields have no static JSON path to aggregate on server-side - currently `log`/`sigmaalert`/`binary` (dynamic/untrusted columns), `mqtt`/`ldap` (dynamically keyed by message/operation subtype) and `email`/`link`. These fall back to client-side computation instead (the UI also computes every tab of an email analysis client-side); see `AGGREGATION_JSON_PATHS` in `db.py` for the authoritative, current list. |
 | `q` | No | none | Full-text search query. Multiple `q` params AND together. |
 | `column` | No | none (all columns) | Restrict the response to a single column label, for paginating one column at a time |
@@ -230,6 +235,7 @@ Returns the distinct-value count per aggregation column, matching the same colum
 | Parameter | Required | Default | Description |
 |---|---|---|---|
 | `md5` | Yes | - | MD5 hash of the analysis |
+| `view` | No | `suricata` | `shark` reads the analysis's SHAR-CRATES (tshark) records instead of Suricata's - see `GET /api/shark-status`. Anything else returns `400` |
 | `type` | No | all (merged view) | Event type, or omitted for the merged "All Events" view. Same server-side-aggregation constraint as `/api/aggregation-data` - unsupported types return an empty object. |
 | `q` | No | none | Full-text search query. Multiple `q` params AND together. |
 
@@ -413,6 +419,29 @@ or, if analysis (Suricata/YARA/Zircolite/email parsing) failed:
 **Errors:** `400` for invalid or malformed MD5. There is no `404` for a well-formed MD5 that doesn't correspond to an existing analysis directory - the directory's absence just reads the same as "not ready yet" (`{"status": "processing", "phase": ""}`), since this endpoint never separately checks for the directory's existence.
 
 ---
+
+### `GET /api/shark-status`
+
+SHAR-CRATES status for a PCAP analysis. After Suricata finishes, the same capture is analyzed by tshark in the background (captures up to `SHARK_BACKGROUND_MAX_BYTES`, 250 MB by default; bigger ones only on request - see `POST /api/shark-start`), and its records are stored in the analysis's `shark.db`. The data endpoints read them with `view=shark`. An analysis that has never been queued (one from before SHAR-CRATES, or whose queued run was lost to a server restart) is queued by its first status request, if it's under the size limit.
+
+**Query Parameters:**
+
+| Parameter | Required | Description |
+|---|---|---|
+| `md5` | Yes | MD5 hash of the analysis (`400` if invalid, `404` if it doesn't exist) |
+
+**Response:** `{"status": "<status>"}`, where status is one of:
+
+| Status | Meaning |
+|---|---|
+| `ready` | Done. Adds `flows` (the flow count) and `app_protos` (flows per application protocol, most first; `""` counts flows with none) |
+| `queued` | Waiting for another analysis's run to finish. Adds `position` (1 = next) |
+| `running` | tshark is analyzing the capture |
+| `waiting` | Suricata hasn't finished yet |
+| `too_large` | Over the background size limit - start it with `POST /api/shark-start` |
+| `error` | The last run failed. Adds `message` |
+| `not_started` | Not queued yet |
+| `unavailable` | Not a PCAP analysis |
 
 ### `GET /api/sigma-alerts`
 
@@ -654,6 +683,12 @@ Only `md5` is read from the request body - the response's `phase` is determined 
 **Errors:** `400` for invalid MD5 or unsafe path. `404` if the analysis doesn't exist or contains no analyzable file. `409` if analysis is already in progress. `500` if Suricata fails to start (the failure reason from the analysis's `.error` file, e.g. Suricata missing or a permissions problem - distinguished from the `409` case by whether `.error` was written).
 
 ---
+
+### `POST /api/shark-start`
+
+Starts SHAR-CRATES for a PCAP analysis on request, whatever its size - for a capture over the background size limit, or to retry after an error. Returns the same response as `GET /api/shark-status`.
+
+**Request Body:** `{"md5": "<md5>"}` (`400` if invalid, `404` if the analysis doesn't exist)
 
 ### `POST /api/delete-analysis`
 

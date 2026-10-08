@@ -5554,7 +5554,7 @@ class TestReanalyzeEndpoint(unittest.TestCase):
         with open(STORAGE_FILE, 'r') as f:
             storage_content = f.read()
         # Artifact lists are centralized in storage.py's module-level constants
-        self.assertIn("PCAP_ANALYSIS_ARTIFACTS = ('eve.json', 'events.db', '.phase', '.error', 'yara_matches.json', 'sigma_matches.json', '.meta', 'file_metadata.json', 'fast.log', 'stats.log', 'suricata.log')", storage_content,
+        self.assertIn("PCAP_ANALYSIS_ARTIFACTS = ('eve.json', 'events.db', '.phase', '.error', 'yara_matches.json', 'sigma_matches.json', '.meta', 'file_metadata.json', 'fast.log', 'stats.log', 'suricata.log',", storage_content,
                       'PCAP artifact list must be centralized in PCAP_ANALYSIS_ARTIFACTS')
         reanalyze_section = content.split("def handle_post_reanalyze(self):")[1]
         # The actual per-artifact loop lives in the shared _remove_artifacts

@@ -22,7 +22,9 @@ PCAP_EXTENSIONS = ('.pcap', '.pcapng', '.cap', '.trace')
 # Pipeline output artifacts removed by /api/reanalyze before re-running analysis
 # fast.log/stats.log/suricata.log are Suricata's own logs, written in append
 # mode - left in place, every reanalyze added another copy of each.
-PCAP_ANALYSIS_ARTIFACTS = ('eve.json', 'events.db', '.phase', '.error', 'yara_matches.json', 'sigma_matches.json', '.meta', 'file_metadata.json', 'fast.log', 'stats.log', 'suricata.log')
+PCAP_ANALYSIS_ARTIFACTS = ('eve.json', 'events.db', '.phase', '.error', 'yara_matches.json', 'sigma_matches.json', '.meta', 'file_metadata.json', 'fast.log', 'stats.log', 'suricata.log',
+                           # SHAR-CRATES - shark_analyzer.SHARK_ARTIFACTS (a test keeps the two in step)
+                           'shark.db', 'shark.db-wal', 'shark.db-shm', 'shark.db.tmp', '.shark_error')
 FILE_ANALYSIS_ARTIFACTS = ('events.db', '.error', 'yara_matches.json', 'sigma_matches.json', '.meta', 'zircolite.log', '.zircolite_events.db')
 
 
