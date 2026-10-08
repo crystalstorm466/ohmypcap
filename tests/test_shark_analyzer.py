@@ -46,7 +46,7 @@ class TestAppProtocol(unittest.TestCase):
 
     def test_carrier_layers_are_skipped(self):
         self.assertEqual(shark_analyzer.app_protocol('eth:ethertype:ip:tcp:tpkt:cotp:s7comm'), 's7comm')
-        self.assertEqual(shark_analyzer.app_protocol('eth:ethertype:ip:tcp:nbss:smb2'), 'smb2')
+        self.assertEqual(shark_analyzer.app_protocol('eth:ethertype:ip:tcp:nbss:smb2'), 'smb', "Suricata's name for it")
 
     def test_bare_transport_and_undecoded_payload_have_none(self):
         self.assertEqual(shark_analyzer.app_protocol('eth:ethertype:ip:tcp'), '')
@@ -131,7 +131,8 @@ class TestBuildFlows(unittest.TestCase):
                      ipv6_src='2001:db8::1', ipv6_dst='2001:db8::2', ipv6_nxt=6, tcp_srcport=40001,
                      tcp_dstport=8080, tcp_stream=0)
         [flow] = shark_analyzer.build_flows([line])
-        self.assertEqual((flow['src_ip'], flow['ip_v'], flow['proto']), ('2001:db8::1', 6, 'TCP'))
+        self.assertEqual((flow['src_ip'], flow['ip_v'], flow['proto']),
+                         ('2001:0db8:0000:0000:0000:0000:0000:0001', 6, 'TCP'), 'written out in full, like Suricata')
 
     def test_non_ip_traffic_is_grouped_by_mac_addresses_and_protocol(self):
         arp = dict(frame_len=42, frame_protocols='eth:ethertype:arp', eth_src='00:00:00:00:00:01', eth_dst='ff:ff:ff:ff:ff:ff')
@@ -153,14 +154,13 @@ class TestBuildFlows(unittest.TestCase):
 
 
 class TestTsharkCommand(unittest.TestCase):
-    def test_plain_fields_with_community_id_and_inner_addresses(self):
+    def test_plain_fields_with_community_id(self):
         cmd = shark_analyzer.tshark_command('/x.pcap')
         self.assertEqual(cmd[:4], ['tshark', '-n', '-r', '/x.pcap'])
         self.assertIn('--enable-protocol', cmd)
         self.assertEqual(cmd[cmd.index('--enable-protocol') + 1], 'communityid')
         self.assertEqual(cmd[cmd.index('-T') + 1], 'fields')
-        self.assertIn('occurrence=l', cmd)
-        self.assertEqual([cmd[i + 1] for i, a in enumerate(cmd) if a == '-e'], list(shark_analyzer._FIELDS))
+        self.assertEqual([cmd[i + 1] for i, a in enumerate(cmd) if a == '-e'], list(shark_analyzer._ALL_FIELDS))
 
     def test_shark_artifacts_are_removed_on_reanalyze(self):
         for name in shark_analyzer.SHARK_ARTIFACTS:
@@ -184,7 +184,7 @@ class TestAgainstSuricata(unittest.TestCase):
         cls.pcap = os.path.join(cls.tmpdir, 'sample.pcap')
         with open(cls.pcap, 'wb') as f:
             f.write(build_pcap_sample())
-        cls.flows = {f['community_id']: f for f in shark_analyzer.run_tshark(cls.pcap)}
+        cls.flows = {f['community_id']: f for f in shark_analyzer.run_tshark(cls.pcap) if f['event_type'] == 'flow'}
 
     @classmethod
     def tearDownClass(cls):
@@ -202,6 +202,137 @@ class TestAgainstSuricata(unittest.TestCase):
                    f['flow']['pkts_toserver'], f['flow']['pkts_toclient'],
                    f['flow']['bytes_toserver'], f['flow']['bytes_toclient'])
             self.assertEqual(got, expected, cid)
+
+
+class TestFieldParsing(unittest.TestCase):
+    def test_unescape_undoes_tsharks_escapes(self):
+        self.assertEqual(shark_analyzer._unescape(r'v=spf1 a\tb\\c'), 'v=spf1 a\tb\\c')
+        self.assertEqual(shark_analyzer._unescape(r'line\nnext\r'), 'line\nnext\r')
+        self.assertEqual(shark_analyzer._unescape(r'\x41\x1f'), 'A\x1f')
+        self.assertEqual(shark_analyzer._unescape('plain'), 'plain')
+
+    def test_ipv6_is_written_out_in_full_like_suricata(self):
+        self.assertEqual(shark_analyzer.ipv6_exploded('2001:db8::7'), '2001:0db8:0000:0000:0000:0000:0000:0007')
+        self.assertEqual(shark_analyzer.ipv6_exploded('not an address'), 'not an address')
+
+    def test_app_proto_uses_suricatas_names(self):
+        self.assertEqual(shark_analyzer.app_protocol('eth:ethertype:ip:tcp:mbtcp:modbus'), 'modbus')
+        self.assertEqual(shark_analyzer.app_protocol('eth:ethertype:ip:tcp:nbss:smb2'), 'smb')
+        self.assertEqual(shark_analyzer.app_protocol('eth:ethertype:ip:udp:kerberos'), 'krb5')
+
+    def test_rpc_is_the_protocol_only_when_nothing_follows_it(self):
+        self.assertEqual(shark_analyzer.app_protocol('eth:ethertype:ip:tcp:rpc:nfs'), 'nfs')
+        self.assertEqual(shark_analyzer.app_protocol('eth:ethertype:ip:udp:rpc:portmap'), 'portmap')
+        self.assertEqual(shark_analyzer.app_protocol('eth:ethertype:ip:tcp:rpc'), 'rpc')
+
+    def test_command_outputs_every_occurrence_joined_by_the_aggregator(self):
+        cmd = shark_analyzer.tshark_command('/x.pcap')
+        self.assertIn('occurrence=a', cmd)
+        self.assertIn('aggregator=\x1f', cmd)
+        fields = [cmd[i + 1] for i, a in enumerate(cmd) if a == '-e']
+        self.assertEqual(fields[:len(shark_analyzer._FIELDS)], list(shark_analyzer._FIELDS))
+        self.assertIn('dns.response_to', fields)
+        self.assertIn('tls.handshake.ja4', fields)
+
+
+def _load_eve(name):
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', name)
+    with open(path) as f:
+        return [json.loads(line) for line in f]
+
+
+@unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
+class TestProtocolRecordsAgainstSuricata(unittest.TestCase):
+    """SHAR-CRATES's records for tests/protocol_fixtures.py's capture,
+    compared with what Suricata 8.0.6 logged for the same packets
+    (tests/data/protocol_fixture.eve.json - regenerate it with Suricata
+    if the fixture ever changes). Every flow, DNS, HTTP, TLS and Modbus
+    record must agree on every shared field."""
+
+    @classmethod
+    def setUpClass(cls):
+        from scripts.compare_shark_suricata import compare
+        from tests.protocol_fixtures import write_protocol_pcap
+        cls.tmpdir = tempfile.mkdtemp()
+        pcap = os.path.join(cls.tmpdir, 'protocols.pcap')
+        write_protocol_pcap(pcap)
+        cls.records = shark_analyzer.run_tshark(pcap)
+        cls.report = compare(_load_eve('protocol_fixture.eve.json'), cls.records)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    def _of(self, event_type):
+        return [r for r in self.records if r['event_type'] == event_type]
+
+    def test_every_record_matches_suricata(self):
+        for event_type, result in self.report.items():
+            with self.subTest(event_type=event_type):
+                self.assertEqual(result['differences'], [])
+                self.assertEqual(result['matched'], result['suricata'])
+        self.assertEqual({t: r['matched'] for t, r in self.report.items()},
+                         {'flow': 10, 'dns': 8, 'http': 3, 'tls': 1, 'modbus': 3})
+
+    def test_dns_pairs_queries_with_responses_and_keeps_the_unanswered(self):
+        by_name = {r['dns']['queries'][0]['rrname']: r for r in self._of('dns')}
+        self.assertEqual(by_name['lost.example.com']['dns']['type'], 'request')
+        self.assertNotIn('rcode', by_name['lost.example.com']['dns'])
+        self.assertEqual(by_name['missing.example.com']['dns']['rcode'], 'NXDOMAIN')
+        self.assertEqual([a['rdata'] for a in by_name['cdn.example.net']['dns']['answers']],
+                         ['edge.example.net', '198.51.100.7'])
+        self.assertEqual(by_name['txt.example.com']['dns']['answers'][0]['rdata'], 'v=spf1 a\tb\\c')
+        www = by_name['www.example.com']
+        self.assertEqual((www['src_ip'], www['src_port'], www['dest_port']), ('10.1.0.10', 53001, 53))
+        self.assertEqual(www['timestamp'], '2023-11-14T22:13:20.000000+0000', "the query's time")
+
+    def test_http_pairs_each_request_on_a_keep_alive_connection(self):
+        self.assertEqual([(r['http']['http_method'], r['http']['url'], r['http']['status']) for r in self._of('http')],
+                         [('GET', '/index.html', 200), ('GET', '/missing', 404), ('POST', '/upload', 201)])
+
+    def test_tls_session(self):
+        [tls] = self._of('tls')
+        self.assertEqual(tls['tls']['ja4'], 't13d0407h2_358020e8f41d_078775ef5e04')
+        self.assertEqual(tls['tls']['version'], 'TLS 1.3')
+
+    def test_modbus_exception_response(self):
+        third = [r for r in self._of('modbus') if r['modbus']['id'] == 3][0]['modbus']
+        self.assertEqual(third['request']['read'], {'address': 0, 'quantity': 8})
+        self.assertEqual(third['response']['function_raw'], 0x81)
+        self.assertEqual(third['response']['exception'], {'raw': 2, 'code': 'IllegalDataAddr'})
+
+    def test_records_land_in_shark_db_and_its_summary(self):
+        from db import create_shark_db, get_event_types_sqlite, get_shark_summary_sqlite
+        db_path = os.path.join(self.tmpdir, 'shark.db')
+        create_shark_db(db_path, self.records)
+        self.assertEqual(get_event_types_sqlite(db_path), {'flow': 10, 'dns': 8, 'http': 3, 'tls': 1, 'modbus': 3})
+        self.assertEqual(get_shark_summary_sqlite(db_path)['app_protos'],
+                         {'dns': 7, 'http': 1, 'modbus': 1, 'tls': 1})
+
+
+@unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
+class TestKnownDifferencesFromSuricata(unittest.TestCase):
+    """tests/pcap_fixtures.write_http_pcap's IPv6, VLAN and retransmission
+    flows all match Suricata's (tests/data/http_fixture.eve.json). The one
+    expected difference: Suricata counts a response body's bytes itself
+    when there's no Content-Length header; SHAR-CRATES reports the header
+    (counting the body would mean tshark printing every body in full)."""
+
+    def test_only_body_length_without_a_content_length_header_differs(self):
+        from scripts.compare_shark_suricata import compare
+        from tests.pcap_fixtures import write_http_pcap
+        tmpdir = tempfile.mkdtemp()
+        try:
+            pcap = os.path.join(tmpdir, 'http.pcap')
+            write_http_pcap(pcap)
+            report = compare(_load_eve('http_fixture.eve.json'), shark_analyzer.run_tshark(pcap))
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        self.assertEqual(report['flow']['differences'], [])
+        self.assertEqual(report['flow']['matched'], 4, 'IPv6, VLAN and retransmitted flows included')
+        self.assertEqual(len(report['http']['differences']), 3)
+        for d in report['http']['differences']:
+            self.assertEqual(d['fields'], {'length': (519, None)})
 
 
 @unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
@@ -383,7 +514,7 @@ class TestSharkAPI(unittest.TestCase):
         _, flows = self._get(f'/api/events?md5={self.md5}&view=shark&type=flow')
         self.assertEqual(len(flows), 3)
         _, stats = self._get(f'/api/stats?md5={self.md5}&view=shark')
-        self.assertEqual(stats['counts'], {'flow': 3})
+        self.assertEqual(stats['counts'], {'flow': 3, 'http': 1})
         _, count = self._get(f'/api/count?md5={self.md5}&view=shark&type=flow')
         self.assertEqual(count, {'count': 3})
         _, suricata = self._get(f'/api/events?md5={self.md5}&type=flow')

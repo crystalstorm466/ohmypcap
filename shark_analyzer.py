@@ -8,12 +8,14 @@ module turns that packet stream into Suricata-shaped records, written to
 shark.db beside the analysis's events.db with the same schema, so the
 existing query functions and UI can read either one.
 
-So far it builds one 'flow' record per conversation (tshark's tcp.stream /
+It builds one 'flow' record per conversation (tshark's tcp.stream /
 udp.stream numbers, or addresses for anything without a stream), in
 Suricata's own flow-event layout - addresses, ports, packet and byte
 counts per direction, start and end - plus the protocols tshark found in
 it and its Community ID, which matches Suricata's community_id for the
-same flow and links the two views.
+same flow and links the two views. shark_protocols adds one record per
+transaction for the protocols it describes (DNS, HTTP, TLS, Modbus...),
+in Suricata's layout for each.
 
 tshark runs once per capture with plain field output (-T fields): its
 JSON output is several times slower and many times larger for the same
@@ -29,7 +31,9 @@ Files in the analysis directory:
     .shark_error   why the last run failed
 """
 
+import ipaddress
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -40,29 +44,44 @@ from datetime import datetime, timezone
 
 import config
 from db import create_shark_db
+from shark_protocols import PROTOCOLS, Packet
 
 SHARK_DB = 'shark.db'
 SHARK_ERROR = '.shark_error'
 SHARK_ARTIFACTS = (SHARK_DB, SHARK_DB + '-wal', SHARK_DB + '-shm', SHARK_DB + '.tmp', SHARK_ERROR)
 
-# One tshark field per column of its tab-separated output, in this order.
-# occurrence=l takes the last value of a repeated field, so a tunneled
-# packet (IP in GRE/VXLAN, etc.) reports its inner addresses and ports -
-# the flow Suricata also reports.
+# The fields every packet is read for, one per column of tshark's
+# tab-separated output, in this order - then each of shark_protocols'
+# fields. Every occurrence of a repeated field is output, joined by
+# _AGGREGATOR; these base fields take the last one, so a tunneled packet
+# (IP in GRE/VXLAN, etc.) reports its inner addresses and ports - the flow
+# Suricata also reports.
 _FIELDS = (
     'frame.time_epoch', 'frame.len', 'frame.protocols',
     'ip.src', 'ip.dst', 'ipv6.src', 'ipv6.dst', 'ip.proto', 'ipv6.nxt',
     'tcp.srcport', 'tcp.dstport', 'udp.srcport', 'udp.dstport',
     'tcp.stream', 'udp.stream', 'tcp.flags.syn', 'tcp.flags.ack',
-    'eth.src', 'eth.dst', 'communityid',
+    'eth.src', 'eth.dst', 'communityid', 'frame.number',
 )
 (_F_TIME, _F_LEN, _F_PROTOS, _F_IP_SRC, _F_IP_DST, _F_IP6_SRC, _F_IP6_DST, _F_IP_PROTO,
  _F_IP6_NXT, _F_TCP_SPORT, _F_TCP_DPORT, _F_UDP_SPORT, _F_UDP_DPORT, _F_TCP_STREAM,
- _F_UDP_STREAM, _F_SYN, _F_ACK, _F_ETH_SRC, _F_ETH_DST, _F_CID) = range(len(_FIELDS))
+ _F_UDP_STREAM, _F_SYN, _F_ACK, _F_ETH_SRC, _F_ETH_DST, _F_CID, _F_FRAME) = range(len(_FIELDS))
+_PROTOCOL_FIELDS = tuple(f for proto in PROTOCOLS for f in proto.fields)
+_ALL_FIELDS = _FIELDS + _PROTOCOL_FIELDS
+# Joins a repeated field's values. tshark escapes control characters
+# inside a value (a tab comes out as the two characters \t), so this can
+# never appear in one.
+_AGGREGATOR = '\x1f'
 
 # IP protocol numbers Suricata names in a flow's proto field.
 _IP_PROTO_NAMES = {'1': 'ICMP', '2': 'IGMP', '6': 'TCP', '17': 'UDP', '47': 'GRE',
                    '50': 'ESP', '58': 'IPv6-ICMP', '89': 'OSPF', '112': 'VRRP', '132': 'SCTP'}
+
+# tshark's names for protocols Suricata calls something else - a flow's
+# app_proto uses Suricata's name, so the two views agree (its
+# shark.protocols keeps tshark's own names).
+SURICATA_APP_PROTO_NAMES = {'mbtcp': 'modbus', 'smb2': 'smb', 'kerberos': 'krb5', 'isakmp': 'ike',
+                            'vnc': 'rfb', 'pop': 'pop3', 'bt-dht': 'bittorrent-dht'}
 
 _TRANSPORT_LAYERS = {'tcp', 'udp', 'sctp'}
 # Layers that only carry another protocol, or carry undecoded payload -
@@ -70,6 +89,9 @@ _TRANSPORT_LAYERS = {'tcp', 'udp', 'sctp'}
 # nbss carries SMB, and the rest are tshark's names for raw data or
 # reassembly bookkeeping.
 _CARRIER_LAYERS = {'tpkt', 'cotp', 'nbss', 'tcp.segments', 'data', 'data-text-lines', 'media'}
+# Layers that are the application protocol unless another follows them:
+# ONC RPC on its own (portmapper) is the protocol, but carries NFS.
+_WRAPPER_LAYERS = {'rpc'}
 
 
 def shark_db_path(dir_path):
@@ -77,10 +99,10 @@ def shark_db_path(dir_path):
 
 
 def tshark_command(pcap_path):
-    """The tshark command that dumps _FIELDS for every packet."""
+    """The tshark command that dumps _ALL_FIELDS for every packet."""
     cmd = ['tshark', '-n', '-r', pcap_path, '--enable-protocol', 'communityid',
-           '-T', 'fields', '-E', 'separator=\t', '-E', 'occurrence=l']
-    for field in _FIELDS:
+           '-T', 'fields', '-E', 'separator=\t', '-E', 'occurrence=a', '-E', 'aggregator=' + _AGGREGATOR]
+    for field in _ALL_FIELDS:
         cmd += ['-e', field]
     return cmd
 
@@ -101,10 +123,28 @@ def app_protocol(protocols):
     if above is None:
         candidates = [layer for layer in layers if layer not in _CARRIER_LAYERS and layer != 'ethertype']
         return candidates[-1] if candidates else ''
-    for layer in above:
-        if layer not in _CARRIER_LAYERS:
-            return layer
+    above = [layer for layer in above if layer not in _CARRIER_LAYERS]
+    for i, layer in enumerate(above):
+        if layer not in _WRAPPER_LAYERS or i == len(above) - 1:
+            return SURICATA_APP_PROTO_NAMES.get(layer, layer)
     return ''
+
+
+_EXPLODED = {}
+
+
+def ipv6_exploded(address):
+    """An IPv6 address written out in full, the way Suricata logs every
+    one (2001:0db8:0000:...), so filters and pivots match across both
+    views. Unparseable input comes back unchanged."""
+    if address not in _EXPLODED:
+        if len(_EXPLODED) > 100000:
+            _EXPLODED.clear()
+        try:
+            _EXPLODED[address] = ipaddress.IPv6Address(address).exploded
+        except ValueError:
+            _EXPLODED[address] = address
+    return _EXPLODED[address]
 
 
 def _iso(epoch):
@@ -159,6 +199,20 @@ class _Flow:
         if community_id and not self.community_id:
             self.community_id = community_id
 
+    def record(self, when, event_type, body):
+        """A transaction record on this flow, addressed client to server
+        like the flow itself (Suricata addresses its transactions the same
+        way)."""
+        event = {'timestamp': _iso(when), 'event_type': event_type,
+                 'src_ip': self.client, 'dest_ip': self.server, 'proto': self.proto, event_type: body}
+        if self.ip_v:
+            event['ip_v'] = self.ip_v
+        if self.proto in ('TCP', 'UDP', 'SCTP'):
+            event['src_port'], event['dest_port'] = self.cport, self.sport
+        if self.community_id:
+            event['community_id'] = self.community_id
+        return event
+
     def event(self):
         flow = {
             'pkts_toserver': self.pkts_ts, 'pkts_toclient': self.pkts_tc,
@@ -183,14 +237,37 @@ class _Flow:
         return event
 
 
-def build_flows(lines):
-    """Group tshark's per-packet field lines (tshark_command's output)
-    into flow events, in order of each flow's first packet."""
+_ESCAPE = re.compile(r'\\(x[0-9a-fA-F]{2}|.)')
+_ESCAPES = {'t': '\t', 'n': '\n', 'r': '\r', '\\': '\\'}
+
+
+def _unescape(value):
+    """Undo tshark's escaping of a field value: \\t, \\n, \\r, \\\\ and \\xNN."""
+    if '\\' not in value:
+        return value
+    return _ESCAPE.sub(lambda m: _ESCAPES.get(m.group(1)) or (chr(int(m.group(1)[1:], 16))
+                                                            if m.group(1)[0] == 'x' else m.group(1)), value)
+
+
+def _last(value):
+    return value.rsplit(_AGGREGATOR, 1)[-1]
+
+
+def build_records(lines):
+    """Turn tshark's per-packet field lines (tshark_command's output) into
+    records: one flow per conversation, in order of first packet, then
+    shark_protocols' transaction records."""
     flows = {}
+    protocols = [proto() for proto in PROTOCOLS]
+    spans, start = [], len(_FIELDS)
+    for proto in protocols:
+        spans.append((proto, start, start + len(proto.fields)))
+        start += len(proto.fields)
     for line in lines:
-        f = line.rstrip('\n').split('\t')
-        if len(f) < len(_FIELDS):
+        cols = line.rstrip('\n').split('\t')
+        if len(cols) < len(_FIELDS):
             continue
+        f = [_last(c) for c in cols[:len(_FIELDS)]]
         try:
             when = float(f[_F_TIME])
         except ValueError:
@@ -199,7 +276,10 @@ def build_flows(lines):
         app = app_protocol(f[_F_PROTOS])
         if f[_F_IP_SRC] or f[_F_IP6_SRC]:
             ip_v = 4 if f[_F_IP_SRC] else 6
-            src, dst = (f[_F_IP_SRC], f[_F_IP_DST]) if ip_v == 4 else (f[_F_IP6_SRC], f[_F_IP6_DST])
+            if ip_v == 4:
+                src, dst = f[_F_IP_SRC], f[_F_IP_DST]
+            else:
+                src, dst = ipv6_exploded(f[_F_IP6_SRC]), ipv6_exploded(f[_F_IP6_DST])
         else:
             ip_v, src, dst = 0, f[_F_ETH_SRC], f[_F_ETH_DST]
         stream = None
@@ -221,7 +301,25 @@ def build_flows(lines):
         if flow is None:
             flow = flows[key] = _Flow(key, proto, ip_v, src, dst, sport, dport, when, stream)
         flow.add(src, sport, length, when, app, f[_F_CID], syn_only)
-    return [flow.event() for flow in sorted(flows.values(), key=lambda fl: fl.first)]
+        packet = None
+        for handler, lo, hi in spans:
+            values = cols[lo:hi]
+            if not any(values):
+                continue
+            if packet is None:
+                packet = Packet(_int(f[_F_FRAME]), when, flow, sport, dport)
+            handler.feed(packet, {name: [_unescape(x) for x in (values[i].split(_AGGREGATOR) if i < len(values) and values[i] else [])]
+                                  for i, name in enumerate(handler.fields)})
+    events = [flow.event() for flow in sorted(flows.values(), key=lambda fl: fl.first)]
+    for handler in protocols:
+        for flow, when, event_type, body in handler.finish():
+            events.append(flow.record(when, event_type, body))
+    return events
+
+
+def build_flows(lines):
+    """Just build_records' flow records."""
+    return [e for e in build_records(lines) if e['event_type'] == 'flow']
 
 
 def _low_priority():
@@ -234,7 +332,7 @@ def _low_priority():
 
 
 def run_tshark(pcap_path, timeout=None, on_start=None):
-    """Run tshark over pcap_path and return its flow events. Raises
+    """Run tshark over pcap_path and return its records. Raises
     RuntimeError if tshark is missing, fails, is killed, or exceeds the
     timeout. on_start, if given, is called with the tshark process as soon
     as it starts (so the queue can kill it on cancel)."""
@@ -259,7 +357,7 @@ def run_tshark(pcap_path, timeout=None, on_start=None):
         killer = threading.Timer(timeout, _kill)
         killer.start()
         try:
-            events = build_flows(proc.stdout)
+            events = build_records(proc.stdout)
             proc.wait()
         finally:
             killer.cancel()
