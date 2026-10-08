@@ -395,8 +395,10 @@ class TestExtraCaptureAgainstSuricata(unittest.TestCase):
         (tshark links only the first to its query), was its own record."""
         slow, echo = self._of('dns')
         self.assertEqual((slow['queries'][0]['rrname'], slow['type'], slow['transmissions']), ('slow.example.com', 'response', 2))
-        self.assertEqual((echo['queries'][0]['rrname'], echo['type']), ('echo.example.com', 'response'))
+        self.assertEqual((echo['queries'][0]['rrname'], echo['type'], echo['responses']), ('echo.example.com', 'response', 3),
+                         'the answer sent three times: one record that says so - repeated answers can be spoofing')
         self.assertNotIn('transmissions', echo)
+        self.assertNotIn('responses', slow)
 
     def test_mdns_and_llmnr_are_not_dns(self):
         """REGRESSION: tshark decodes both with its DNS dissector, so their

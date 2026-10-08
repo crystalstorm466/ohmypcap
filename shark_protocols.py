@@ -85,7 +85,7 @@ class DNS:
         self.records = []        # (flow, when, event_type, body), in request order
         self.by_frame = {}       # request frame number -> its body
         self.unanswered = {}     # (asker's address, port, id, first query) -> body, until its response
-        self.answered = set()    # the same keys, once answered
+        self.answered = {}       # the same keys, once answered -> body
 
     def feed(self, pkt, v):
         txid = _int(_first(v['dns.id']))
@@ -128,17 +128,19 @@ class DNS:
         # response - so a multicast LLMNR query's unicast answer, or a
         # repeat of an answered query's response, arrives unlinked.
         key = self._key(pkt.dst, pkt.dport, txid, queries)
-        body = self.by_frame.get(_int(_first(v['dns.response_to']))) or self.unanswered.get(key)
+        body = self.by_frame.get(_int(_first(v['dns.response_to']))) or self.unanswered.get(key) \
+            or self.answered.get(key)
         if body is not None and body['type'] == 'response':
+            # The answer again: counted, not a new record. More than one
+            # response to a query can mean an attacker racing the real server.
+            body['responses'] = body.get('responses', 1) + 1
             return
-        if body is None:
-            if key in self.answered:
-                return     # the same response sent again
-            body = {'version': 3, 'id': txid, 'queries': queries}   # its request isn't in the capture
+        if body is None:   # a response whose request isn't in the capture
+            body = {'version': 3, 'id': txid, 'queries': queries}
             self.records.append((pkt.flow, pkt.when, kind, body))
         else:
             self.unanswered = {k: b for k, b in self.unanswered.items() if b is not body}
-        self.answered.add(key)
+        self.answered[key] = body
         body['type'] = 'response'
         body['rcode'] = _DNS_RCODES.get(_int(_first(v['dns.flags.rcode']), 0), _first(v['dns.flags.rcode']))
         if answers:

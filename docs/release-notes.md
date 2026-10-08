@@ -19,6 +19,9 @@ tables, Sankey diagram, search and pivot menu work on both:
   agree on nearly every field they share (see [SURI-CRATES and
   SHAR-CRATES](usage/exploring-results.md#suri-crates-and-shar-crates) for
   the differences that remain)
+- **Repeated DNS answers** - a query answered more than once (which can be an
+  attacker racing the real server) is one record whose details give the
+  number of **Responses**, beside the number of **Transmissions** of the query
 - **NBNS, LLMNR, SSDP and S7comm** - records for four protocols Suricata
   doesn't parse: Windows name resolution and registration, UPnP device
   discovery, and Siemens PLC reads, writes and control

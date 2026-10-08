@@ -21745,6 +21745,26 @@ class TestSharkCratesUI(unittest.TestCase):
                 self.assertEqual(r['cells'][6:6 + len(expected)], expected)
                 self.assertIn(f'{r["label"]} Details', r['detail'])
 
+    def test_dns_details_show_transmissions_and_responses(self):
+        """SHAR-CRATES folds a query's resends and repeated answers into one
+        record; its details give both counts (and Suricata's records, which
+        have neither, show neither)."""
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""
+            var base = {id: 1, timestamp: '2026-01-01T00:00:00', event_type: 'dns', proto: 'UDP',
+                        src_ip: '10.1.0.10', dest_ip: '10.1.0.53', src_port: 53012, dest_port: 53};
+            var shark = Object.assign({}, base, {dns: {type: 'response', id: 1, transmissions: 2, responses: 3,
+                                                       queries: [{rrname: 'echo.example.com', rrtype: 'A'}]}});
+            var suri = Object.assign({}, base, {dns: {type: 'response', id: 1,
+                                                      queries: [{rrname: 'echo.example.com', rrtype: 'A'}]}});
+            var text = function(e) { var d = document.createElement('div'); d.innerHTML = formatEvent(e); return d.textContent; };
+            window.__jsdom_result = {shark: text(shark), suri: text(suri)};
+        """)
+        self.assertIn('Transmissions2', result['shark'])
+        self.assertIn('Responses3', result['shark'])
+        self.assertNotIn('Transmissions', result['suri'])
+        self.assertNotIn('Responses', result['suri'])
+
     def test_shark_only_columns_are_all_aggregatable_server_side(self):
         """Every column past the six shared ones has a JSON path in db.py's
         AGGREGATION_JSON_PATHS - the server can't aggregate one it lacks."""

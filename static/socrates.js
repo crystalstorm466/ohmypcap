@@ -3689,6 +3689,10 @@
             if (e.dns?.answers) {
                 html += htmlRowText('Answers', e.dns.answers.map(a => a.rdata).join(', '), 'mono');
             }
+            // SHAR-CRATES folds a query's resends and repeated answers into
+            // one record and counts them (shark_protocols.DNS).
+            if (e.dns?.transmissions) html += htmlRowText('Transmissions', e.dns.transmissions);
+            if (e.dns?.responses) html += htmlRowText('Responses', e.dns.responses);
             return html;
         }
 
@@ -3703,6 +3707,8 @@
             if (e.llmnr?.answers) {
                 html += htmlRowText('Answers', e.llmnr.answers.map(a => a.rdata).filter(Boolean).join(', '), 'mono');
             }
+            if (e.llmnr?.transmissions) html += htmlRowText('Transmissions', e.llmnr.transmissions);
+            if (e.llmnr?.responses) html += htmlRowText('Responses', e.llmnr.responses);
             return html;
         }
 
