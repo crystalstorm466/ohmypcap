@@ -80,6 +80,14 @@ def _flow_fields(e):
                                      'start', 'end')}}
 
 
+def _reversed_flow(fields):
+    """A flow's fields seen from its other side."""
+    out = dict(fields, src=fields['dest'], dest=fields['src'])
+    for a, b in (('pkts_toserver', 'pkts_toclient'), ('bytes_toserver', 'bytes_toclient')):
+        out[a], out[b] = fields[b], fields[a]
+    return out
+
+
 def _ftp_fields(e):
     f = e['ftp']
     return {k: f.get(k) for k in ('command', 'command_data', 'completion_code', 'reply', 'dynamic_port', 'mode',
@@ -148,7 +156,12 @@ def _suricata_quic(events):
 
 
 def compare(suricata_events, shark_events):
-    """{'type': {'suricata': n, 'shark': n, 'matched': n, 'differences': [...]}}."""
+    """{'type': {'suricata': n, 'shark': n, 'matched': n, 'differences': [...]}},
+    and for flows 'reoriented': how many SHAR-CRATES addresses the other
+    way round from Suricata - its client is whoever made the first
+    request, or was answered first, where Suricata's is whoever sent the
+    first packet (shark_analyzer._Flow.orient). A reoriented flow is
+    compared from Suricata's side, so only its other fields can differ."""
     suricata = ([e for e in suricata_events if e.get('event_type') not in ('dns', 'quic')]
                 + _suricata_dns(suricata_events) + _suricata_quic(suricata_events))
     report = {}
@@ -167,6 +180,8 @@ def compare(suricata_events, shark_events):
         a, b = index(suricata), index(shark_events)
         result = {'suricata': sum(map(len, a.values())), 'shark': sum(map(len, b.values())),
                   'matched': 0, 'differences': []}
+        if etype == 'flow':
+            result['reoriented'] = 0
         for key in sorted(set(a) | set(b), key=str):
             if key not in b:
                 result['differences'].append({'key': key, 'only': 'suricata', 'record': fields_of(a[key][0])})
@@ -175,6 +190,9 @@ def compare(suricata_events, shark_events):
                 result['differences'].append({'key': key, 'only': 'shark', 'record': fields_of(b[key][0])})
                 continue
             fa, fb = fields_of(a[key][0]), fields_of(b[key][0])
+            if etype == 'flow' and fa['src'] == fb['dest'] and fa['dest'] == fb['src'] and fa['src'] != fa['dest']:
+                fb = _reversed_flow(fb)
+                result['reoriented'] += 1
             diff = {k: (fa.get(k), fb.get(k)) for k in fa if fa.get(k) != fb.get(k)}
             if diff:
                 result['differences'].append({'key': key, 'fields': diff})
@@ -217,7 +235,8 @@ def main(argv):
     total = 0
     for etype, r in report.items():
         print(f"{etype:7} suricata {r['suricata']:6}  shark {r['shark']:6}  matched {r['matched']:6}  "
-              f"differences {len(r['differences'])}")
+              f"differences {len(r['differences'])}"
+              + (f"  reoriented {r['reoriented']}" if r.get('reoriented') else ''))
         for d in r['differences']:
             total += 1
             print('   ', json.dumps(d, default=str))

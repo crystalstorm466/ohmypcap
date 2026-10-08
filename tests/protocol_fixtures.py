@@ -369,6 +369,15 @@ def extra_packets():
         (True, _tpkt_s7(struct.pack('!BBHHHH', 0x32, 7, 0, 4, 8, 8) + b'\x00\x01\x12\x04\x11\x44\x01\x00'
                         + b'\xff\x09\x00\x04\x00\x11\x00\x00')),
     ])
+    # DNS caught mid-conversation (the 4SICS GeekLounge capture opens this
+    # way): the answer to a query sent before recording began, then the
+    # client's next query and its answer. Suricata takes the server for the
+    # client, doesn't recognize the flow as DNS, and logs no DNS for it.
+    old = dns_message(0x6001, 'time.example.com', 'A', rcode=5, response=True)
+    new_q = dns_message(0x6002, 'time.example.com', 'A')
+    new_a = dns_message(0x6002, 'time.example.com', 'A', rcode=5, response=True)
+    pkts += [_udp_packet(DNS_SERVER, CLIENT, 53, 949, old), _udp_packet(CLIENT, DNS_SERVER, 949, 53, new_q),
+             _udp_packet(DNS_SERVER, CLIENT, 53, 949, new_a)]
     return pkts
 
 

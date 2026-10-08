@@ -55,7 +55,7 @@ SHARK_ARTIFACTS = (SHARK_DB, SHARK_DB + '-wal', SHARK_DB + '-shm', SHARK_DB + '.
 # change here or in shark_protocols changes what a run produces: a
 # shark.db stamped with an older version is rebuilt the next time its
 # status is asked for, so existing analyses pick up the change.
-SHARK_FORMAT_VERSION = 5
+SHARK_FORMAT_VERSION = 6
 
 # The fields every packet is read for, one per column of tshark's
 # tab-separated output, in this order - then each of shark_protocols'
@@ -171,10 +171,49 @@ def _int(value):
         return 0
 
 
+def _is_group_address(address):
+    try:
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        return False
+    return ip.is_multicast or (ip.version == 4 and (address == '255.255.255.255' or address.endswith('.255')))
+
+
+def _flag(value):
+    return {'1': True, 'True': True, '0': False, 'False': False}.get(value)
+
+
+def _first_value(cols, field):
+    i = _COLUMN[field]
+    return cols[i].split(_AGGREGATOR)[0] if i < len(cols) and cols[i] else ''
+
+
+def _is_reply(cols):
+    """Whether a packet is a server's reply (True), a client's request
+    (False), or can't say (None), from the protocols that mark it:
+    DNS/mDNS/LLMNR and NBNS's response flag, an HTTP/SSDP or FTP response
+    vs request, an S7comm ack vs job, a TLS server vs client hello.
+    Modbus marks neither."""
+    for field in ('dns.flags.response', 'nbns.flags.response'):
+        flag = _flag(_first_value(cols, field))
+        if flag is not None:
+            return flag
+    for reply, request in (('http.response.code', 'http.request.method'),
+                           ('ftp.response.code', 'ftp.request.command')):
+        if _first_value(cols, reply):
+            return True
+        if _first_value(cols, request):
+            return False
+    rosctr = _first_value(cols, 's7comm.header.rosctr')
+    if rosctr in ('1', '2', '3'):
+        return rosctr != '1'
+    return {'1': False, '2': True}.get(_first_value(cols, 'tls.handshake.type'))
+
+
 class _Flow:
     __slots__ = ('key', 'proto', 'ip_v', 'client', 'server', 'cport', 'sport', 'first', 'last',
                  'pkts_ts', 'pkts_tc', 'bytes_ts', 'bytes_tc', 'protocols', 'app_proto', 'community_id',
-                 'stream', 'client_set_by_syn')
+                 'stream', 'client_set_by_syn', 'client_set_by_message')
 
     def __init__(self, key, proto, ip_v, src, dst, sport, dport, when, stream):
         self.key, self.proto, self.ip_v, self.stream = key, proto, ip_v, stream
@@ -184,7 +223,31 @@ class _Flow:
         self.protocols = {}
         self.app_proto = ''
         self.community_id = ''
-        self.client_set_by_syn = False
+        self.client_set_by_syn = self.client_set_by_message = False
+
+    def _swap(self):
+        self.client, self.server = self.server, self.client
+        self.cport, self.sport = self.sport, self.cport
+        self.pkts_ts, self.pkts_tc = self.pkts_tc, self.pkts_ts
+        self.bytes_ts, self.bytes_tc = self.bytes_tc, self.bytes_ts
+
+    def orient(self, src, sport, is_reply):
+        """The flow's first request or reply (see _is_reply) settles which
+        side is the client, unless a SYN already has: a capture that starts
+        mid-conversation can open on the server's reply - whose sender
+        would otherwise be taken for the client, and every record on the
+        flow addressed backwards. Suricata keeps the first sender as the
+        client (and then doesn't recognize the protocol), so these flows
+        are the one place the two views' directions differ."""
+        if self.client_set_by_syn or self.client_set_by_message:
+            return
+        self.client_set_by_message = True
+        sent_by_client = src == self.client and sport == self.cport
+        # Never make a multicast or broadcast address the client: an
+        # announcement (an mDNS response to the group) is a reply nobody
+        # asked for, and the group sent nothing.
+        if is_reply == sent_by_client and not _is_group_address(self.server):
+            self._swap()
 
     def add(self, src, sport, length, when, app, community_id, syn_only, from_client=None):
         """from_client, if given, says which way the packet went instead
@@ -193,10 +256,7 @@ class _Flow:
         # starts mid-connection, or UDP), whoever sent the first packet.
         if syn_only and not self.client_set_by_syn:
             if src != self.client or sport != self.cport:
-                self.client, self.server = self.server, self.client
-                self.cport, self.sport = self.sport, self.cport
-                self.pkts_ts, self.pkts_tc = self.pkts_tc, self.pkts_ts
-                self.bytes_ts, self.bytes_tc = self.bytes_tc, self.bytes_ts
+                self._swap()
             self.client_set_by_syn = True
         if from_client is None:
             from_client = src == self.client and sport == self.cport
@@ -327,6 +387,14 @@ def build_records(lines):
             flow.add(src, sport, length, when, '', '', False, from_client=outer_src == flow.client)
             continue
         flow.add(src, sport, length, when, app, f[_F_CID], syn_only)
+        if not (flow.client_set_by_syn or flow.client_set_by_message):
+            # A SYN-ACK is a reply too: a stream that opens on one (a
+            # server re-sending it after the connection was reset) has
+            # the server sending first.
+            syn_ack = f[_F_SYN] in ('1', 'True') and f[_F_ACK] in ('1', 'True')
+            is_reply = True if syn_ack else _is_reply(cols)
+            if is_reply is not None:
+                flow.orient(src, sport, is_reply)
         packet = None
         for handler, columns in protocols:
             # A protocol only sees packets of its own protocols: tshark

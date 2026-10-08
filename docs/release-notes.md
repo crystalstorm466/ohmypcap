@@ -19,6 +19,11 @@ tables, Sankey diagram, search and pivot menu work on both:
   agree on nearly every field they share (see [SURI-CRATES and
   SHAR-CRATES](usage/exploring-results.md#suri-crates-and-shar-crates) for
   the differences that remain)
+- **The right client** - a flow is addressed from whoever made its first
+  request, so a capture that starts on a server's answer doesn't show the
+  server as the client of everything that follows (Suricata does, and logs
+  nothing for the flow's protocol - see [SURI-CRATES and
+  SHAR-CRATES](usage/exploring-results.md#suri-crates-and-shar-crates))
 - **Repeated DNS answers** - a query answered more than once (which can be an
   attacker racing the real server) is one record whose details give the
   number of **Responses**, beside the number of **Transmissions** of the query

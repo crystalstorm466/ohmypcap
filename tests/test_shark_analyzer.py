@@ -367,10 +367,15 @@ class TestExtraCaptureAgainstSuricata(unittest.TestCase):
         return [r[event_type] for r in self.records if r['event_type'] == event_type]
 
     def test_dns_http_ftp_and_mdns_match_suricata(self):
-        for event_type in ('dns', 'http', 'ftp', 'mdns'):
+        for event_type in ('http', 'ftp', 'mdns'):
             with self.subTest(event_type=event_type):
                 self.assertEqual(self.report[event_type]['differences'], [])
                 self.assertEqual(self.report[event_type]['matched'], self.report[event_type]['suricata'])
+        dns = self.report['dns']
+        self.assertEqual(dns['matched'], dns['suricata'])
+        self.assertEqual([(d.get('only'), d['record']['queries']) for d in dns['differences']],
+                         [('shark', [('time.example.com', 'A')])] * 2,
+                         'the only difference: the DNS Suricata never parsed on the flow caught mid-conversation')
 
     def test_flows_match_suricata_except_for_protocols_it_cannot_name(self):
         """Every flow's counts and times match - including the one an ICMP
@@ -381,7 +386,38 @@ class TestExtraCaptureAgainstSuricata(unittest.TestCase):
         for d in diffs:
             self.assertEqual(set(d['fields']), {'app_proto'}, d)
             self.assertIn(d['fields']['app_proto'][0], (None, 'sip'))
-            self.assertIn(d['fields']['app_proto'][1], ('llmnr', 'nbns', 'ssdp', 's7comm'))
+            self.assertIn(d['fields']['app_proto'][1], ('llmnr', 'nbns', 'ssdp', 's7comm', 'dns'))
+        self.assertEqual(self.report['flow']['reoriented'], 4,
+                         'the flow caught mid-conversation, and the LLMNR, NBNS and SSDP answers on flows of their own')
+
+    def _flow(self, port):
+        [flow] = [r for r in self.records if r['event_type'] == 'flow' and port in (r.get('src_port'), r.get('dest_port'))]
+        return flow
+
+    def test_a_flow_caught_mid_conversation_is_addressed_from_whoever_asked(self):
+        """REGRESSION (4SICS GeekLounge): the capture opened on a DNS server's
+        answer, so the server was taken for the client and all 43,000 of
+        the flow's queries were addressed from the server to the asker."""
+        flow = self._flow(949)
+        self.assertEqual((flow['src_ip'], flow['src_port'], flow['dest_ip'], flow['dest_port']),
+                         ('10.1.0.10', 949, '10.1.0.53', 53))
+        self.assertEqual((flow['flow']['pkts_toserver'], flow['flow']['pkts_toclient']), (1, 2))
+        records = [r for r in self.records if r['event_type'] == 'dns' and r['dns']['queries'][0]['rrname'] == 'time.example.com']
+        self.assertEqual([(r['src_ip'], r['dest_ip'], r['dns']['rcode']) for r in records],
+                         [('10.1.0.10', '10.1.0.53', 'REFUSED')] * 2)
+
+    def test_an_answer_on_a_flow_of_its_own_is_addressed_from_the_asker(self):
+        """A multicast or broadcast question's unicast answer is a flow of
+        one packet - from the answerer, but to the client that asked."""
+        [flow] = [r for r in self.records if r['event_type'] == 'flow' and '10.1.0.70' in (r['src_ip'], r['dest_ip'])]
+        self.assertEqual((flow['src_ip'], flow['dest_ip'], flow['dest_port']), ('10.1.0.10', '10.1.0.70', 5355))
+        self.assertEqual((flow['flow']['pkts_toserver'], flow['flow']['pkts_toclient']), (0, 1))
+
+    def test_an_announcement_to_a_group_keeps_its_sender_as_the_client(self):
+        """An mDNS response to the multicast group answers nobody - the
+        group can't be a client."""
+        [flow] = [r for r in self.records if r['event_type'] == 'flow' and r['src_ip'] == '10.1.0.60' and r.get('src_port') == 5353]
+        self.assertEqual(flow['dest_ip'], '224.0.0.251')
 
     def test_icmp_error_counts_in_its_flow_in_its_own_direction(self):
         """REGRESSION: the client's port unreachable carries a copy of the
@@ -393,7 +429,7 @@ class TestExtraCaptureAgainstSuricata(unittest.TestCase):
     def test_dns_retransmissions_and_repeated_responses_are_one_transaction(self):
         """REGRESSION: each resent query, and each repeat of a response
         (tshark links only the first to its query), was its own record."""
-        slow, echo = self._of('dns')
+        slow, echo = [d for d in self._of('dns') if d['queries'][0]['rrname'] in ('slow.example.com', 'echo.example.com')]
         self.assertEqual((slow['queries'][0]['rrname'], slow['type'], slow['transmissions']), ('slow.example.com', 'response', 2))
         self.assertEqual((echo['queries'][0]['rrname'], echo['type'], echo['responses']), ('echo.example.com', 'response', 3),
                          'the answer sent three times: one record that says so - repeated answers can be spoofing')
@@ -403,7 +439,7 @@ class TestExtraCaptureAgainstSuricata(unittest.TestCase):
     def test_mdns_and_llmnr_are_not_dns(self):
         """REGRESSION: tshark decodes both with its DNS dissector, so their
         packets carry dns.* fields - they were recorded as DNS."""
-        self.assertEqual(len(self._of('dns')), 2)
+        self.assertFalse([d for d in self._of('dns') if d['queries'][0]['rrname'].endswith('.local') or d['queries'][0]['rrname'] == 'wpad'])
         query, answer = self._of('mdns')
         self.assertEqual(answer['answers'], [{'rrname': '_ipp._tcp.local', 'ptr': 'printer._ipp._tcp.local'}],
                          "Suricata's mDNS answer layout")
@@ -445,6 +481,64 @@ class TestExtraCaptureAgainstSuricata(unittest.TestCase):
         password = next(f for f in ftp if f.get('command') == 'PASS')
         self.assertEqual(password['completion_code'], ['530'])
         self.assertEqual(ftp[-1], {'completion_code': ['221'], 'reply': ['Goodbye.'], 'reply_received': 'yes'})
+
+
+class TestFlowOrientation(unittest.TestCase):
+    def _flow(self):
+        return shark_analyzer._Flow(('udp', 0), 'UDP', 4, '10.0.0.53', '10.0.0.9', 53, 40000, 1.0, 0)
+
+    def test_a_reply_first_turns_the_flow_round(self):
+        flow = self._flow()
+        flow.add('10.0.0.53', 53, 80, 1.0, 'dns', '', False)
+        flow.orient('10.0.0.53', 53, True)
+        self.assertEqual((flow.client, flow.cport, flow.server, flow.pkts_ts, flow.pkts_tc), ('10.0.0.9', 40000, '10.0.0.53', 0, 1))
+
+    def test_only_the_first_request_or_reply_decides(self):
+        flow = self._flow()
+        flow.orient('10.0.0.53', 53, False)    # the first sender's request: it is the client
+        flow.orient('10.0.0.53', 53, True)
+        self.assertEqual(flow.client, '10.0.0.53')
+
+    def test_a_stream_that_opens_on_a_syn_ack_is_the_other_sides(self):
+        """Found in the 4SICS GeekLounge capture: a server re-sends its
+        SYN-ACK after the client reset the connection, and tshark starts a
+        new stream there - whose first sender is the server."""
+        from tests.pcap_fixtures import _tcp_packet, write_pcap
+        with tempfile.TemporaryDirectory() as tmp:
+            pcap = os.path.join(tmp, 'synack.pcap')
+            write_pcap(pcap, [_tcp_packet('10.0.0.80', '10.0.0.9', 80, 40000, 5000, 1001, 0x12),
+                              _tcp_packet('10.0.0.9', '10.0.0.80', 40000, 80, 1001, 0, 0x04)])
+            [flow] = [e for e in shark_analyzer.run_tshark(pcap) if e['event_type'] == 'flow']
+        self.assertEqual((flow['src_ip'], flow['src_port'], flow['dest_port']), ('10.0.0.9', 40000, 80))
+        self.assertEqual((flow['flow']['pkts_toserver'], flow['flow']['pkts_toclient']), (1, 1))
+
+    def test_a_syn_outranks_a_message(self):
+        flow = shark_analyzer._Flow(('tcp', 0), 'TCP', 4, '10.0.0.9', '10.0.0.80', 40000, 80, 1.0, 0)
+        flow.add('10.0.0.9', 40000, 60, 1.0, '', '', True)
+        flow.orient('10.0.0.9', 40000, True)
+        self.assertEqual(flow.client, '10.0.0.9')
+
+    def test_what_marks_a_reply(self):
+        def cols(**values):
+            out = [''] * len(shark_analyzer._ALL_FIELDS)
+            for name, value in values.items():
+                out[shark_analyzer._COLUMN[name.replace('__', '.')]] = value
+            return out
+        cases = [({'dns__flags__response': 'True'}, True), ({'dns__flags__response': 'False'}, False),
+                 ({'nbns__flags__response': '1'}, True), ({'http__response__code': '200'}, True),
+                 ({'http__request__method': 'GET'}, False), ({'ftp__response__code': '220'}, True),
+                 ({'ftp__request__command': 'USER'}, False), ({'s7comm__header__rosctr': '3'}, True),
+                 ({'s7comm__header__rosctr': '1'}, False), ({'s7comm__header__rosctr': '7'}, None),
+                 ({'tls__handshake__type': '2'}, True), ({'tls__handshake__type': '1\x1f16'}, False),   # the first of a packet's handshakes
+                 ({'tls__handshake__type': '11'}, None), ({'mbtcp__trans_id': '1'}, None), ({}, None)]
+        for values, expected in cases:
+            with self.subTest(values=values):
+                self.assertIs(shark_analyzer._is_reply(cols(**values)), expected)
+
+    def test_group_addresses(self):
+        self.assertEqual([shark_analyzer._is_group_address(a) for a in
+                          ('224.0.0.251', '239.255.255.250', '255.255.255.255', '10.1.0.255', 'ff02::fb', '10.1.0.10', '2001:db8::1', 'aa:bb:cc:dd:ee:ff')],
+                         [True, True, True, True, True, False, False, False])
 
 
 class TestProtocolDetails(unittest.TestCase):
