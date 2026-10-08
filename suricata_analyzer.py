@@ -227,6 +227,29 @@ def _enable_ja3_ja4_fingerprints(config_content):
     return config_content
 
 
+def _set_mpm_cache_path(config_content, cache_dir):
+    """Point Suricata's compiled-rule cache (sgh-mpm-caching-path) at
+    cache_dir.
+
+    The shipped config already turns the cache on (`sgh-mpm-caching:
+    yes`), but at /var/lib/suricata/cache/sgh - a directory that doesn't
+    exist in the image, under a parent owned by root while Suricata runs
+    unprivileged. So the cache was never written, and every run rebuilt
+    every Hyperscan database: 16.5s of rule loading on a tiny pcap,
+    against 7.3s once a writable cache is warm (measured on the image's
+    53k-rule default set). The first run after a rule change still
+    rebuilds, and Suricata prunes entries unused for 7 days by default.
+
+    Rewrites whatever path is set rather than matching the shipped
+    default, so it also moves an already-processed config.
+    """
+    return re.sub(
+        r'(?m)^(\s+sgh-mpm-caching-path:\s*).*$',
+        lambda m: m.group(1) + cache_dir,
+        config_content
+    )
+
+
 def _enable_community_id(config_content):
     """Enable Suricata's community-id output, which ships disabled by
     default (`community-id: false`).
@@ -705,6 +728,12 @@ def setup_suricata_config(data_dir=None, enable_arp=False, on_progress=print, ne
         config_content = _enable_app_layer_protocols(config_content)
         config_content = _enable_eve_log_protocol_types(config_content)
         config_content = _enable_community_id(config_content)
+        mpm_cache_dir = os.path.join(suricata_dir, 'cache', 'sgh')
+        try:
+            os.makedirs(mpm_cache_dir, exist_ok=True)
+            config_content = _set_mpm_cache_path(config_content, mpm_cache_dir)
+        except OSError as e:
+            on_progress(f'Warning: could not create the rule cache directory {mpm_cache_dir}: {e}')
         config_content = _enable_ja3_ja4_fingerprints(config_content)
         if enable_arp:
             config_content = _enable_eve_log_arp(config_content)

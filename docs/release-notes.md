@@ -1,5 +1,17 @@
 # Release Notes
 
+## 5.0.0
+
+### Fixes
+
+- Suricata now caches its compiled rules between analyses, so a PCAP
+  analysis no longer spends about 16 seconds rebuilding them every time -
+  after the first analysis, the built-in Sample PCAP file takes about 9
+  seconds instead of 19. The cache was always turned on in Suricata's
+  config, but pointed at a directory Suricata couldn't create; it's now
+  kept under `/data/suricata/cache`. The first analysis after a rule
+  update still rebuilds it.
+
 ## 4.4.0
 
 ### Email analysis

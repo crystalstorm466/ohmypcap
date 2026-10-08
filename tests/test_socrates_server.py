@@ -6121,6 +6121,38 @@ class TestSuricataProtocolEnable(unittest.TestCase):
                     content = f.read()
         self.assertIn('community-id: true', content)
 
+    def test_set_mpm_cache_path_rewrites_the_path(self):
+        sample = '''  sgh-mpm-caching: yes
+  sgh-mpm-caching-path: /var/lib/suricata/cache/sgh
+  # sgh-mpm-caching-max-age: 7d
+'''
+        result = suricata_analyzer._set_mpm_cache_path(sample, '/data/suricata/cache/sgh')
+        self.assertIn('  sgh-mpm-caching-path: /data/suricata/cache/sgh\n', result)
+        self.assertIn('  sgh-mpm-caching: yes\n', result, 'must not touch the on/off key')
+        self.assertIn('  # sgh-mpm-caching-max-age: 7d\n', result)
+
+    def test_set_mpm_cache_path_is_idempotent_and_moves_an_old_path(self):
+        sample = '  sgh-mpm-caching-path: /old/data/suricata/cache/sgh\n'
+        once = suricata_analyzer._set_mpm_cache_path(sample, '/data/suricata/cache/sgh')
+        self.assertEqual(once, '  sgh-mpm-caching-path: /data/suricata/cache/sgh\n')
+        self.assertEqual(suricata_analyzer._set_mpm_cache_path(once, '/data/suricata/cache/sgh'), once)
+
+    def test_setup_points_the_rule_cache_at_a_writable_data_dir(self):
+        '''REGRESSION: the shipped config caches compiled rules under
+        /var/lib/suricata/cache/sgh, which doesn't exist in the image and
+        can't be created by the unprivileged user Suricata runs as - so the
+        cache was never written and every analysis spent ~16s rebuilding
+        the Hyperscan databases (7s with a warm cache).'''
+        with unittest.mock.patch('suricata_analyzer.has_internet_access', return_value=False):
+            with tempfile.TemporaryDirectory() as tmpdir:
+                suricata_analyzer.setup_suricata_config(tmpdir)
+                cache_dir = os.path.join(tmpdir, 'suricata', 'cache', 'sgh')
+                with open(os.path.join(tmpdir, 'suricata', 'suricata.yaml')) as f:
+                    content = f.read()
+                self.assertTrue(os.path.isdir(cache_dir))
+        self.assertIn(f'sgh-mpm-caching-path: {cache_dir}\n', content)
+        self.assertNotIn('/var/lib/suricata/cache', content)
+
     def test_enable_ja3_ja4_fingerprints_flips_commented_auto_to_yes(self):
         sample = '''      #ja3-fingerprints: auto
       #ja4-fingerprints: auto
