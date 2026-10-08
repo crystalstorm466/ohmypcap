@@ -432,6 +432,21 @@ def create_file_analysis_db(db_path, file_path, yara_matches, file_md5, file_sha
         conn.commit()
 
 
+# SHAR-CRATES connection types: 'conn_<app proto>' is a view on the flow
+# rows, not stored rows of its own - the flows tshark found carrying that
+# protocol (e.g. conn_s7comm), for every protocol shark_protocols has no
+# transaction records for. Each gets its own tab, with flow's columns.
+CONNECTION_TYPE_PREFIX = 'conn_'
+
+
+def _columns_type(event_type):
+    """The event type whose columns (AGGREGATION_JSON_PATHS) event_type
+    uses - flow's, for a connection type."""
+    if event_type and event_type.startswith(CONNECTION_TYPE_PREFIX):
+        return 'flow'
+    return event_type
+
+
 def _build_where_conditions(has_acknowledged_table, terms, has_fts, event_type, event_type_col, acknowledged_only=False):
     """Build WHERE conditions and parameters for event queries.
 
@@ -480,7 +495,11 @@ def _build_where_conditions(has_acknowledged_table, terms, has_fts, event_type, 
             conditions.append("json_data LIKE ? ESCAPE '\\'")
             params.append(_sanitize_like(term))
 
-    if event_type:
+    if event_type and event_type.startswith(CONNECTION_TYPE_PREFIX):
+        app_proto_col = (event_type_col or 'event_type').replace('event_type', 'app_proto')
+        conditions.append(f"{event_type_col} = 'flow' AND {app_proto_col} = ?")
+        params.append(event_type[len(CONNECTION_TYPE_PREFIX):])
+    elif event_type:
         conditions.append(f'{event_type_col} = ?')
         params.append(event_type)
     else:
@@ -858,6 +877,28 @@ def get_event_types_sqlite(db_path, q=None):
             return {row['event_type']: row['cnt'] for row in cursor.fetchall()}
         except sqlite3.OperationalError:
             return {}
+
+
+def get_connection_type_counts_sqlite(db_path, q=None, exclude=()):
+    """SHAR-CRATES' connection types (see CONNECTION_TYPE_PREFIX) and their
+    flow counts, matching q like get_event_types_sqlite - one per
+    application protocol among the flows, except those in exclude (the
+    protocols with transaction records of their own) and flows with no
+    application protocol."""
+    with _db_connection(db_path) as conn:
+        if not _has_events_table(conn):
+            return {}
+        terms = _build_search_terms(q)
+        has_fts = _has_fts5(conn) if terms else False
+        select, event_type_col = _events_select(terms, has_fts, 'app_proto, COUNT(*)', 'e.app_proto, COUNT(*)')
+        conditions, params = _build_where_conditions(_has_acknowledged_alerts_table(conn), terms, has_fts, 'flow', event_type_col)
+        app_proto_col = event_type_col.replace('event_type', 'app_proto')
+        sql = f"{select} WHERE {' AND '.join(conditions)} GROUP BY {app_proto_col} ORDER BY 2 DESC, 1"
+        try:
+            rows = conn.execute(sql, params).fetchall()
+        except sqlite3.OperationalError:
+            return {}
+    return {CONNECTION_TYPE_PREFIX + proto: n for proto, n in rows if proto and proto not in exclude}
 
 
 def get_event_date_range_sqlite(db_path, q=None):
@@ -1241,6 +1282,29 @@ AGGREGATION_JSON_PATHS = {
         'Query': ['$.mdns.queries[0].rrname'],
         'Type': ['$.mdns.queries[0].rrtype'],
     },
+    # SHAR-CRATES-only types (shark_protocols.py)
+    'llmnr': {
+        'Query': ['$.llmnr.queries[0].rrname'],
+        'Type': ['$.llmnr.queries[0].rrtype'],
+    },
+    's7comm': {
+        'Type': ['$.s7comm.type'],
+        'Function': ['$.s7comm.function', '$.s7comm.function_group'],
+        'Area': ['$.s7comm.items[0].area'],
+        'Error': ['$.s7comm.response.error_class'],
+    },
+    'ssdp': {
+        'Method': ['$.ssdp.method', '$.ssdp.status'],
+        'Search Target': ['$.ssdp.search_target', '$.ssdp.notification_type'],
+        'Location': ['$.ssdp.location'],
+        'Server': ['$.ssdp.server'],
+    },
+    'nbns': {
+        'Opcode': ['$.nbns.opcode'],
+        'NetBIOS Name': ['$.nbns.name'],
+        'Service': ['$.nbns.service'],
+        'Address': ['$.nbns.address'],
+    },
     # 'ldap' intentionally has no entry here: like mqtt, its request/response
     # detail lives under a differently-named sub-object per operation type
     # (bind_request/search_request/modify_request/.../bind_response/
@@ -1485,8 +1549,9 @@ def _sort_expr(event_type, label, prefix=''):
         # casting to TEXT here would sort "3306" before "443" before "80".
         col, _cast_text = REAL_AGGREGATION_COLUMNS[label]
         return f'{prefix}{col}'
-    if event_type in AGGREGATION_JSON_PATHS and label in AGGREGATION_JSON_PATHS[event_type]:
-        return _aggregation_expr(event_type, label, AGGREGATION_JSON_PATHS[event_type][label], prefix=prefix)
+    columns_type = _columns_type(event_type)
+    if columns_type in AGGREGATION_JSON_PATHS and label in AGGREGATION_JSON_PATHS[columns_type]:
+        return _aggregation_expr(columns_type, label, AGGREGATION_JSON_PATHS[columns_type][label], prefix=prefix)
     if event_type is None:
         # Merged 'all events' view only - 'Type'/'Detail' aren't real columns
         # of any specific event_type, so this must never fire for a specific
@@ -1506,6 +1571,7 @@ def _aggregation_column_specs(event_type, prefix):
     can never drift on which columns/expressions they aggregate over.
     Returns None if event_type isn't one of the supported per-type tabs (and
     isn't the merged 'all events' view, event_type=None)."""
+    event_type = _columns_type(event_type)
     if event_type is not None and event_type not in AGGREGATION_JSON_PATHS:
         return None
     column_specs = []

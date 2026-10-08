@@ -74,12 +74,24 @@ def _modbus_fields(e):
 def _flow_fields(e):
     f = e['flow']
     return {'src': (e.get('src_ip'), e.get('src_port')), 'dest': (e.get('dest_ip'), e.get('dest_port')),
-            'proto': e.get('proto'), 'app_proto': e.get('app_proto') or None,
+            # Suricata says 'failed' where it found no application protocol
+            'proto': e.get('proto'), 'app_proto': None if e.get('app_proto') in (None, '', 'failed') else e['app_proto'],
             **{k: f.get(k) for k in ('pkts_toserver', 'pkts_toclient', 'bytes_toserver', 'bytes_toclient',
                                      'start', 'end')}}
 
 
-# type -> (key within a flow, fields compared)
+def _ftp_fields(e):
+    f = e['ftp']
+    return {k: f.get(k) for k in ('command', 'command_data', 'completion_code', 'reply', 'dynamic_port', 'mode',
+                                  'reply_received')}
+
+
+def _ftp_data_fields(e):
+    return {k: e['ftp_data'].get(k) for k in ('command', 'filename')}
+
+
+# type -> (key within a flow, fields compared). Records with the same key on
+# one flow (a second TYPE command) are matched in order.
 TYPES = {
     'flow': (lambda e: (), _flow_fields),
     'dns': (_dns_key, _dns_fields),
@@ -87,37 +99,70 @@ TYPES = {
     'tls': (lambda e: (), _tls_fields),
     'modbus': (lambda e: (e['modbus'].get('request') or e['modbus'].get('response') or {}).get('transaction_id'),
                _modbus_fields),
+    'ftp': (lambda e: (e['ftp'].get('command'), e['ftp'].get('command_data')), _ftp_fields),
+    'ftp_data': (lambda e: e['ftp_data'].get('filename'), _ftp_data_fields),
+    'quic': (lambda e: (), lambda e: {k: (e['quic'].get(k) or {}).get('hash') if k in ('ja3', 'ja3s') else e['quic'].get(k)
+                                      for k in ('version', 'sni', 'ja3', 'ja3s', 'ja4')}),
+    'mdns': (lambda e: (e['mdns'].get('type'), tuple(q['rrname'] for q in e['mdns'].get('queries', []))),
+             lambda e: {'queries': [(q['rrname'], q['rrtype']) for q in e['mdns'].get('queries', [])],
+                        'answers': sorted(tuple(sorted(a.items())) for a in e['mdns'].get('answers', [])),
+                        'rcode': e['mdns'].get('rcode')}),
 }
 
 
 def _suricata_dns(events):
     """Suricata logs a DNS request and its response as separate records;
-    merge them into one per transaction, like SHAR-CRATES."""
+    pair them into one per transaction, the way SHAR-CRATES does: in time
+    order, a request opens a transaction unless the same question is
+    already waiting on that flow with that ID (a retransmission); a
+    response closes the waiting one, and one with nothing waiting after an
+    answered transaction is the same response again."""
+    transactions, waiting, answered = [], {}, set()
+    dns = sorted((e for e in events if e.get('event_type') == 'dns'), key=lambda e: e.get('timestamp', ''))
+    for e in dns:
+        d = e['dns']
+        q = d.get('queries') or [{}]
+        key = (e.get('community_id'), d.get('id'), q[0].get('rrname'), q[0].get('rrtype'))
+        if d.get('type') == 'request':
+            if key not in waiting:
+                waiting[key] = len(transactions)
+                transactions.append(e)
+        elif key in waiting:
+            transactions[waiting.pop(key)] = e
+            answered.add(key)
+        elif key not in answered:
+            transactions.append(e)
+            answered.add(key)
+    return transactions
+
+
+def _suricata_quic(events):
+    """Suricata logs several 'quic' records per connection (most just its
+    version); merge them into one per connection, like SHAR-CRATES."""
     merged = {}
-    for e in events:
-        if e.get('event_type') != 'dns':
-            continue
-        key = (e.get('community_id'), e['dns'].get('id'))
-        if e['dns'].get('type') == 'request' or key not in merged:
-            if key in merged and e['dns'].get('type') == 'request':
-                continue
-            merged[key] = e
-        if e['dns'].get('type') == 'response':
-            merged[key] = e
+    for e in sorted((e for e in events if e.get('event_type') == 'quic'), key=lambda e: e.get('timestamp', '')):
+        m = merged.setdefault(e.get('community_id'), dict(e, quic={}))
+        for k, v in e['quic'].items():
+            m['quic'].setdefault(k, v)
     return list(merged.values())
 
 
 def compare(suricata_events, shark_events):
     """{'type': {'suricata': n, 'shark': n, 'matched': n, 'differences': [...]}}."""
-    suricata = [e for e in suricata_events if e.get('event_type') != 'dns'] + _suricata_dns(suricata_events)
+    suricata = ([e for e in suricata_events if e.get('event_type') not in ('dns', 'quic')]
+                + _suricata_dns(suricata_events) + _suricata_quic(suricata_events))
     report = {}
     for etype, (key_of, fields_of) in TYPES.items():
         def index(events):
-            out = {}
-            for e in events:
+            # Records sharing a key (a reused 5-tuple's flows have one
+            # Community ID) are matched in time order - flows by their
+            # start, since Suricata writes a flow out when it ends.
+            out, seen = {}, {}
+            for e in sorted(events, key=lambda e: (e.get('flow') or {}).get('start') or e.get('timestamp') or ''):
                 if e.get('event_type') == etype:
-                    occurrences = out.setdefault((e.get('community_id'), key_of(e)), [])
-                    occurrences.append(e)
+                    base = (e.get('community_id'), key_of(e))
+                    seen[base] = seen.get(base, -1) + 1
+                    out[base + (seen[base],)] = [e]
             return out
         a, b = index(suricata), index(shark_events)
         result = {'suricata': sum(map(len, a.values())), 'shark': sum(map(len, b.values())),

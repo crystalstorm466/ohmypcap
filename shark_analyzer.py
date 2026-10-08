@@ -55,7 +55,7 @@ SHARK_ARTIFACTS = (SHARK_DB, SHARK_DB + '-wal', SHARK_DB + '-shm', SHARK_DB + '.
 # change here or in shark_protocols changes what a run produces: a
 # shark.db stamped with an older version is rebuilt the next time its
 # status is asked for, so existing analyses pick up the change.
-SHARK_FORMAT_VERSION = 2
+SHARK_FORMAT_VERSION = 4
 
 # The fields every packet is read for, one per column of tshark's
 # tab-separated output, in this order - then each of shark_protocols'
@@ -73,8 +73,12 @@ _FIELDS = (
 (_F_TIME, _F_LEN, _F_PROTOS, _F_IP_SRC, _F_IP_DST, _F_IP6_SRC, _F_IP6_DST, _F_IP_PROTO,
  _F_IP6_NXT, _F_TCP_SPORT, _F_TCP_DPORT, _F_UDP_SPORT, _F_UDP_DPORT, _F_TCP_STREAM,
  _F_UDP_STREAM, _F_SYN, _F_ACK, _F_ETH_SRC, _F_ETH_DST, _F_CID, _F_FRAME) = range(len(_FIELDS))
-_PROTOCOL_FIELDS = tuple(f for proto in PROTOCOLS for f in proto.fields)
+# Each field once: tshark fills only one column of a field asked for twice,
+# and protocols share fields (SSDP reads HTTP's) - so each protocol finds
+# its fields by name (_COLUMN), not by position.
+_PROTOCOL_FIELDS = tuple(dict.fromkeys(f for proto in PROTOCOLS for f in proto.fields if f not in _FIELDS))
 _ALL_FIELDS = _FIELDS + _PROTOCOL_FIELDS
+_COLUMN = {field: i for i, field in enumerate(_ALL_FIELDS)}
 # Joins a repeated field's values. tshark escapes control characters
 # inside a value (a tab comes out as the two characters \t), so this can
 # never appear in one.
@@ -182,7 +186,9 @@ class _Flow:
         self.community_id = ''
         self.client_set_by_syn = False
 
-    def add(self, src, sport, length, when, app, community_id, syn_only):
+    def add(self, src, sport, length, when, app, community_id, syn_only, from_client=None):
+        """from_client, if given, says which way the packet went instead
+        of src/sport (an ICMP error about this flow - see build_records)."""
         # The client is whoever sent the SYN; failing that (a capture that
         # starts mid-connection, or UDP), whoever sent the first packet.
         if syn_only and not self.client_set_by_syn:
@@ -192,7 +198,9 @@ class _Flow:
                 self.pkts_ts, self.pkts_tc = self.pkts_tc, self.pkts_ts
                 self.bytes_ts, self.bytes_tc = self.bytes_tc, self.bytes_ts
             self.client_set_by_syn = True
-        if src == self.client and sport == self.cport:
+        if from_client is None:
+            from_client = src == self.client and sport == self.cport
+        if from_client:
             self.pkts_ts += 1
             self.bytes_ts += length
         else:
@@ -265,11 +273,7 @@ def build_records(lines):
     records: one flow per conversation, in order of first packet, then
     shark_protocols' transaction records."""
     flows = {}
-    protocols = [proto() for proto in PROTOCOLS]
-    spans, start = [], len(_FIELDS)
-    for proto in protocols:
-        spans.append((proto, start, start + len(proto.fields)))
-        start += len(proto.fields)
+    protocols = [(proto(), [_COLUMN[field] for field in proto.fields]) for proto in PROTOCOLS]
     for line in lines:
         cols = line.rstrip('\n').split('\t')
         if len(cols) < len(_FIELDS):
@@ -281,6 +285,18 @@ def build_records(lines):
             continue
         length = _int(f[_F_LEN])
         app = app_protocol(f[_F_PROTOS])
+        # An ICMP error (port unreachable, TTL exceeded...) carries a copy
+        # of the packet it's about, whose addresses and ports are what the
+        # last-occurrence fields read - so it lands in that packet's flow,
+        # where Suricata (almost always) counts it too. It travels the other
+        # way from the copy, so its direction comes from its own (outer)
+        # source, and the copy is never fed to the protocol records as a
+        # real message.
+        icmp_error = ':icmp:ip:' in f[_F_PROTOS] or ':icmpv6:ipv6:' in f[_F_PROTOS]
+        if icmp_error:
+            app = ''
+            outer_src = cols[_F_IP_SRC].split(_AGGREGATOR)[0] if f[_F_IP_SRC] else \
+                ipv6_exploded(cols[_F_IP6_SRC].split(_AGGREGATOR)[0])
         if f[_F_IP_SRC] or f[_F_IP6_SRC]:
             ip_v = 4 if f[_F_IP_SRC] else 6
             if ip_v == 4:
@@ -307,18 +323,27 @@ def build_records(lines):
         flow = flows.get(key)
         if flow is None:
             flow = flows[key] = _Flow(key, proto, ip_v, src, dst, sport, dport, when, stream)
+        if icmp_error:
+            flow.add(src, sport, length, when, '', '', False, from_client=outer_src == flow.client)
+            continue
         flow.add(src, sport, length, when, app, f[_F_CID], syn_only)
         packet = None
-        for handler, lo, hi in spans:
-            values = cols[lo:hi]
+        for handler, columns in protocols:
+            # A protocol only sees packets of its own protocols: tshark
+            # reuses one dissector's fields for others (mDNS and LLMNR carry
+            # dns.* fields, SSDP http.* ones), so fields alone can't say
+            # whose packet it is.
+            if app not in handler.app_protos:
+                continue
+            values = [cols[i] if i < len(cols) else '' for i in columns]
             if not any(values):
                 continue
             if packet is None:
-                packet = Packet(_int(f[_F_FRAME]), when, flow, sport, dport)
-            handler.feed(packet, {name: [_unescape(x) for x in (values[i].split(_AGGREGATOR) if i < len(values) and values[i] else [])]
-                                  for i, name in enumerate(handler.fields)})
+                packet = Packet(_int(f[_F_FRAME]), when, flow, sport, dport, app, src, dst)
+            handler.feed(packet, {name: [_unescape(x) for x in value.split(_AGGREGATOR)] if value else []
+                                  for name, value in zip(handler.fields, values)})
     events = [flow.event() for flow in sorted(flows.values(), key=lambda fl: fl.first)]
-    for handler in protocols:
+    for handler, _ in protocols:
         for flow, when, event_type, body in handler.finish():
             events.append(flow.record(when, event_type, body))
     return events

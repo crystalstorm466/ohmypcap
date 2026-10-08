@@ -18,16 +18,20 @@ After analysis completes, the UI displays different views depending on the file 
 A PCAP analysis has two views of the same capture, switched with the **SURI-CRATES** and **SHAR-CRATES** tabs above the search box:
 
 - **SURI-CRATES** is Suricata's view - alerts, flows and protocol records - and is what every PCAP analysis opens on
-- **SHAR-CRATES** is tshark's view. tshark (Wireshark's command-line engine) decodes far more protocols than Suricata, but packet by packet; SHAR-CRATES groups those packets into records shaped like Suricata's: one **Flow** per conversation, showing the protocol tshark found in it (**App Proto**), plus one record per transaction for DNS, HTTP, TLS and Modbus. The same tabs, aggregation tables, Sankey diagram, search and pivot menu work on both. SHAR-CRATES has no alerts - detection is Suricata's
+- **SHAR-CRATES** is tshark's view. tshark (Wireshark's command-line engine) decodes far more protocols than Suricata, but packet by packet; SHAR-CRATES groups those packets into records shaped like Suricata's: one **Flow** per conversation, showing the protocol tshark found in it (**App Proto**), plus one record per transaction for DNS, mDNS, HTTP, TLS, QUIC, Modbus and FTP - and for four protocols Suricata doesn't parse: **NBNS** and **LLMNR** (Windows name resolution and registration), **SSDP** (UPnP device discovery) and **S7comm** (Siemens PLC reads, writes and control). Every other protocol tshark finds gets a tab of its own listing its connections - OpenVPN, PRP, SSH and so on - and a **not in Suricata** badge marks the ones Suricata doesn't parse at all. The same aggregation tables, Sankey diagram, search and pivot menu work on both views. SHAR-CRATES has no alerts - detection is Suricata's
 
 SHAR-CRATES starts by itself in the background as soon as Suricata finishes, so it's usually ready by the time you want it. Beside the tabs, SO-CRATES says where it is: "Analyzing with tshark…" while it works (with a spinning ring on its tab), then how many flows and protocols tshark found. A capture over 250 MB isn't analyzed until you ask, because tshark's memory use grows with the capture - click **Analyze now** (or the SHAR-CRATES tab) to start it. If a run fails, the reason is shown with a **Try again** link.
 
 Switching views keeps your search and filters, so you land on the same slice of traffic in the other view. To follow one flow from one view to the other, open the pivot menu on any of its rows and choose **View in SHAR-CRATES** (or **View in SURI-CRATES**) - it finds the same flow by its Community ID, which both views compute identically.
 
-Where both views decode a protocol, they agree on every field they share, with a few differences in how they count:
+Where both views decode a protocol, they agree on nearly every field they share - checked record by record against Suricata on dozens of real captures. The differences that remain:
 
-- **DNS** - Suricata logs a query and its response as two records; SHAR-CRATES makes them one, so its DNS count is the number of queries
+- **Flows** - the two tools draw a conversation's boundaries differently. A long-lived UDP exchange with quiet gaps (mDNS, NTP) is one SHAR-CRATES flow but several Suricata flows, since Suricata ends a flow once it's been idle; and a port scan that reuses one source port is one Suricata flow but a SHAR-CRATES flow per attempt. Counted per address-and-port pair, their packet totals agree
+- **DNS** - Suricata logs a query and its response as two records; SHAR-CRATES makes them one - folding in the query's retransmissions and any repeats of its response - so its DNS count is the number of queries
 - **HTTP** - for a response with no `Content-Length` header, Suricata counts the body's length itself; SHAR-CRATES leaves the length empty
+- **FTP** - for a reply that runs over several lines (like many servers' greetings), SHAR-CRATES has every reply code but only the first line's text. And a command Suricata doesn't recognize (`OPTS`, `AUTH TLS`) gets its reply in SHAR-CRATES, where Suricata logs the reply on its own, with no command
+- **TLS and QUIC** - a JA3 fingerprint of a QUIC handshake that uses GREASE values differs (Suricata keeps them; tshark drops them, as JA3 specifies), as can JA4 on some old SSL/TLS handshakes. Google's older gQUIC gets no QUIC record
+- **More in SHAR-CRATES** - where Suricata's parser gives up on a connection (a flood of malformed or pipelined requests), or never recognizes one, SHAR-CRATES often still decodes it: its records for those are real traffic, not duplicates
 - **Row notes** are kept with SURI-CRATES, so a SHAR-CRATES row can't have one
 
 **For log files (`.evtx`, `.json`, `.jsonl`, `.csv`, `.xml`, `.log`):**

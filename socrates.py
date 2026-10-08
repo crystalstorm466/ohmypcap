@@ -25,7 +25,7 @@ from db import (
     query_sigma_alerts_sqlite, get_sigma_stats_sqlite,
     get_sigma_alert_count_sqlite, get_event_date_range_sqlite,
     get_sankey_data_sqlite, get_aggregation_data_sqlite, get_aggregation_totals_sqlite,
-    get_shark_summary_sqlite,
+    get_shark_summary_sqlite, get_connection_type_counts_sqlite,
     AGGREGATION_TOP_N, AGGREGATION_PAGE_SIZE_OPTIONS,
     set_row_note, has_row_notes,
     set_acknowledged, set_acknowledged_bulk,
@@ -66,6 +66,7 @@ from ohmydebn_colors import (
 )
 from email_analyzer import analyze_message, remove_filestore
 import shark_analyzer
+from shark_protocols import RECORDED_APP_PROTOS
 from playbook_lookup import get_playbook
 from samples import SAMPLES
 from ai_summary_lookup import get_ai_summary
@@ -872,6 +873,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if os.path.exists(db_file):
             try:
                 counts = get_event_types_sqlite(db_file, q)
+                if params.get('view', [''])[0] == 'shark':
+                    # A tab per protocol that has no records of its own -
+                    # see db.CONNECTION_TYPE_PREFIX.
+                    counts.update(get_connection_type_counts_sqlite(db_file, q, RECORDED_APP_PROTOS))
                 date_range = get_event_date_range_sqlite(db_file, q)
             except Exception:
                 self._send_error(500, 'Database error')

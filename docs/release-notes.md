@@ -11,12 +11,17 @@ protocols than Suricata, but packet by packet; SHAR-CRATES turns its
 output into records shaped like Suricata's, so the same tabs, aggregation
 tables, Sankey diagram, search and pivot menu work on both:
 
-- **Flows** - one per conversation, with the protocol tshark found in it,
-  including the many protocols Suricata doesn't parse
-- **DNS, HTTP, TLS and Modbus** - one record per transaction, checked
-  against Suricata's on the same captures: they agree on every field they
-  share (see [SURI-CRATES and SHAR-CRATES](usage/exploring-results.md#suri-crates-and-shar-crates)
-  for the few counting differences)
+- **Flows** - one per conversation, with the protocol tshark found in it
+- **A tab for every protocol** tshark finds, listing its connections, with
+  a **not in Suricata** badge on the many Suricata doesn't parse
+- **DNS, mDNS, HTTP, TLS, QUIC, Modbus and FTP** - one record per
+  transaction, checked against Suricata's on dozens of real captures: they
+  agree on nearly every field they share (see [SURI-CRATES and
+  SHAR-CRATES](usage/exploring-results.md#suri-crates-and-shar-crates) for
+  the differences that remain)
+- **NBNS, LLMNR, SSDP and S7comm** - records for four protocols Suricata
+  doesn't parse: Windows name resolution and registration, UPnP device
+  discovery, and Siemens PLC reads, writes and control
 
 SHAR-CRATES builds itself in the background once Suricata finishes;
 captures over 250 MB wait until you ask. Switching views keeps your search

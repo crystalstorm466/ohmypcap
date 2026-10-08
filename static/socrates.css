@@ -1408,6 +1408,8 @@
            a lone number has no space to wrap on anyway. */
         .stat-number { font-size: clamp(1.15rem, 15cqw, 2.5rem); font-weight: bold; white-space: nowrap; }
         .stat-label { color: var(--text-muted); font-size: 0.85rem; text-transform: uppercase; letter-spacing: 1px; word-break: keep-all; overflow-wrap: normal; line-height: 1.2; }
+        /* SHAR-CRATES: a connection tab for a protocol Suricata doesn't parse */
+        .stat-badge { margin-top: 6px; display: inline-block; white-space: nowrap; font-size: 0.6rem; text-transform: uppercase; letter-spacing: 0.3px; color: var(--accent); border: 1px solid var(--accent); border-radius: 4px; padding: 1px 6px; }
         @media (max-width: 600px) { .stat-card { padding: 15px 10px; } .stat-number { font-size: 1.8rem; } .stat-label { font-size: 0.75rem; letter-spacing: 0.5px; } }
         .section { background: var(--bg-secondary); overflow: hidden; }
         .section-hidden { display: none; }

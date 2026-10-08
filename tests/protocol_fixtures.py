@@ -15,6 +15,7 @@ from tests.pcap_fixtures import _checksum, _tcp_packet, tcp_segments, write_pcap
 
 CLIENT = '10.1.0.10'
 DNS_SERVER, HTTP_SERVER, TLS_SERVER, MODBUS_SERVER = '10.1.0.53', '10.1.0.80', '10.1.0.43', '10.1.0.50'
+FTP_SERVER = '10.1.0.21'
 
 
 def _udp_packet(src, dst, sport, dport, payload):
@@ -182,5 +183,194 @@ def modbus_packets():
     return tcp_segments(CLIENT, MODBUS_SERVER, 41002, 502, segments)
 
 
+# ---------------------------------------------------------------- FTP
+
+class _Tcp:
+    """One TCP connection built a step at a time, so two connections'
+    packets can be interleaved (an FTP data connection between its
+    command's 150 and 226 replies)."""
+
+    def __init__(self, client, server, cport, sport):
+        self.c, self.s, self.cp, self.sp = client, server, cport, sport
+        self.cs, self.ss = 1000, 5000
+
+    def open(self):
+        pkts = [_tcp_packet(self.c, self.s, self.cp, self.sp, self.cs, 0, 0x02)]
+        self.cs += 1
+        pkts.append(_tcp_packet(self.s, self.c, self.sp, self.cp, self.ss, self.cs, 0x12))
+        self.ss += 1
+        pkts.append(_tcp_packet(self.c, self.s, self.cp, self.sp, self.cs, self.ss, 0x10))
+        return pkts
+
+    def send(self, from_client, payload):
+        if from_client:
+            pkt = _tcp_packet(self.c, self.s, self.cp, self.sp, self.cs, self.ss, 0x18, payload)
+            self.cs += len(payload)
+        else:
+            pkt = _tcp_packet(self.s, self.c, self.sp, self.cp, self.ss, self.cs, 0x18, payload)
+            self.ss += len(payload)
+        return [pkt]
+
+    def close(self):
+        return [_tcp_packet(self.c, self.s, self.cp, self.sp, self.cs, self.ss, 0x11),
+                _tcp_packet(self.s, self.c, self.sp, self.cp, self.ss, self.cs + 1, 0x11)]
+
+
+FTP_GREETING = b'220-Welcome to the test FTP server\r\n220-Second greeting line\r\n220 Ready.\r\n'
+
+
+def ftp_packets():
+    """A control connection with a three-line greeting, login, an OPTS
+    command the server rejects, a passive RETR and an active PORT + STOR,
+    each data connection running between its command's 150 and 226."""
+    ctl = _Tcp(CLIENT, FTP_SERVER, 41003, 21)
+    pkts = ctl.open() + ctl.send(False, FTP_GREETING)
+    for command, reply in ((b'USER alice', b'331 Password required'), (b'PASS s3cret', b'230 Logged in.'),
+                           (b'OPTS utf8 on', b'504 Unknown command'),
+                           (b'PASV', b'227 Entering Passive Mode (10,1,0,21,195,81)'),
+                           (b'RETR report.pdf', b'150 Opening data connection')):
+        pkts += ctl.send(True, command + b'\r\n') + ctl.send(False, reply + b'\r\n')
+    passive = _Tcp(CLIENT, FTP_SERVER, 41004, 50001)
+    pkts += passive.open() + passive.send(False, b'%PDF-1.4 test report\n') + passive.close()
+    pkts += ctl.send(False, b'226 Transfer complete\r\n')
+    for command, reply in ((b'PORT 10,1,0,10,160,5', b'200 PORT command successful'),
+                           (b'STOR upload.txt', b'150 Ok to send data')):
+        pkts += ctl.send(True, command + b'\r\n') + ctl.send(False, reply + b'\r\n')
+    active = _Tcp(FTP_SERVER, CLIENT, 20, 40965)   # PORT ...,160,5 = 160 * 256 + 5
+    pkts += active.open() + active.send(False, b'uploaded contents\n') + active.close()
+    pkts += ctl.send(False, b'226 Transfer complete\r\n')
+    pkts += ctl.send(True, b'QUIT\r\n') + ctl.send(False, b'221 Goodbye.\r\n') + ctl.close()
+    return pkts
+
+
 def write_protocol_pcap(path):
-    write_pcap(path, dns_packets() + http_packets() + tls_packets() + modbus_packets())
+    write_pcap(path, dns_packets() + http_packets() + tls_packets() + modbus_packets() + ftp_packets())
+
+
+# ---------------------------------------------------------------- the second capture
+#
+# write_extra_pcap: protocols SHAR-CRATES records that Suricata doesn't
+# (NBNS, LLMNR, SSDP, S7comm), and the cases real captures turned up that
+# the first capture lacked - checked against Suricata's output where
+# Suricata parses them too (tests/data/extra_fixture.eve.json).
+
+def _udp_dns(src, dst, sport, dport, payload):
+    return _udp_packet(src, dst, sport, dport, payload)
+
+
+def _icmp_unreachable(src, dst, about):
+    """An ICMP port unreachable from src to dst, carrying the IP header and
+    first 8 bytes of the packet `about` (a whole Ethernet frame)."""
+    inner = about[14:14 + 20 + 8]
+    icmp = struct.pack('!BBHI', 3, 3, 0, 0) + inner
+    icmp = icmp[:2] + struct.pack('!H', _checksum(icmp)) + icmp[4:]
+    s, d = socket.inet_aton(src), socket.inet_aton(dst)
+    ip = struct.pack('!BBHHHBBH4s4s', 0x45, 0, 20 + len(icmp), 1, 0, 64, 1, 0, s, d)
+    ip = ip[:10] + struct.pack('!H', _checksum(ip)) + ip[12:]
+    return b'\x00' * 6 + b'\x11' * 6 + struct.pack('!H', 0x0800) + ip + icmp
+
+
+def _nbns_name(name, suffix):
+    raw = name.upper().ljust(15)[:15].encode() + bytes([suffix])
+    encoded = b''.join(bytes([0x41 + (c >> 4), 0x41 + (c & 0xf)]) for c in raw)
+    return b'\x20' + encoded + b'\x00'
+
+
+def _nbns(txid, flags, name, suffix, answer_addr=None, additional_addr=None, ttl=300000):
+    rr = lambda addr: b'\xc0\x0c' + struct.pack('!HHIH', 0x20, 1, ttl, 6) + b'\x00\x00' + socket.inet_aton(addr)
+    an = rr(answer_addr) if answer_addr else b''
+    ar = rr(additional_addr) if additional_addr else b''
+    is_response = flags & 0x8000
+    question = b'' if is_response else _nbns_name(name, suffix) + struct.pack('!HH', 0x20, 1)
+    head = struct.pack('!HHHHHH', txid, flags, 0 if is_response else 1, 1 if an else 0, 0, 1 if ar else 0)
+    if is_response:
+        an = _nbns_name(name, suffix) + an[2:]
+    return head + question + an + ar
+
+
+def _tpkt_s7(s7):
+    cotp = b'\x02\xf0\x80'
+    return struct.pack('!BBH', 3, 0, 4 + len(cotp) + len(s7)) + cotp + s7
+
+
+def _s7_job(pduref, params, data=b''):
+    return _tpkt_s7(struct.pack('!BBHHHH', 0x32, 1, 0, pduref, len(params), len(data)) + params + data)
+
+
+def _s7_ack(pduref, params, data=b'', errcls=0, errcod=0):
+    return _tpkt_s7(struct.pack('!BBHHHHBB', 0x32, 3, 0, pduref, len(params), len(data), errcls, errcod) + params + data)
+
+
+S7_PLC = '10.1.0.102'
+SSDP_DEVICE = '10.1.0.60'
+LLMNR_RESPONDER = '10.1.0.70'
+
+
+def extra_packets():
+    pkts = []
+    # DNS: a query sent twice before its one answer; a query answered three times
+    q = dns_message(0x3001, 'slow.example.com', 'A')
+    a = dns_message(0x3001, 'slow.example.com', 'A', [('slow.example.com', 'A', '192.0.2.80')], response=True)
+    pkts += [_udp_packet(CLIENT, DNS_SERVER, 53010, 53, q), _udp_packet(CLIENT, DNS_SERVER, 53010, 53, q),
+             _udp_packet(DNS_SERVER, CLIENT, 53, 53010, a)]
+    q = dns_message(0x3002, 'echo.example.com', 'A')
+    a = dns_message(0x3002, 'echo.example.com', 'A', [('echo.example.com', 'A', '192.0.2.81')], response=True)
+    response = _udp_packet(DNS_SERVER, CLIENT, 53, 53011, a)
+    # ... and the client, having closed the port, answers the third with an ICMP port unreachable
+    pkts += [_udp_packet(CLIENT, DNS_SERVER, 53011, 53, q), response, response, response,
+             _icmp_unreachable(CLIENT, DNS_SERVER, response)]
+    # mDNS: a query, its multicast answer, and an empty probe
+    pkts += [_udp_packet(CLIENT, '224.0.0.251', 5353, 5353, dns_message(0, '_ipp._tcp.local', 'PTR')),
+             _udp_packet(SSDP_DEVICE, '224.0.0.251', 5353, 5353,
+                         dns_message(0, '_ipp._tcp.local', 'PTR', [('_ipp._tcp.local', 'PTR', 'printer._ipp._tcp.local')],
+                                     response=True)),
+             _udp_packet(CLIENT, '224.0.0.251', 5353, 5353, b'\x00' * 12)]
+    # LLMNR: who has wpad?
+    pkts += [_udp_packet(CLIENT, '224.0.0.252', 53020, 5355, dns_message(0x4001, 'wpad', 'A')),
+             _udp_packet(LLMNR_RESPONDER, CLIENT, 5355, 53020,
+                         dns_message(0x4001, 'wpad', 'A', [('wpad', 'A', LLMNR_RESPONDER)], response=True))]
+    # NBNS: a registration broadcast three times, then a query and its answer
+    reg = _nbns(0x5001, 0x2910, 'DESKTOP-TEST01', 0x20, additional_addr=CLIENT)
+    pkts += [_udp_packet(CLIENT, '10.1.0.255', 137, 137, reg)] * 3
+    pkts += [_udp_packet(CLIENT, '10.1.0.255', 137, 137, _nbns(0x5002, 0x0110, 'FILESERVER', 0x20)),
+             _udp_packet('10.1.0.30', CLIENT, 137, 137, _nbns(0x5002, 0x8500, 'FILESERVER', 0x20, answer_addr='10.1.0.30'))]
+    # SSDP: an M-SEARCH, a device's answer, and a NOTIFY
+    pkts += [_udp_packet(CLIENT, '239.255.255.250', 53030, 1900,
+                         b'M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: "ssdp:discover"\r\nMX: 2\r\n'
+                         b'ST: urn:schemas-upnp-org:device:InternetGatewayDevice:1\r\n\r\n'),
+             _udp_packet(SSDP_DEVICE, CLIENT, 1900, 53030,
+                         b'HTTP/1.1 200 OK\r\nCACHE-CONTROL: max-age=1800\r\nLOCATION: http://10.1.0.60:49152/gateway.xml\r\n'
+                         b'SERVER: Linux/5.4 UPnP/1.0 TestGateway/1.0\r\nST: urn:schemas-upnp-org:device:InternetGatewayDevice:1\r\n'
+                         b'USN: uuid:0b1d-test::urn:schemas-upnp-org:device:InternetGatewayDevice:1\r\n\r\n'),
+             _udp_packet(SSDP_DEVICE, '239.255.255.250', 1900, 1900,
+                         b'NOTIFY * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nNT: upnp:rootdevice\r\nNTS: ssdp:alive\r\n'
+                         b'LOCATION: http://10.1.0.60:49152/gateway.xml\r\nUSN: uuid:0b1d-test::upnp:rootdevice\r\n\r\n')]
+    # HTTP: Host with a port, and a Content-Type with parameters
+    pkts += tcp_segments(CLIENT, HTTP_SERVER, 41010, 8080, [
+        (True, b'GET /status HTTP/1.1\r\nHost: www.example.com:8080\r\nUser-Agent: test\r\n\r\n'),
+        (False, b'HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: 2\r\n\r\nok'),
+    ])
+    # FTP: a failed login the server answers, then hangs up on
+    pkts += tcp_segments(CLIENT, FTP_SERVER, 41011, 21, [
+        (False, b'220 Ready.\r\n'), (True, b'USER bob\r\n'), (False, b'331 Password required\r\n'),
+        # The client's ACK of the 530, as a real client sends one, before the 221
+        (True, b'PASS wrong\r\n'), (False, b'530 Login incorrect.\r\n'), (True, b''), (False, b'221 Goodbye.\r\n'),
+    ])
+    # S7comm (ISO-on-TCP, port 102): setup, a read of DB1 byte 10, a write
+    # the PLC refuses, and a CPU-functions userdata request
+    read_item = b'\x12\x0a\x10\x02\x00\x01\x00\x01\x84' + (10 << 3).to_bytes(3, 'big')
+    pkts += tcp_segments(CLIENT, S7_PLC, 41012, 102, [
+        (True, _s7_job(1, b'\xf0\x00\x00\x01\x00\x01\x01\xe0')),
+        (False, _s7_ack(1, b'\xf0\x00\x00\x01\x00\x01\x01\xe0')),
+        (True, _s7_job(2, b'\x04\x01' + read_item)),
+        (False, _s7_ack(2, b'\x04\x01', b'\xff\x04\x00\x08\x2a')),
+        (True, _s7_job(3, b'\x05\x01' + read_item, b'\x00\x04\x00\x08\x07')),
+        (False, _s7_ack(3, b'\x05\x01', b'\x0a', errcls=0x85, errcod=0x00)),
+        (True, _tpkt_s7(struct.pack('!BBHHHH', 0x32, 7, 0, 4, 8, 8) + b'\x00\x01\x12\x04\x11\x44\x01\x00'
+                        + b'\xff\x09\x00\x04\x00\x11\x00\x00')),
+    ])
+    return pkts
+
+
+def write_extra_pcap(path):
+    write_pcap(path, extra_packets())

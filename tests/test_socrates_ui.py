@@ -757,9 +757,9 @@ class TestJavaScriptDataStructures(unittest.TestCase):
             self.assertIn(f"'{etype}'", JS_CONTENT)
 
     def test_has_global_state(self):
-        self.assertIn('let allEvents', JS_CONTENT)
+        self.assertIn('var allEvents', JS_CONTENT)
         self.assertIn('let tabDataCache', JS_CONTENT)
-        self.assertIn('let eventTypes', JS_CONTENT)
+        self.assertIn('var eventTypes', JS_CONTENT)
         self.assertIn('var currentMd5', JS_CONTENT)
 
 
@@ -771,7 +771,7 @@ class TestJavaScriptLogic(unittest.TestCase):
         self.assertIn('&quot;', JS_CONTENT)
 
     def test_error_message_escapes_event_type_label(self):
-        self.assertIn("escapeHtml(typeLabels[eventType] || eventType.toUpperCase())", JS_CONTENT,
+        self.assertIn("escapeHtml(eventTypeLabel(eventType))", JS_CONTENT,
                       'Tab error message must escape the event type label before innerHTML')
 
     def test_sort_table_toggles_direction(self):
@@ -21130,6 +21130,8 @@ class TestAcknowledgeAlerts(unittest.TestCase):
 
             eventTypes = ['dns'];
             buildSections();
+            // Opened the way a click on its card opens it.
+            showTab('section-acknowledged');
             await loadTabData('acknowledged');
             var row = document.getElementById('section-acknowledged').querySelector('tr[data-id="1"]');
             var pairs = JSON.parse(decodeURIComponent(row.dataset.pivot));
@@ -21644,6 +21646,114 @@ class TestSharkCratesUI(unittest.TestCase):
         self.assertIn('View in SHAR-CRATES', result['ready'])
         self.assertIn('View in SURI-CRATES', result['fromShark'])
         self.assertFalse(any(i.startswith('View in') for i in result['noCid']), 'needs a Community ID to match on')
+
+    def test_connection_tabs_label_sort_and_use_shark_flow_columns(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""
+            currentView = 'shark';
+            window.__jsdom_result = {
+                labels: [eventTypeLabel('conn_ftp-data'), eventTypeLabel('conn_openvpn'), eventTypeLabel('dns')],
+                order: sortEventTypes(['conn_s7comm', 'tls', 'conn_ftp', 'alert', 'dns']),
+                columns: getColumnsForType('conn_s7comm'),
+                flowColumns: getColumnsForType('flow'),
+                connOf: [connectionTypeOf({event_type: 'flow', app_proto: 's7comm'}), connectionTypeOf({event_type: 'dns', app_proto: 'dns'})],
+            };
+        """)
+        self.assertEqual(result['labels'], ['FTP Data', 'OPENVPN', 'DNS Queries'], "a known type's label, else its name in capitals")
+        self.assertEqual(result['order'], ['alert', 'dns', 'tls', 'conn_ftp', 'conn_s7comm'], 'after every record type')
+        self.assertEqual(result['columns'], result['flowColumns'])
+        self.assertIn('App Proto', result['columns'])
+        self.assertEqual(result['connOf'], ['conn_s7comm', None])
+
+    def test_connection_cards_badge_protocols_suricata_lacks_and_stay_out_of_all_events(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""
+            currentView = 'shark';
+            eventTypes = ['flow', 'conn_ftp', 'conn_s7comm', 'conn_icmp'];
+            eventStats = {flow: 10, conn_ftp: 2, conn_s7comm: 3, conn_icmp: 1};
+            buildStats(null);
+            window.__jsdom_result = [...document.querySelectorAll('.stat-card')].map(c => ({
+                section: c.dataset.section, count: c.querySelector('.stat-number').getAttribute('aria-label'),
+                badge: !!c.querySelector('.stat-badge')}));
+        """)
+        by = {c['section']: c for c in result}
+        self.assertEqual(by['section-all']['count'], '10', 'connections are flows - counted once')
+        self.assertTrue(by['section-conn_s7comm']['badge'])
+        self.assertFalse(by['section-conn_ftp']['badge'], 'Suricata parses FTP')
+        self.assertFalse(by['section-conn_icmp']['badge'], 'Suricata logs ICMP flows')
+        self.assertFalse(by['section-flow']['badge'])
+
+    def test_column_filters_count_connection_tabs_from_their_flows(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""
+            currentView = 'shark';
+            eventTypes = ['flow', 'conn_s7comm'];
+            currentFilters = {'Dest Port': {include: ['102'], exclude: []}};
+            allEvents = [
+                {event_type: 'flow', app_proto: 's7comm', dest_port: 102},
+                {event_type: 'flow', app_proto: 's7comm', dest_port: 102},
+                {event_type: 'flow', app_proto: 'dns', dest_port: 53},
+            ];
+            ensureCappedBatch = async function() {};
+            eventMatchesFilters = function(e) { return e.dest_port === 102; };
+            window.__jsdom_result = await computeFilteredStats();
+        """)
+        self.assertEqual(result, {'flow': 2, 'conn_s7comm': 2})
+
+    SHAR_ONLY_RECORDS = {
+        'llmnr': {'event_type': 'llmnr', 'llmnr': {'type': 'response', 'queries': [{'rrname': 'wpad', 'rrtype': 'A'}],
+                                                   'answers': [{'rrname': 'wpad', 'rrtype': 'A', 'rdata': '10.1.0.70'}]}},
+        'nbns': {'event_type': 'nbns', 'nbns': {'type': 'request', 'opcode': 'registration', 'name': 'DESKTOP-TEST01',
+                                                'suffix': '20', 'service': 'Server service', 'address': '10.1.0.10'}},
+        's7comm': {'event_type': 's7comm', 's7comm': {'type': 'job', 'function': 'Read Var',
+                                                      'items': [{'area': 'Data blocks', 'db': 1, 'address': '10.0'}],
+                                                      'response': {'error_class': 'Error on supplies'}}},
+        'ssdp': {'event_type': 'ssdp', 'ssdp': {'type': 'request', 'method': 'M-SEARCH', 'search_target': 'upnp:rootdevice',
+                                                'location': 'http://10.1.0.60/d.xml', 'server': 'TestGateway/1.0'}},
+    }
+    SHAR_ONLY_EXPECTED = {
+        'llmnr': ['wpad', 'A'],
+        'nbns': ['registration', 'DESKTOP-TEST01', 'Server service', '10.1.0.10'],
+        's7comm': ['job', 'Read Var', 'Data blocks', 'Error on supplies'],
+        'ssdp': ['M-SEARCH', 'upnp:rootdevice', 'http://10.1.0.60/d.xml', 'TestGateway/1.0'],
+    }
+
+    def test_shark_only_record_types_render_their_columns(self):
+        """LLMNR, NBNS, S7comm and SSDP: a row cell per column (plus the
+        row-note cell) holding extractValue's value, and a detail panel."""
+        from tests.jsdom_helper import js_statements
+        result = js_statements(f"""
+            var records = {json.dumps(self.SHAR_ONLY_RECORDS)};
+            var out = {{}};
+            Object.keys(records).forEach(function(t) {{
+                var e = Object.assign({{id: 1, timestamp: '2026-01-01T00:00:00', proto: 'UDP', src_ip: '10.1.0.10',
+                                        dest_ip: '10.1.0.20', src_port: 1, dest_port: 2}}, records[t]);
+                var cols = getColumnsForType(t);
+                var tb = document.createElement('tbody');
+                tb.innerHTML = buildRowForEvent(e);
+                out[t] = {{cols: cols, cells: [...tb.querySelector('tr').children].map(td => td.textContent),
+                          values: cols.slice(6).map(c => extractValue(e, c)), detail: formatEvent(e),
+                          label: eventTypeLabel(t)}};
+            }});
+            window.__jsdom_result = out;
+        """)
+        for t, expected in self.SHAR_ONLY_EXPECTED.items():
+            with self.subTest(event_type=t):
+                r = result[t]
+                self.assertEqual(r['values'], expected)
+                self.assertEqual(len(r['cells']), len(r['cols']) + 1)
+                self.assertEqual(r['cells'][6:6 + len(expected)], expected)
+                self.assertIn(f'{r["label"]} Details', r['detail'])
+
+    def test_shark_only_columns_are_all_aggregatable_server_side(self):
+        """Every column past the six shared ones has a JSON path in db.py's
+        AGGREGATION_JSON_PATHS - the server can't aggregate one it lacks."""
+        import db
+        from tests.jsdom_helper import js_statements
+        cols = js_statements("""window.__jsdom_result = Object.fromEntries(
+            ['llmnr', 'nbns', 's7comm', 'ssdp'].map(t => [t, getColumnsForType(t).slice(6)]));""")
+        for t, columns in cols.items():
+            self.assertEqual(list(db.AGGREGATION_JSON_PATHS[t]), columns, t)
 
     def test_refresh_falls_back_to_the_first_tab_when_the_open_one_is_gone(self):
         """REGRESSION: with the open tab's type missing from the new data

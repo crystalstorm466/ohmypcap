@@ -77,6 +77,33 @@
             return days !== null ? days * 24 : serverHours;
         }
 
+        // SHAR-CRATES connection types (see db.py's CONNECTION_TYPE_PREFIX):
+        // 'conn_<app proto>' is the flows tshark found carrying a protocol
+        // that has no records of its own - a tab per protocol, with flow's
+        // columns, whose rows are flow events.
+        const CONNECTION_TYPE_PREFIX = 'conn_';
+        function isConnectionType(type) { return typeof type === 'string' && type.startsWith(CONNECTION_TYPE_PREFIX); }
+        // The connection type a SHAR-CRATES flow row is counted under.
+        function connectionTypeOf(e) {
+            return currentView === 'shark' && e.event_type === 'flow' && e.app_proto ? CONNECTION_TYPE_PREFIX + e.app_proto : null;
+        }
+        // Suricata 8.0.6's app-layer parsers (suricata --list-app-layer-protos),
+        // in the names SHAR-CRATES' app_proto uses - a connection tab for any
+        // other protocol is marked "not in Suricata".
+        const SURICATA_APP_PROTOS = new Set(['http', 'ftp', 'ftp-data', 'smtp', 'tls', 'ssh', 'imap', 'smb', 'dcerpc', 'dns',
+            'modbus', 'enip', 'dnp3', 'nfs', 'ntp', 'tftp', 'ike', 'krb5', 'quic', 'dhcp', 'sip', 'rfb', 'mqtt', 'pgsql',
+            'telnet', 'websocket', 'ldap', 'doh2', 'rdp', 'http2', 'bittorrent-dht', 'pop3', 'mdns', 'snmp',
+            // Below the app layer, but Suricata handles these too: it logs
+            // ICMP flows, and ARP with its (optional) arp logger.
+            'icmp', 'ipv6-icmp', 'icmpv6', 'arp']);
+        function eventTypeLabel(type) {
+            if (isConnectionType(type)) {
+                const proto = type.slice(CONNECTION_TYPE_PREFIX.length);
+                return typeLabels[proto.replace(/-/g, '_')] || proto.toUpperCase();
+            }
+            return typeLabels[type] || type.toUpperCase();
+        }
+
         function sortEventTypes(types) {
             // Network Alerts, File Alerts, Decoder Alerts, Anomalies (in
             // that order) take priority over everything else, which then
@@ -87,10 +114,11 @@
             // affecting the pcap-mode ordering above.
             // email/link only occur in email mode, where the message
             // itself leads, then its links.
+            // SHAR-CRATES' connection tabs follow every record type.
             const order = { email: -2, link: -1, alert: 0, filealerts: 1, protocol_decode: 2, anomaly: 3, sigmaalert: 4, log: 5 };
             return [...types].sort((a, b) => {
-                const ai = order[a] ?? 99;
-                const bi = order[b] ?? 99;
+                const ai = order[a] ?? (isConnectionType(a) ? 100 : 99);
+                const bi = order[b] ?? (isConnectionType(b) ? 100 : 99);
                 if (ai !== bi) return ai - bi;
                 return a.localeCompare(b);
             });
@@ -2088,6 +2116,11 @@
                 anomaly: '#ff9800',
                 dns: '#66bb6a',
                 dnp3: '#26c6da',
+                // SHAR-CRATES-only types
+                llmnr: '#9ccc65',
+                nbns: '#8d6e63',
+                s7comm: '#00897b',
+                ssdp: '#7e57c2',
                 email: '#4fc3f7',
                 filealerts: '#e91e63',
                 fileinfo: '#9c27b0',
@@ -2645,7 +2678,7 @@
             } catch(e) {
                 console.error('Failed to load tab data:', e);
                 if (sectionEl) {
-                    sectionEl.innerHTML = `<div class="section-header">${escapeHtml(typeLabels[eventType] || eventType.toUpperCase())}</div><div class="loading">Error loading data</div>`;
+                    sectionEl.innerHTML = `<div class="section-header">${escapeHtml(eventTypeLabel(eventType))}</div><div class="loading">Error loading data</div>`;
                 }
             }
         }
@@ -3659,6 +3692,75 @@
             return html;
         }
 
+        // SHAR-CRATES' LLMNR records (shark_protocols.DNS): DNS's own message
+        // format, so DNS's layout, under e.llmnr.
+        function renderLlmnrDetails(e) {
+            let html = htmlSection('LLMNR Details', COLORS.EVENT.llmnr);
+            html += htmlRowText('Type', e.llmnr?.type);
+            html += htmlRowText('Query Name', e.llmnr?.queries?.[0]?.rrname, 'mono');
+            html += htmlRowText('Query Type', e.llmnr?.queries?.[0]?.rrtype);
+            html += htmlRowText('Response Code', e.llmnr?.rcode);
+            if (e.llmnr?.answers) {
+                html += htmlRowText('Answers', e.llmnr.answers.map(a => a.rdata).filter(Boolean).join(', '), 'mono');
+            }
+            return html;
+        }
+
+        // SHAR-CRATES' NBNS records (shark_protocols.NBNS).
+        function renderNbnsDetails(e) {
+            const n = e.nbns || {};
+            let html = htmlSection('NBNS Details', COLORS.EVENT.nbns);
+            html += htmlRowText('Operation', n.opcode);
+            html += htmlRowText('NetBIOS Name', n.name, 'mono');
+            html += htmlRowText('Suffix', n.suffix ? `<${n.suffix}>` : '', 'mono');
+            html += htmlRowText('Service', n.service);
+            html += htmlRowText('Address', n.address, 'mono');
+            html += htmlRowText('TTL', n.ttl === undefined ? '' : `${n.ttl} seconds`);
+            html += htmlRowText('Type', n.type);
+            html += htmlRowText('Response Code', n.rcode);
+            html += htmlRowText('Transmissions', n.transmissions);
+            return html;
+        }
+
+        // SHAR-CRATES' S7comm records (shark_protocols.S7comm): a job and its
+        // acknowledgement, or a userdata message.
+        function renderS7commDetails(e) {
+            const s7 = e.s7comm || {};
+            const resp = s7.response || {};
+            let html = htmlSection('S7comm Details', COLORS.EVENT.s7comm);
+            html += htmlRowText('Type', s7.type);
+            html += htmlRowText('Function', s7.function || s7.function_group);
+            html += htmlRowText('Subfunction', s7.subfunction);
+            html += htmlRowText('PDU Reference', s7.pdu_ref);
+            html += htmlRowText('Items', s7.item_count);
+            (s7.items || []).forEach((item, i) => {
+                const where = [item.area, item.db !== undefined ? `DB ${item.db}` : '', item.address || ''].filter(Boolean).join(' ');
+                html += htmlRowText(`Item ${i + 1}`, where, 'mono');
+            });
+            if (s7.type === 'job') html += htmlRowText('Acknowledged', s7.response ? 'Yes' : 'No');
+            html += htmlRowText('Error Class', resp.error_class);
+            html += htmlRowText('Error Code', resp.error_code);
+            return html;
+        }
+
+        // SHAR-CRATES' SSDP records (shark_protocols.SSDP).
+        function renderSsdpDetails(e) {
+            const sp = e.ssdp || {};
+            let html = htmlSection('SSDP Details', COLORS.EVENT.ssdp);
+            html += htmlRowText('Type', sp.type);
+            html += htmlRowText('Method', sp.method);
+            html += htmlRowText('Status', sp.status);
+            html += htmlRowText('Search Target', sp.search_target, 'mono');
+            html += htmlRowText('Notification Type', sp.notification_type, 'mono');
+            html += htmlRowText('Notification Subtype', sp.notification_sub_type, 'mono');
+            html += htmlRowText('USN', sp.usn, 'mono');
+            html += htmlRowText('Location', sp.location, 'mono');
+            html += htmlRowText('Server', sp.server);
+            html += htmlRowText('User Agent', sp.user_agent);
+            html += htmlRowText('MX', sp.mx);
+            return html;
+        }
+
         function renderHttpDetails(e) {
             let html = htmlSection('HTTP Details', COLORS.EVENT.http);
             html += htmlRow('Method', `${valueDotSpan(DOT_COLORS.HTTP_METHOD[(e.http?.http_method || '').toUpperCase()])}${escapeHtml(e.http?.http_method || '')}`);
@@ -3999,6 +4101,10 @@
             alert: renderAlertDetails,
             protocol_decode: renderProtocolDecodeDetails,
             dns: renderDnsDetails,
+            llmnr: renderLlmnrDetails,
+            nbns: renderNbnsDetails,
+            s7comm: renderS7commDetails,
+            ssdp: renderSsdpDetails,
             dnp3: renderDnp3Details,
             http: renderHttpDetails,
             modbus: renderModbusDetails,
@@ -6620,6 +6726,10 @@
             anomaly: 'Anomalies',
             protocol_decode: 'Decoder Alerts',
             dns: 'DNS Queries',
+            llmnr: 'LLMNR',
+            nbns: 'NBNS',
+            s7comm: 'S7comm',
+            ssdp: 'SSDP',
             dns_heuristics: 'DNS Heuristics',
             email: 'Emails',
             filealerts: 'File Alerts',
@@ -6908,6 +7018,7 @@
 
         function getColumnsForType(eventType) {
             if (isEmailAnalysisMode && EMAIL_MODE_COLUMNS[eventType]) return EMAIL_MODE_COLUMNS[eventType];
+            if (isConnectionType(eventType)) return getColumnsForType('flow');
             switch(eventType) {
                 case 'alert':
                 case 'protocol_decode':
@@ -6994,7 +7105,14 @@
                 case 'pop3':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Command', 'Args', 'Status'];
                 case 'mdns':
+                case 'llmnr':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Query', 'Type'];
+                case 'nbns':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Opcode', 'NetBIOS Name', 'Service', 'Address'];
+                case 's7comm':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Type', 'Function', 'Area', 'Error'];
+                case 'ssdp':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Method', 'Search Target', 'Location', 'Server'];
                 case 'ldap':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Operation', 'Message ID', 'Result Code'];
                 case 'arp':
@@ -7447,6 +7565,25 @@
                     const mdQuery = md.queries?.[0] || {};
                     colSpan = 8;
                     row = rowPrefixCells(e) + `<td class="mono">${escapeHtml(mdQuery.rrname || '')}</td><td>${valueDotSpan(DOT_COLORS.DNS_TYPE[(mdQuery.rrtype || '').toUpperCase()])}${escapeHtml(mdQuery.rrtype || '')}</td></tr>`;
+                    break;
+                }
+                case 'llmnr': {
+                    const lq = e.llmnr?.queries?.[0] || {};
+                    colSpan = 8;
+                    row = rowPrefixCells(e) + `<td class="mono">${escapeHtml(lq.rrname || '')}</td><td>${valueDotSpan(DOT_COLORS.DNS_TYPE[(lq.rrtype || '').toUpperCase()])}${escapeHtml(lq.rrtype || '')}</td></tr>`;
+                    break;
+                }
+                case 's7comm':
+                case 'ssdp': {
+                    const cols = getColumnsForType(etype).slice(6);
+                    colSpan = 10;
+                    row = rowPrefixCells(e) + cols.map(col => `<td${['Search Target', 'Location'].includes(col) ? ' class="mono"' : ''}>${escapeHtml(extractValue(e, col))}</td>`).join('') + '</tr>';
+                    break;
+                }
+                case 'nbns': {
+                    colSpan = 10;
+                    row = rowPrefixCells(e) + ['Opcode', 'NetBIOS Name', 'Service', 'Address']
+                        .map((col, i) => `<td${i === 1 || i === 3 ? ' class="mono"' : ''}>${escapeHtml(extractValue(e, col))}</td>`).join('') + '</tr>';
                     break;
                 }
                 case 'ldap': {
@@ -8971,7 +9108,7 @@
             }
         }
         
-        let eventStats = {};
+        var eventStats = {};
 
         // The Acknowledged Alerts stat card's count (see buildStats()
         // below) - unlike every other card, this isn't derivable from
@@ -9143,6 +9280,8 @@
                 if (eventMatchesFilters(e)) {
                     const type = e.event_type || 'unknown';
                     stats[type] = (stats[type] || 0) + 1;
+                    const conn = connectionTypeOf(e);
+                    if (conn && eventTypes.includes(conn)) stats[conn] = (stats[conn] || 0) + 1;
                 }
             }
             return stats;
@@ -9190,7 +9329,8 @@
 
             eventTypes.forEach(type => {
                 const filtered = filteredStats ? (filteredStats[type] || 0) : (eventStats[type] || 0);
-                allFiltered += filtered;
+                // A connection type's rows are flows, already in the total.
+                if (!isConnectionType(type)) allFiltered += filtered;
                 // Inserted immediately before the real DNS Queries card
                 // (rather than appended after every other card, with
                 // 'all'/'acknowledged') so it reads as "the DNS-specific
@@ -9215,11 +9355,13 @@
                         color: '#ff9800'
                     });
                 }
+                const connProto = isConnectionType(type) ? type.slice(CONNECTION_TYPE_PREFIX.length) : null;
                 stats.push({
                     id: type,
-                    label: typeLabels[type] || type.toUpperCase(),
+                    label: eventTypeLabel(type),
                     count: filtered,
-                    color: COLORS.EVENT[type] || COLORS.EVENT.tls
+                    color: COLORS.EVENT[connProto || type] || (connProto ? COLORS.EVENT.flow : COLORS.EVENT.tls),
+                    notInSuricata: !!connProto && !SURICATA_APP_PROTOS.has(connProto),
                 });
             });
 
@@ -9279,7 +9421,7 @@
                 return `
                     <div class="stat-card${activeClass}" data-action="show-tab" data-section="section-${s.id}">
                         <div class="stat-number" style="color: ${s.color}" aria-label="${countDisplay}">0</div>
-                        <div class="stat-label">${s.label}</div>
+                        <div class="stat-label">${escapeHtml(s.label)}</div>${s.notInSuricata ? '<div class="stat-badge" title="Suricata doesn\'t parse this protocol - only SHAR-CRATES sees inside it">not in Suricata</div>' : ''}
                     </div>
                 `;
             }).join('');
@@ -9310,8 +9452,8 @@
             let html = '';
             
             eventTypes.forEach((type, i) => {
-                const label = typeLabels[type] || type.toUpperCase();
-                html += `<div class="section${i > 0 ? ' section-hidden' : ''}" id="section-${type}"><div class="section-header">${label}</div><div class="loading">Loading...</div></div>`;
+                const label = eventTypeLabel(type);
+                html += `<div class="section${i > 0 ? ' section-hidden' : ''}" id="section-${escapeHtml(type)}"><div class="section-header">${escapeHtml(label)}</div><div class="loading">Loading...</div></div>`;
             });
             
             html += '<div class="section section-hidden" id="section-all"><div class="section-header">All Events</div><div class="loading">Loading...</div></div>';
@@ -9597,14 +9739,22 @@
                 case 'Ruleset': return classifyRuleset(e.alert?.signature_id);
                 case 'Type': {
                     if (e.event_type === 'dnp3') return e.dnp3?.type || '';
+                    if (e.event_type === 's7comm') return e.s7comm?.type || '';
                     if (e.event_type === 'anomaly') return e.anomaly?.type || '';
                     if (e.event_type === 'mdns') return e.mdns?.queries?.[0]?.rrtype || '';
+                    if (e.event_type === 'llmnr') return e.llmnr?.queries?.[0]?.rrtype || '';
                     // See the 'Query' case above for why both the old flat
                     // field and the new Suricata 8 V3 queries[0] path are
                     // read here.
                     return e.dns?.rrtype || e.dns?.queries?.[0]?.rrtype || '';
                 }
-                case 'Method': return e.http?.http_method || '';
+                // An SSDP response has no method - its status stands in for it.
+                case 'Method': return e.event_type === 'ssdp' ? (e.ssdp?.method || (e.ssdp?.status ? String(e.ssdp.status) : '')) : (e.http?.http_method || '');
+                case 'Search Target': return e.ssdp?.search_target || e.ssdp?.notification_type || '';
+                case 'Location': return e.ssdp?.location || '';
+                case 'Server': return e.ssdp?.server || '';
+                case 'Area': return e.s7comm?.items?.[0]?.area || '';
+                case 'Error': return e.s7comm?.response?.error_class || '';
                 case 'Host': return e.http?.hostname || '';
                 case 'URL': {
                     if (e.event_type === 'link') return e.link?.url || '';
@@ -9659,6 +9809,7 @@
                 case 'Author': return e.filealerts?.author || '';
                 case 'Function': {
                     if (e.event_type === 'modbus') return e.modbus?.request?.function_code || '';
+                    if (e.event_type === 's7comm') return e.s7comm?.function || e.s7comm?.function_group || '';
                     if (e.event_type === 'dnp3') {
                         return e.dnp3?.application?.function_code !== undefined ? String(e.dnp3.application.function_code) :
                                (e.dnp3?.request?.application?.function_code !== undefined ? String(e.dnp3.request.application.function_code) :
@@ -9674,6 +9825,7 @@
                 case 'Query': {
                     if (e.event_type === 'pgsql') return e.pgsql?.request?.simple_query || '';
                     if (e.event_type === 'mdns') return e.mdns?.queries?.[0]?.rrname || '';
+                    if (e.event_type === 'llmnr') return e.llmnr?.queries?.[0]?.rrname || '';
                     // dns.rrname/rrtype are the pre-Suricata-8 flat shortcut
                     // fields for "the query this transaction is about". As
                     // of Suricata 8's V3 DNS logging format (the new
@@ -9722,7 +9874,11 @@
                     return e.ssh?.server?.software_version || '';
                 }
                 case 'Client': return e.krb5?.cname || '';
-                case 'Service': return e.krb5?.sname || '';
+                case 'Service': return e.event_type === 'nbns' ? (e.nbns?.service || '') : (e.krb5?.sname || '');
+                // The name alone, as the server aggregates it - the <suffix> is
+                // in the detail panel, and Service says what it means.
+                case 'NetBIOS Name': return e.nbns?.name || '';
+                case 'Address': return e.nbns?.address || '';
                 case 'Realm': return e.krb5?.realm || '';
                 case 'Error Code': return e.krb5?.error_code || '';
                 case 'SIP Method': return e.sip?.method || '';
@@ -9774,6 +9930,7 @@
                 case 'Reference ID': return e.ntp?.reference_id || '';
                 case 'Opcode': {
                     if (e.event_type === 'arp') return e.arp?.opcode || '';
+                    if (e.event_type === 'nbns') return e.nbns?.opcode || '';
                     return e.websocket?.opcode || '';
                 }
                 case 'Src MAC': return e.arp?.src_mac || '';
@@ -9871,7 +10028,7 @@
             return buildAggregationTablesCore(events, getColumnsForType(eventType), 'section-' + eventType, extractValue);
         }
         
-        let allEvents = [];
+        var allEvents = [];
         let baseAllEvents = [];
         // Tracks which eventTypes' currently-cached tabDataCache/allEvents data is
         // known to be a partial (capped) result - i.e. the real total exceeds
@@ -9881,7 +10038,7 @@
         // object - the JSDOM test harness assigns/reads it via separate
         // script evaluations, same reason as currentFilters/advancedMode below.
         var truncatedTypes = new Set();
-        let eventTypes = [];
+        var eventTypes = [];
         // NOTE: these must stay `var` (not let/const) so they attach to the
         // global object - the JSDOM test harness assigns/reads them via
         // separate script evaluations, same reason as truncatedTypes above
