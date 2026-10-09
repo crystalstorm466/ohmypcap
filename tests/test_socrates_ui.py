@@ -21732,6 +21732,39 @@ class TestSharkCratesUI(unittest.TestCase):
         self.assertEqual(result['keyText'], 'not in Suricata')
         self.assertIn('.stat-badge { position: absolute;', CSS_CONTENT)
 
+    def test_an_unknown_protocols_underscores_become_spaces_so_its_label_can_wrap(self):
+        """REGRESSION: STEAM_IHS_DISCOVERY had nowhere to wrap and ran out
+        of its card."""
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""window.__jsdom_result = [eventTypeLabel('conn_steam_ihs_discovery'),
+            eventTypeLabel('some_new_type'), eventTypeLabel('conn_bt-tracker'), eventTypeLabel('ftp_data')];""")
+        self.assertEqual(result, ['STEAM IHS DISCOVERY', 'SOME NEW TYPE', 'BT-TRACKER', 'FTP Data'])
+
+    def test_a_label_word_too_long_for_its_card_is_scaled_to_fit(self):
+        """REGRESSION: PORTCONTROL and CLASSICSTUN - single words, which a
+        label never breaks - ran out of a card on a ten-column row. jsdom
+        has no layout, so the label's widths are given."""
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""
+            var root = document.createElement('div');
+            root.innerHTML = '<div class="stat-label">PORTCONTROL</div><div class="stat-label">FLOWS</div>';
+            document.body.appendChild(root);
+            var [long, short] = root.querySelectorAll('.stat-label');
+            long.style.fontSize = '9px';     // left over from a narrower layout: cleared first
+            Object.defineProperty(long, 'clientWidth', {get: () => 100});
+            Object.defineProperty(long, 'scrollWidth', {get: () => parseFloat(long.style.fontSize || '13.6') * 9});
+            Object.defineProperty(short, 'clientWidth', {get: () => 100});
+            Object.defineProperty(short, 'scrollWidth', {get: () => 60});
+            var realStyle = window.getComputedStyle;
+            window.getComputedStyle = el => ({fontSize: el.style.fontSize || '13.6px'});
+            fitStatLabels(root);
+            window.getComputedStyle = realStyle;
+            window.__jsdom_result = {long: parseFloat(long.style.fontSize), short: short.style.fontSize};
+        """)
+        self.assertLessEqual(result['long'] * 9, 100, 'fits its card')
+        self.assertGreater(result['long'], 10.5, 'shrunk only as far as it needs')
+        self.assertEqual(result['short'], '', 'a label that fits keeps its size')
+
     def test_suricata_view_has_no_badges(self):
         from tests.jsdom_helper import js_statements
         result = js_statements("""

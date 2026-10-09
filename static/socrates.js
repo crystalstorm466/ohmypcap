@@ -99,9 +99,46 @@
         function eventTypeLabel(type) {
             if (isConnectionType(type)) {
                 const proto = type.slice(CONNECTION_TYPE_PREFIX.length);
-                return typeLabels[proto.replace(/-/g, '_')] || proto.toUpperCase();
+                // tshark's own name otherwise, with _ as a space so a name
+                // like steam_ihs_discovery can wrap onto the card's two lines
+                return typeLabels[proto.replace(/-/g, '_')] || proto.replace(/_/g, ' ').toUpperCase();
             }
-            return typeLabels[type] || type.toUpperCase();
+            return typeLabels[type] || type.replace(/_/g, ' ').toUpperCase();
+        }
+
+        // A card's label never breaks inside a word (.stat-label's
+        // word-break: keep-all), so one word too long for its card -
+        // tshark's PORTCONTROL or CLASSICSTUN on a ten-column row - would
+        // run out of it. Such a label is measured and its text scaled down
+        // just enough to fit; every label that fits keeps its size. Run
+        // after the cards render and again whenever the grid's width
+        // changes (watchStatLabels), since that changes the cards'.
+        function fitStatLabels(root) {
+            root.querySelectorAll('.stat-label').forEach(label => {
+                label.style.fontSize = '';
+                // letter-spacing doesn't scale with the font, so a pass can
+                // fall just short - a couple more close it
+                for (let pass = 0; pass < 3 && label.scrollWidth > label.clientWidth + 1; pass++) {
+                    const size = parseFloat(getComputedStyle(label).fontSize);
+                    label.style.fontSize = `${(size * label.clientWidth / label.scrollWidth * 0.98).toFixed(2)}px`;
+                }
+            });
+        }
+
+        var statLabelObserver = null;
+        function watchStatLabels(grid) {
+            if (typeof ResizeObserver === 'undefined') return;
+            if (!statLabelObserver) {
+                let lastWidth = null;
+                statLabelObserver = new ResizeObserver(entries => {
+                    const width = entries[entries.length - 1].contentRect.width;
+                    if (width === lastWidth) return;
+                    lastWidth = width;
+                    fitStatLabels(entries[entries.length - 1].target);
+                });
+            }
+            statLabelObserver.disconnect();
+            statLabelObserver.observe(grid);
         }
 
         function sortEventTypes(types) {
@@ -9439,6 +9476,8 @@
             if (badgeKey) badgeKey.hidden = !stats.some(s => s.count > 0 && s.notInSuricata);
             const numberEls = grid.querySelectorAll('.stat-number');
             stats.filter(s => s.count > 0).forEach((s, i) => animateStatNumber(numberEls[i], s.count));
+            fitStatLabels(grid);
+            watchStatLabels(grid);
 
             // Lazy self-refresh for the Acknowledged Alerts card - see
             // acknowledgedAlertsCountStale's own comment for why this

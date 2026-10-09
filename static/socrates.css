@@ -1411,6 +1411,8 @@
            string - see its own comment), so white-space: nowrap is safe:
            a lone number has no space to wrap on anyway. */
         .stat-number { font-size: clamp(1.15rem, 15cqw, 2.5rem); font-weight: bold; white-space: nowrap; }
+        /* Never breaks inside a word - a word too long for its card is
+           scaled down to fit instead (socrates.js fitStatLabels) */
         .stat-label { color: var(--text-muted); font-size: 0.85rem; text-transform: uppercase; letter-spacing: 1px; word-break: keep-all; overflow-wrap: normal; line-height: 1.2; }
         /* SHAR-CRATES: a tab for a protocol Suricata doesn't parse - a dot in
            the card's corner (the view bar's .view-bar-key says what it
