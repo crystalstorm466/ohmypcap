@@ -110,12 +110,13 @@ Returns event-type counts for the current or specified analysis.
 | `view` | No | `suricata` | `shark` reads the analysis's SHAR-CRATES (tshark) records instead of Suricata's - see `GET /api/shark-status`. Anything else returns `400` |
 | `q` | No | none | Full-text search query (counts only matching events). Multiple `q` params AND together. |
 
-**Response:** `{"counts": <event type to count map>, "date_range": {"min": <timestamp or null>, "max": <timestamp or null>}}`
+**Response:** `{"counts": <event type to count map>, "date_range": {"min": <timestamp or null>, "max": <timestamp or null>}, "tshark_types": [<event type>, ...]}` - `tshark_types` lists the types tshark added to a PCAP analysis (protocols Suricata doesn't parse: records like `s7comm`, and connection types like `conn_openvpn`), empty until it has
 
 **Example:**
 ```json
-{"counts": {"alert": 42, "dns": 1500, "http": 380, "tls": 95, "flow": 2200},
- "date_range": {"min": "2026-02-03T11:13:50.123456+0000", "max": "2026-02-03T11:16:02.654321+0000"}}
+{"counts": {"alert": 42, "dns": 1500, "http": 380, "tls": 95, "flow": 2200, "s7comm": 310, "conn_openvpn": 2},
+ "date_range": {"min": "2026-02-03T11:13:50.123456+0000", "max": "2026-02-03T11:16:02.654321+0000"},
+ "tshark_types": ["conn_openvpn", "s7comm"]}
 ```
 
 ---

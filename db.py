@@ -620,17 +620,37 @@ def replace_tshark_events(db_path, events, stamp):
                 # from it means handing it the text that was indexed
                 conn.execute("INSERT INTO events_fts (events_fts, rowid, json_data) VALUES ('delete', ?, ?)", (rowid, data))
             conn.execute('DELETE FROM events WHERE id = ?', (rowid,))
-        added = 0
+        added, types = 0, set()
         for added, event in enumerate(events, 1):
             event['source'] = TSHARK_SOURCE
+            types.add(event.get('event_type', ''))
             _insert_event(conn, event, has_fts)
             if added % 50000 == 0:
                 conn.commit()
-        conn.execute('CREATE TABLE IF NOT EXISTS tshark_merge (stamp TEXT, rows INTEGER)')
-        conn.execute('DELETE FROM tshark_merge')
-        conn.execute('INSERT INTO tshark_merge VALUES (?, ?)', (stamp, added))
+        conn.execute('DROP TABLE IF EXISTS tshark_merge')
+        conn.execute('CREATE TABLE tshark_merge (stamp TEXT, rows INTEGER, types TEXT)')
+        conn.execute('INSERT INTO tshark_merge VALUES (?, ?, ?)', (stamp, added, json.dumps(sorted(types))))
         conn.commit()
     return added
+
+
+def tshark_types(db_path):
+    """The event types tshark added to events.db (replace_tshark_events) -
+    the cards the page marks as tshark's."""
+    try:
+        conn = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
+        try:
+            try:
+                row = conn.execute('SELECT types FROM tshark_merge').fetchone()
+                return json.loads(row[0]) if row and row[0] else []
+            except sqlite3.OperationalError:     # merged before the types were recorded, or never
+                rows = conn.execute("SELECT DISTINCT event_type FROM events WHERE json_extract(json_data, '$.source') = ?",
+                                    (TSHARK_SOURCE,)).fetchall()
+                return sorted(r[0] for r in rows)
+        finally:
+            conn.close()
+    except (sqlite3.Error, ValueError):
+        return []
 
 
 def tshark_merge_stamp(db_path):

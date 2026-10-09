@@ -2,44 +2,29 @@
 
 ## 5.0.0
 
-### SHAR-CRATES
+### Protocols from tshark
 
-Every PCAP analysis now has a second view: **SHAR-CRATES**, tshark's view
-of the capture, next to Suricata's - now called **SURI-CRATES** - with a
-tab for each above the search box. tshark decodes far more
-protocols than Suricata, but packet by packet; SHAR-CRATES turns its
-output into records shaped like Suricata's, so the same tabs, aggregation
-tables, Sankey diagram, search and pivot menu work on both:
+Suricata doesn't parse every protocol on a network. Every PCAP analysis now
+also runs tshark (Wireshark's command-line engine), alongside Suricata, and
+the protocols Suricata doesn't parse join the analysis's results - same
+tabs, tables, aggregations, Sankey diagram, search, pivots and row notes,
+each card marked with a dot:
 
-- **Flows** - one per conversation, with the protocol tshark found in it
-- **A tab for every protocol** tshark finds, listing its connections
-- **A "not in Suricata" dot** in the corner of every tab's card for a
-  protocol Suricata doesn't parse - records or connections
-- **A running count of seconds** while tshark works, and how long it took
-  once it's done
-- **DNS, mDNS, HTTP, TLS, QUIC, Modbus, FTP and SMB** - one record per
-  transaction, checked against Suricata's on dozens of real captures: they
-  agree on nearly every field they share (see [SURI-CRATES and
-  SHAR-CRATES](usage/exploring-results.md#suri-crates-and-shar-crates) for
-  the differences that remain)
-- **The right client** - a flow is addressed from whoever made its first
-  request, so a capture that starts on a server's answer doesn't show the
-  server as the client of everything that follows (Suricata does, and logs
-  nothing for the flow's protocol - see [SURI-CRATES and
-  SHAR-CRATES](usage/exploring-results.md#suri-crates-and-shar-crates))
-- **Repeated DNS answers** - a query answered more than once (which can be an
-  attacker racing the real server) is one record whose details give the
-  number of **Responses**, beside the number of **Transmissions** of the query
-- **NBNS, LLMNR, SSDP and S7comm** - records for four protocols Suricata
-  doesn't parse: Windows name resolution and registration, UPnP device
-  discovery, and Siemens PLC reads, writes and control
+- **NBNS, LLMNR, SSDP and S7comm** - one record per transaction: Windows
+  name resolution and registration, UPnP device discovery, and Siemens PLC
+  reads, writes and control
+- **A card for every other protocol tshark recognizes** - OpenVPN, PRP,
+  RADIUS, MongoDB and so on - listing its connections
+- **Suricata stays in charge** of everything it parses: nothing from tshark
+  is added on a connection Suricata identified, so a scanner's HTTP request
+  to an rsh port stays HTTP, the way Suricata logged it
+- **Nothing waits on tshark** - Suricata's results show as soon as they're
+  ready, and tshark's protocols join them when it finishes (usually first);
+  a line under the header counts the seconds while it works
 
-SHAR-CRATES builds itself in the background once Suricata finishes;
-captures of more than 4 million packets wait until you ask, a run is
-stopped if it needs more than 4 GB of memory, and Settings can turn
-SHAR-CRATES off altogether. Switching views keeps your search
-and filters, and the pivot menu's **View in SHAR-CRATES** / **View in
-SURI-CRATES** finds the same flow in the other view by its Community ID.
+tshark runs at low priority with a 4 GB memory limit; captures of more
+than 4 million packets wait until you click **Add tshark protocols**, and
+Settings can turn tshark off.
 
 ### Fixes
 

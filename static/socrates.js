@@ -82,20 +82,14 @@
         // that has no records of its own - a tab per protocol, with flow's
         // columns, whose rows are flow events.
         const CONNECTION_TYPE_PREFIX = 'conn_';
+        // A tshark flow's columns: no State or Alerted (Suricata's own flow
+        // tracking and detection) - its protocol is the point.
+        const TSHARK_FLOW_COLUMNS = ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'App Proto', 'Pkts →', 'Pkts ←', 'Bytes →', 'Bytes ←'];
         function isConnectionType(type) { return typeof type === 'string' && type.startsWith(CONNECTION_TYPE_PREFIX); }
         // The connection type a SHAR-CRATES flow row is counted under.
         function connectionTypeOf(e) {
             return currentView === 'shark' && e.event_type === 'flow' && e.app_proto ? CONNECTION_TYPE_PREFIX + e.app_proto : null;
         }
-        // Suricata 8.0.6's app-layer parsers (suricata --list-app-layer-protos),
-        // in the names SHAR-CRATES' app_proto uses - a SHAR-CRATES tab for any
-        // other protocol, records or connections, is marked "not in Suricata".
-        const SURICATA_APP_PROTOS = new Set(['http', 'ftp', 'ftp-data', 'smtp', 'tls', 'ssh', 'imap', 'smb', 'dcerpc', 'dns',
-            'modbus', 'enip', 'dnp3', 'nfs', 'ntp', 'tftp', 'ike', 'krb5', 'quic', 'dhcp', 'sip', 'rfb', 'mqtt', 'pgsql',
-            'telnet', 'websocket', 'ldap', 'doh2', 'rdp', 'http2', 'bittorrent-dht', 'pop3', 'mdns', 'snmp',
-            // Below the app layer, but Suricata handles these too: it logs
-            // ICMP flows, and ARP with its (optional) arp logger.
-            'icmp', 'ipv6-icmp', 'icmpv6', 'arp']);
         function eventTypeLabel(type) {
             if (isConnectionType(type)) {
                 const proto = type.slice(CONNECTION_TYPE_PREFIX.length);
@@ -3112,13 +3106,6 @@
             const correlateHtml = (communityId && String(value) !== String(communityId))
                 ? `<button type="button" class="pivot-menu-item" data-pivot-action="correlate" title="${escapeHtml(correlateTitle)}"><span class="pivot-menu-icon">${LINK_ICON_SVG}</span>Correlate</button>`
                 : '';
-            // The same flow in the other view (PCAP analyses only, once
-            // SHAR-CRATES has something to show) - see viewFlowInOtherView.
-            const otherViewName = currentView === 'shark' ? 'SURI-CRATES' : 'SHAR-CRATES';
-            const otherViewHtml = (communityId && document.getElementById('viewToggle')
-                    && (currentView === 'shark' || (sharkStatus && sharkStatus.status === 'ready')))
-                ? `<button type="button" class="pivot-menu-item" data-pivot-action="other-view" title="${escapeHtml(`Show this flow (Community ID ${communityId}) in ${otherViewName}`)}"><span class="pivot-menu-icon">${LINK_ICON_SVG}</span>View in ${otherViewName}</button>`
-                : '';
             menu.innerHTML = `
                 <div class="pivot-menu-label" title="${escapeHtml(fullLabel)}">${escapeHtml(col)}: ${escapeHtml(valueLabel)}</div>
                 ${expandRowHtml}
@@ -3126,7 +3113,6 @@
                 ${filterButtonsHtml}
                 <button type="button" class="pivot-menu-item" data-pivot-action="hunt" title="${escapeHtml(huntTitle)}"><span class="pivot-menu-icon">${SEARCH_ICON_SVG}</span>Hunt</button>
                 ${correlateHtml}
-                ${otherViewHtml}
                 <div class="pivot-menu-divider"></div>
                 <button type="button" class="pivot-menu-item" data-pivot-action="copy"><span class="pivot-menu-icon">${COPY_ICON_SVG}</span>Copy to Clipboard</button>
                 ${lookupSitesHtml}
@@ -3175,12 +3161,6 @@
                 menu.querySelector('[data-pivot-action="correlate"]').addEventListener('click', function() {
                     closePivotMenu();
                     huntFilterValue(communityId);
-                });
-            }
-            if (otherViewHtml) {
-                menu.querySelector('[data-pivot-action="other-view"]').addEventListener('click', function() {
-                    closePivotMenu();
-                    viewFlowInOtherView(communityId);
                 });
             }
             menu.querySelector('[data-pivot-action="copy"]').addEventListener('click', function() {
@@ -3611,6 +3591,8 @@
             let html = `<div style="display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 8px; font-size: 0.85rem; min-width: 0;">`;
             html += htmlRowText('Timestamp', ts);
             html += htmlRow('Event Type', `${valueDotSpan(COLORS.EVENT[e.event_type])}${escapeHtml(e.event_type || '')}`);
+            // A row tshark added (shark_analyzer.merge): a protocol Suricata doesn't parse
+            if (e.source === 'tshark') html += htmlRow('Decoded by', 'tshark');
             if (e.proto) html += htmlRowText('Protocol', e.proto);
             if (e.flow_id) html += htmlRowText('Flow ID', e.flow_id);
             if (e.community_id) html += htmlRowText('Community ID', e.community_id, 'mono');
@@ -4164,7 +4146,8 @@
 
         function formatEvent(e) {
             let html = _formatEventCommon(e);
-            const renderer = EVENT_RENDERERS[e.event_type];
+            // tshark's connection rows (conn_<protocol>) are flows
+            const renderer = EVENT_RENDERERS[isConnectionType(e.event_type) ? 'flow' : e.event_type];
             if (renderer) {
                 html += renderer(e);
             }
@@ -4588,8 +4571,8 @@
             }
         }
 
-        // Saves the SHAR-CRATES switch if it changed, then refreshes the open
-        // analysis's view bar (and leaves SHAR-CRATES if it was just turned off).
+        // Saves the tshark switch if it changed, then refreshes the open
+        // analysis's tshark line.
         async function saveSharkSetting() {
             const input = document.getElementById('sharkEnabledInput');
             const errorEl = document.getElementById('sharkSettingError');
@@ -4604,13 +4587,7 @@
                 return 'error';
             }
             input.dataset.saved = String(input.checked);
-            if (currentMd5 && document.getElementById('viewToggle')) {
-                if (!input.checked && currentView === 'shark') {
-                    setAnalysisView('suricata');
-                    await refreshAnalysisData();
-                }
-                await refreshSharkStatus(currentMd5);
-            }
+            if (currentMd5 && document.getElementById('viewBarStatus')) await refreshSharkStatus(currentMd5);
             return 'saved';
         }
 
@@ -7099,7 +7076,7 @@
 
         function getColumnsForType(eventType) {
             if (isEmailAnalysisMode && EMAIL_MODE_COLUMNS[eventType]) return EMAIL_MODE_COLUMNS[eventType];
-            if (isConnectionType(eventType)) return getColumnsForType('flow');
+            if (isConnectionType(eventType)) return TSHARK_FLOW_COLUMNS;
             switch(eventType) {
                 case 'alert':
                 case 'protocol_decode':
@@ -7115,9 +7092,7 @@
                     // own flow tracking and detection) - and their protocol
                     // is the point: it's what shows traffic Suricata doesn't
                     // parse at all.
-                    if (currentView === 'shark') {
-                        return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'App Proto', 'Pkts →', 'Pkts ←', 'Bytes →', 'Bytes ←'];
-                    }
+                    if (currentView === 'shark') return TSHARK_FLOW_COLUMNS;
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Pkts →', 'Pkts ←', 'Bytes →', 'Bytes ←', 'State', 'Alerted'];
                 case 'fileinfo':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Filename'];
@@ -7390,7 +7365,7 @@
             let row = '';
             let colSpan = 6;
 
-            switch(etype) {
+            switch(isConnectionType(etype) ? 'flow' : etype) {
                 case 'alert':
                 case 'protocol_decode':
                     const sig = e.alert?.signature || 'N/A';
@@ -7445,8 +7420,11 @@
                     const alertedText = alerted ? 'Yes' : 'No';
                     const countCells = `<td>${escapeHtml(String(pktsTs.toLocaleString()))}</td><td>${escapeHtml(String(pktsTc.toLocaleString()))}</td><td>${escapeHtml(String(bytesTs.toLocaleString()))}</td><td>${escapeHtml(String(bytesTc.toLocaleString()))}</td>`;
                     // Same columns as getColumnsForType('flow') - see there.
-                    colSpan = currentView === 'shark' ? 11 : 12;
-                    row = currentView === 'shark'
+                    // A flow from tshark (e.shark: a connection row) has
+                    // its protocol where Suricata's has state and alerts.
+                    const tsharkFlow = currentView === 'shark' || !!e.shark;
+                    colSpan = tsharkFlow ? 11 : 12;
+                    row = tsharkFlow
                         ? rowPrefixCells(e) + `<td class="mono">${escapeHtml(e.app_proto || '')}</td>` + countCells + '</tr>'
                         : rowPrefixCells(e) + countCells + `<td>${escapeHtml(state)}</td><td>${valueDotSpan(alertedColor)}${escapeHtml(alertedText)}</td></tr>`;
                     break;
@@ -9437,14 +9415,12 @@
                     });
                 }
                 const connProto = isConnectionType(type) ? type.slice(CONNECTION_TYPE_PREFIX.length) : null;
-                // A record type is named for its protocol, with _ for - (ftp_data)
-                const tabProto = connProto || type.replace(/_/g, '-');
                 stats.push({
                     id: type,
                     label: eventTypeLabel(type),
                     count: filtered,
                     color: COLORS.EVENT[connProto || type] || (connProto ? COLORS.EVENT.flow : COLORS.EVENT.tls),
-                    notInSuricata: currentView === 'shark' && type !== 'flow' && !SURICATA_APP_PROTOS.has(tabProto),
+                    notInSuricata: tsharkTypes.has(type),
                 });
             });
 
@@ -9504,7 +9480,7 @@
                 return `
                     <div class="stat-card${activeClass}" data-action="show-tab" data-section="section-${s.id}">
                         <div class="stat-number" style="color: ${s.color}" aria-label="${countDisplay}">0</div>
-                        <div class="stat-label">${escapeHtml(s.label)}</div>${s.notInSuricata ? '<span class="stat-badge" title="Not in Suricata: Suricata doesn\'t parse this protocol - only SHAR-CRATES sees inside it"><span class="sr-only">not in Suricata</span></span>' : ''}
+                        <div class="stat-label">${escapeHtml(s.label)}</div>${s.notInSuricata ? '<span class="stat-badge" title="From tshark: Suricata doesn\'t parse this protocol"><span class="sr-only">from tshark</span></span>' : ''}
                     </div>
                 `;
             }).join('');
@@ -11553,8 +11529,10 @@
                     fetch('/api/stats?md5=' + encodeURIComponent(currentMd5) + viewParam() + '&t=' + Date.now())
                 ]);
                 const statsCounts = (await statsResp.json()).counts;
-                const baseStatsCounts = (await baseStatsResp.json()).counts;
+                const baseStatsData = await baseStatsResp.json();
+                const baseStatsCounts = baseStatsData.counts;
                 if (isStaleFetch(gen)) return;
+                tsharkTypes = new Set(baseStatsData.tshark_types || []);
                 eventStats = statsCounts;
                 baseEventStats = baseStatsCounts;
 
@@ -11773,87 +11751,72 @@
         }
 
         // Cheap "has notes" signal in the header, without opening the modal.
-        // SHAR-CRATES toggle (PCAP analyses only): SURI-CRATES is Suricata's
-        // view of the capture, SHAR-CRATES tshark's (shark_analyzer.py),
-        // built in the background once Suricata finishes. sharkStatus is
-        // the last GET /api/shark-status response for currentMd5; while
-        // tshark is still working it's polled until it settles.
+        // tshark (PCAP analyses only): it decodes the capture alongside
+        // Suricata (shark_analyzer.py), and once both are done the
+        // protocols Suricata doesn't parse join this analysis's data. The
+        // line under the header says where that stands. sharkStatus is the
+        // last GET /api/shark-status response for currentMd5, polled while
+        // tshark (or the merge) is still working; tsharkTypes are the types
+        // it added (the stats response's tshark_types), marked on their
+        // cards with a dot.
         var sharkStatus = null;
         var sharkPollTimer = null;
-        // While tshark runs, the seconds it's been running tick up beside
-        // the tabs: counted here every second from the 'elapsed' each poll
+        var tsharkTypes = new Set();
+        // While tshark runs, the seconds it's been running tick up on the
+        // line: counted here every second from the 'elapsed' each poll
         // brings, so it stays in step with the server's clock.
         var sharkClockTimer = null;
         var sharkRunStartedAt = null;
         const SHARK_POLL_MS = 2000;
         const SHARK_BUSY_STATES = new Set(['queued', 'running', 'waiting']);
 
-        // The view bar: SURI-CRATES and SHAR-CRATES as two tabs, between
-        // the header and the search box (it switches everything below it,
-        // search included), with SHAR-CRATES' state spelled out beside them.
+        function sharkIsBusy(status) {
+            const st = status && status.status;
+            return SHARK_BUSY_STATES.has(st) || (st === 'ready' && status.merged === false);
+        }
+
+        // The tshark line, between the header and the search box, and the
+        // key to the cards' dot.
         function viewBarHtml() {
             return `<div class="view-bar">`
-                + `<span id="viewToggle" class="view-toggle" role="group" aria-label="Analysis view">`
-                + `<button type="button" class="view-toggle-btn" data-action="switch-view" data-arg="suricata" aria-pressed="true" title="SURI-CRATES: Suricata's view of this capture - alerts, flows and protocol records">SURI-CRATES</button>`
-                + `<button type="button" class="view-toggle-btn" data-action="switch-view" data-arg="shark" aria-pressed="false">SHAR-CRATES<span class="view-toggle-status" aria-hidden="true"></span></button>`
-                + `</span>`
                 + `<span id="viewBarStatus" class="view-bar-status" aria-live="polite"></span>`
-                + `<span id="viewBarKey" class="view-bar-key" hidden><span class="stat-badge-dot" aria-hidden="true"></span>not in Suricata</span>`
+                + `<span id="viewBarKey" class="view-bar-key" hidden><span class="stat-badge-dot" aria-hidden="true"></span>from tshark</span>`
                 + `</div>`;
         }
 
-        function sharkToggleTitle(status) {
-            const st = status && status.status;
-            if (st === 'ready') {
-                const protocols = Object.keys(status.app_protos || {}).filter(p => p).length;
-                const took = Number.isFinite(status.seconds) ? `, analyzed in ${status.seconds}s` : '';
-                return `SHAR-CRATES: tshark's view of this capture - ${status.flows} flow${status.flows === 1 ? '' : 's'}, ${protocols} protocol${protocols === 1 ? '' : 's'}${took}`;
-            }
-            if (st === 'waiting') return 'SHAR-CRATES: starts once Suricata finishes';
-            if (st === 'queued') return 'SHAR-CRATES: waiting for another capture\'s tshark analysis to finish';
-            if (st === 'running') return 'SHAR-CRATES: tshark is analyzing this capture';
-            if (st === 'too_large') return 'SHAR-CRATES: this capture is larger than SHAR-CRATES analyzes automatically - click to analyze it with tshark now (it can take a while, and uses more memory)';
-            if (st === 'error') return `SHAR-CRATES failed: ${status.message || 'tshark analysis failed'} - click to try again`;
-            return 'SHAR-CRATES: tshark\'s view of this capture';
-        }
-
-        // The status text beside the tabs - what sharkToggleTitle says, as
-        // HTML, with a link for the two states that need a click.
+        // The line's text, as HTML, with a link for the two states that
+        // need a click.
         function sharkStatusHtml(status) {
             const st = status && status.status;
-            if (st === 'ready') {
-                const protocols = Object.keys(status.app_protos || {}).filter(p => p).length;
-                const took = Number.isFinite(status.seconds) ? ` in ${status.seconds.toLocaleString()}s` : '';
-                return `tshark: ${escapeHtml(status.flows.toLocaleString())} flow${status.flows === 1 ? '' : 's'}, ${protocols} protocol${protocols === 1 ? '' : 's'}${took}`;
+            // tshark's rows have joined, but the cards haven't reloaded yet:
+            // held while the analyst is on the cards, or loading now
+            if (st === 'ready' && tsharkRowsPending === 'held') {
+                return 'tshark found more protocols \u2013 <a href="#" data-action="show-tshark-rows">Show them</a>';
             }
-            if (st === 'waiting') return 'SHAR-CRATES starts once Suricata finishes';
-            if (st === 'disabled') return 'SHAR-CRATES is off \u2013 turn it on in <a href="#" data-action="show-settings-modal">Settings</a>';
-            if (st === 'queued') return 'SHAR-CRATES is waiting for another capture\'s tshark analysis to finish';
+            if (st === 'ready' && tsharkRowsPending) return 'Adding tshark protocols\u2026';
+            if (st === 'ready' && status.merged !== false) {
+                const took = Number.isFinite(status.seconds) ? ` in ${status.seconds.toLocaleString()}s` : '';
+                return tsharkTypes.size
+                    ? `tshark added ${tsharkTypes.size} protocol${tsharkTypes.size === 1 ? '' : 's'} Suricata doesn't parse${took}`
+                    : `tshark found no protocols beyond Suricata's${took}`;
+            }
+            if (st === 'ready') return 'Adding tshark protocols…';
+            if (st === 'queued') return 'tshark is waiting for another capture to finish';
             // The ticking count is hidden from screen readers: the status is
             // a live region, and a number changing every second would be
             // read out every second.
-            if (st === 'running') return `Analyzing with tshark\u2026 <span id="viewBarTimer" class="view-bar-timer" aria-hidden="true">${Math.max(0, status.elapsed || 0)}s</span>`;
-            if (st === 'too_large') return 'This capture is larger than SHAR-CRATES analyzes automatically \u2013 <a href="#" data-action="switch-view" data-arg="shark">Analyze now</a>';
-            if (st === 'error') return `SHAR-CRATES failed: ${escapeHtml(status.message || 'tshark analysis failed')} \u2013 <a href="#" data-action="switch-view" data-arg="shark">Try again</a>`;
-            return '';
+            if (st === 'running') return `Adding tshark protocols… <span id="viewBarTimer" class="view-bar-timer" aria-hidden="true">${Math.max(0, status.elapsed || 0)}s</span>`;
+            if (st === 'too_large') return 'This capture has more packets than tshark analyzes automatically – <a href="#" data-action="start-shark">Add tshark protocols</a>';
+            if (st === 'error') return `Couldn't add tshark protocols: ${escapeHtml(status.message || 'tshark analysis failed')} – <a href="#" data-action="start-shark">Try again</a>`;
+            return '';    // waiting (Suricata isn't done), disabled, unavailable
         }
 
         function updateViewToggle() {
-            const toggle = document.getElementById('viewToggle');
-            if (!toggle) return;
-            toggle.querySelectorAll('.view-toggle-btn').forEach(btn => {
-                const on = btn.dataset.arg === currentView;
-                btn.classList.toggle('active', on);
-                btn.setAttribute('aria-pressed', on ? 'true' : 'false');
-            });
-            const shark = toggle.querySelector('[data-arg="shark"]');
-            const st = sharkStatus && sharkStatus.status;
-            shark.title = sharkToggleTitle(sharkStatus);
-            shark.classList.toggle('view-toggle-busy', SHARK_BUSY_STATES.has(st));
-            shark.classList.toggle('view-toggle-attention', st === 'too_large' || st === 'error');
-            shark.hidden = st === 'disabled';
             const statusEl = document.getElementById('viewBarStatus');
-            if (statusEl) statusEl.innerHTML = sharkStatusHtml(sharkStatus);
+            if (!statusEl) return;
+            statusEl.innerHTML = sharkStatusHtml(sharkStatus);
+            const bar = statusEl.closest('.view-bar');
+            if (bar) bar.hidden = !statusEl.textContent && document.getElementById('viewBarKey').hidden;
             syncSharkClock();
         }
 
@@ -11881,12 +11844,15 @@
             sharkPollTimer = null;
         }
 
-        // Fetches (or, with start, requests) this analysis's SHAR-CRATES
-        // status, re-polling while tshark is busy. md5 pins it to the
-        // analysis it was started for, so a reply or poll for an analysis
-        // the user has since left is dropped.
+        // Fetches (or, with start, requests) this analysis's tshark status,
+        // re-polling while tshark or the merge is still working. When its
+        // rows have just joined the analysis's, the page reloads them
+        // (refreshForTsharkRows). md5 pins it to the analysis it was
+        // started for, so a reply or poll for one the user has since left
+        // is dropped.
         async function refreshSharkStatus(md5, start) {
             stopSharkPolling();
+            const wasBusy = sharkIsBusy(sharkStatus);
             let status;
             try {
                 const resp = start
@@ -11899,56 +11865,42 @@
             if (md5 !== currentMd5) return;
             sharkStatus = status;
             updateViewToggle();
-            if (SHARK_BUSY_STATES.has(status.status)) {
+            if (sharkIsBusy(status)) {
                 sharkPollTimer = setTimeout(() => refreshSharkStatus(md5), SHARK_POLL_MS);
+            } else if (wasBusy && status.status === 'ready') {
+                refreshForTsharkRows(md5);
             }
         }
 
-        // Switches the open PCAP analysis between SURI-CRATES and
-        // SHAR-CRATES. The search and filters stay as they are -
-        // refreshAnalysisData() re-applies them to the other view's data -
-        // so an analyst lands on the same slice of traffic in the other
-        // tool. Anything cached from the old view is dropped first.
-        async function switchAnalysisView(view) {
-            if (view === currentView || !document.getElementById('viewToggle')) return;
-            if (view === 'shark') {
-                const st = sharkStatus && sharkStatus.status;
-                if (st === 'too_large' || st === 'error') {
-                    showToast(st === 'error' ? 'Retrying SHAR-CRATES...' : 'Analyzing this capture with tshark - SHAR-CRATES opens once it\'s ready');
-                    await refreshSharkStatus(currentMd5, true);
-                    return;
-                }
-                if (st !== 'ready') {
-                    showToast(sharkToggleTitle(sharkStatus));
-                    return;
-                }
-            }
-            setAnalysisView(view);
-            await refreshAnalysisData();
-        }
-
-        // Selects a view and drops everything cached from the other one -
-        // the caller then (re)loads the page's data.
-        function setAnalysisView(view) {
-            currentView = view;
-            updateViewToggle();
-            resetPagination();
-            aggPage = {}; aggFullCountsCache = {}; aggTotalsCache = {};
-            tabDataCache = {};
-        }
-
-        // The pivot menu's "View in SHAR-CRATES/SURI-CRATES": the same flow
-        // (by its Community ID, which both views compute identically) in the
-        // other view, through one search rather than a switch and then a
-        // second load.
-        async function viewFlowInOtherView(communityId) {
-            const other = currentView === 'shark' ? 'suricata' : 'shark';
-            if (other === 'shark' && !(sharkStatus && sharkStatus.status === 'ready')) {
-                showToast(sharkToggleTitle(sharkStatus));
+        // tshark's rows joined the analysis after the page opened: reload
+        // the cards (and the open table) once - but not while the analyst
+        // is pointing at or tabbing through the cards, where the shift
+        // would move what they're about to click (the line offers a link
+        // meanwhile). The open tab stays open. tsharkRowsPending: false,
+        // 'held' (waiting for the analyst to leave the cards) or 'loading'.
+        var tsharkRowsPending = false;
+        function refreshForTsharkRows(md5, now) {
+            if (md5 !== currentMd5) return;
+            const grid = document.querySelector('.stats-grid');
+            if (!now && grid && (grid.matches(':hover') || grid.contains(document.activeElement))) {
+                if (tsharkRowsPending === 'held') return;
+                tsharkRowsPending = 'held';
+                updateViewToggle();
+                const later = () => {
+                    grid.removeEventListener('mouseleave', later);
+                    grid.removeEventListener('focusout', later);
+                    setTimeout(() => { if (tsharkRowsPending === 'held') refreshForTsharkRows(md5); }, 200);
+                };
+                grid.addEventListener('mouseleave', later);
+                grid.addEventListener('focusout', later);
                 return;
             }
-            setAnalysisView(other);
-            await huntFilterValue(communityId);
+            tsharkRowsPending = 'loading';
+            updateViewToggle();
+            refreshAnalysisData().finally(() => {
+                tsharkRowsPending = false;
+                if (md5 === currentMd5) updateViewToggle();
+            });
         }
 
         function notesIconHtml() {
@@ -12128,10 +12080,11 @@
 
                 if (result.success) {
                     currentMd5 = md5;
-                    // Every analysis opens on SURI-CRATES; SHAR-CRATES'
-                    // status is fetched below once we know it's a PCAP.
+                    // tshark's status is fetched below once we know it's a PCAP.
                     currentView = 'suricata';
                     sharkStatus = null;
+                    tsharkRowsPending = false;
+                    tsharkTypes = new Set();
                     stopSharkPolling();
                     currentFileName = result.file_name || md5;
                     currentNotes = result.notes || '';
@@ -12172,6 +12125,7 @@
                     const statsData = await statsResp.json();
                     if (isStaleFetch(gen)) return;
                     eventStats = statsData.counts;
+                    tsharkTypes = new Set(statsData.tshark_types || []);
                     baseEventStats = {...eventStats};
 
                     const types = sortEventTypes(Object.keys(baseEventStats).filter(t => t !== 'stats' && t !== 'all'));
@@ -13034,7 +12988,8 @@
             // Analysis header icons - all read the current-analysis
             // globals at click time, same as the old inline handlers did.
             'show-notes-modal': () => showNotesModal(),
-            'switch-view': (el) => switchAnalysisView(el.dataset.arg),
+            'start-shark': () => { if (currentMd5) refreshSharkStatus(currentMd5, true); },
+            'show-tshark-rows': () => { if (currentMd5) refreshForTsharkRows(currentMd5, true); },
             'open-reanalyze-modal': () => openReanalyzeModal(currentMd5, currentFileName),
             'open-delete-analysis': () => openDeleteAnalysis(currentMd5, currentFileName),
         };

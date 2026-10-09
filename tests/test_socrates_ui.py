@@ -786,7 +786,7 @@ class TestJavaScriptLogic(unittest.TestCase):
     def test_format_event_handles_all_types(self):
         event_types = ['alert', 'dns', 'http', 'tls', 'flow', 'ftp', 'anomaly', 'fileinfo', 'stats']
         # formatEvent now uses EVENT_RENDERERS to dispatch to type-specific renderers
-        self.assertIn('const renderer = EVENT_RENDERERS[e.event_type]', JS_CONTENT,
+        self.assertIn("const renderer = EVENT_RENDERERS[isConnectionType(e.event_type) ? 'flow' : e.event_type]", JS_CONTENT,
                       'formatEvent must use EVENT_RENDERERS for type dispatch')
         for etype in event_types:
             # Keys may be quoted or unquoted in JS object literal
@@ -21447,50 +21447,71 @@ class TestSharkCratesUI(unittest.TestCase):
         """)
         self.assertEqual(result, {'before': '', 'shark': '&view=shark'})
 
-    def test_toggle_titles_explain_each_state(self):
-        from tests.jsdom_helper import js_statements
-        result = js_statements("""
-            window.__jsdom_result = [
-                sharkToggleTitle({status: 'ready', flows: 10, app_protos: {dns: 4, tls: 2, '': 1}}),
-                sharkToggleTitle({status: 'ready', flows: 1, app_protos: {http: 1}}),
-                sharkToggleTitle({status: 'running'}),
-                sharkToggleTitle({status: 'too_large'}),
-                sharkToggleTitle({status: 'error', message: 'tshark failed: boom'}),
-                sharkToggleTitle(null),
-            ];
-        """)
-        self.assertEqual(result[0], "SHAR-CRATES: tshark's view of this capture - 10 flows, 2 protocols",
-                         "flows with no application protocol ('') aren't a protocol")
-        self.assertEqual(result[1], "SHAR-CRATES: tshark's view of this capture - 1 flow, 1 protocol")
-        self.assertIn('tshark is analyzing', result[2])
-        self.assertIn('click to analyze it', result[3])
-        self.assertEqual(result[4], 'SHAR-CRATES failed: tshark failed: boom - click to try again')
-        self.assertIn('SHAR-CRATES', result[5])
-
     def test_status_text_spells_out_each_state_with_a_link_when_it_needs_a_click(self):
         from tests.jsdom_helper import js_statements
         result = js_statements("""
             document.getElementById('viewBarContainer').innerHTML = viewBarHtml();
-            function shown(status) {
+            function shown(status, types) {
+                tsharkTypes = new Set(types || []);
                 sharkStatus = status;
                 updateViewToggle();
                 var el = document.getElementById('viewBarStatus');
                 var link = el.querySelector('a');
-                return {text: el.textContent, link: link ? [link.dataset.action, link.dataset.arg] : null};
+                return {text: el.textContent, link: link ? link.dataset.action : null,
+                        barHidden: el.closest('.view-bar').hidden};
             }
             window.__jsdom_result = {
-                ready: shown({status: 'ready', flows: 1234, app_protos: {dns: 1, tls: 1, '': 2}}),
-                running: shown({status: 'running'}),
+                added: shown({status: 'ready', merged: true, seconds: 24}, ['s7comm', 'conn_rsh']),
+                one: shown({status: 'ready', merged: true}, ['nbns']),
+                none: shown({status: 'ready', merged: true, seconds: 3}),
+                merging: shown({status: 'ready', merged: false}),
+                running: shown({status: 'running', elapsed: 5}),
+                queued: shown({status: 'queued', position: 1}),
                 tooLarge: shown({status: 'too_large'}),
                 error: shown({status: 'error', message: '<b>boom</b>'}),
+                disabled: shown({status: 'disabled'}),
             };
         """)
-        self.assertEqual(result['ready'], {'text': 'tshark: 1,234 flows, 2 protocols', 'link': None})
-        self.assertEqual(result['running']['text'], 'Analyzing with tshark\u2026 0s')
-        self.assertIn('larger than SHAR-CRATES analyzes automatically', result['tooLarge']['text'])
-        self.assertEqual(result['tooLarge']['link'], ['switch-view', 'shark'], 'Analyze now starts it')
-        self.assertEqual(result['error']['text'], 'SHAR-CRATES failed: <b>boom</b> \u2013 Try again', 'the message is escaped')
-        self.assertEqual(result['error']['link'], ['switch-view', 'shark'])
+        self.assertEqual(result['added']['text'], "tshark added 2 protocols Suricata doesn't parse in 24s")
+        self.assertEqual(result['one']['text'], "tshark added 1 protocol Suricata doesn't parse")
+        self.assertEqual(result['none']['text'], "tshark found no protocols beyond Suricata's in 3s")
+        self.assertEqual(result['merging']['text'], 'Adding tshark protocols\u2026')
+        self.assertEqual(result['running']['text'], 'Adding tshark protocols\u2026 5s')
+        self.assertIn('waiting for another capture', result['queued']['text'])
+        self.assertIn('more packets than tshark analyzes automatically', result['tooLarge']['text'])
+        self.assertEqual(result['tooLarge']['link'], 'start-shark', 'Add tshark protocols starts it')
+        self.assertEqual(result['error']['text'], "Couldn't add tshark protocols: <b>boom</b> \u2013 Try again", 'escaped')
+        self.assertEqual(result['error']['link'], 'start-shark')
+        self.assertEqual((result['disabled']['text'], result['disabled']['barHidden']), ('', True), 'off: nothing to say')
+
+    def test_rows_that_arrive_while_the_analyst_is_on_the_cards_wait_with_a_link(self):
+        """The cards reload once when tshark's rows join - but not under
+        the analyst's pointer or keyboard focus, where they'd shift; the
+        line offers to show them meanwhile."""
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""
+            document.getElementById('viewBarContainer').innerHTML = viewBarHtml();
+            var refreshed = 0;
+            refreshAnalysisData = async function() { refreshed++; tsharkTypes = new Set(['s7comm']); };
+            currentMd5 = 'a'.repeat(32);
+            var grid = document.querySelector('.stats-grid');
+            var card = document.createElement('button'); grid.appendChild(card);
+            card.focus();
+            sharkStatus = {status: 'ready', merged: true};
+            refreshForTsharkRows(currentMd5);
+            var held = {refreshed: refreshed, text: document.getElementById('viewBarStatus').textContent,
+                        link: document.querySelector('#viewBarStatus a').dataset.action};
+            refreshForTsharkRows(currentMd5, true);
+            await new Promise(r => setTimeout(r, 0));
+            // (read through sharkStatusHtml: the test page's own start-up
+            // clears the bar once timers run)
+            var d = document.createElement('div'); d.innerHTML = sharkStatusHtml(sharkStatus);
+            window.__jsdom_result = {held: held, refreshed: refreshed, pending: tsharkRowsPending, text: d.textContent};
+        """)
+        self.assertEqual(result['held'], {'refreshed': 0, 'text': 'tshark found more protocols \u2013 Show them',
+                                          'link': 'show-tshark-rows'})
+        self.assertEqual((result['refreshed'], result['pending']), (1, False))
+        self.assertEqual(result['text'], "tshark added 1 protocol Suricata doesn't parse")
 
     def test_view_bar_sits_between_the_header_and_search_and_is_cleared_with_the_page(self):
         html = HTML_CONTENT
@@ -21498,63 +21519,6 @@ class TestSharkCratesUI(unittest.TestCase):
         self.assertLess(html.index('id="viewBarContainer"'), html.index('id="searchBarContainer"'))
         clear = JS_CONTENT[JS_CONTENT.index('function clearAnalysisContainers()'):]
         self.assertIn("document.getElementById('viewBarContainer').innerHTML = '';", clear[:clear.index('\n        }\n')])
-
-    def _toggle(self, status, view='suricata'):
-        from tests.jsdom_helper import js_statements
-        return js_statements(f"""
-            document.getElementById('viewBarContainer').innerHTML = viewBarHtml();
-            currentView = {json.dumps(view)};
-            sharkStatus = {json.dumps(status)};
-            updateViewToggle();
-            var shark = document.querySelector('[data-arg="shark"]');
-            window.__jsdom_result = {{
-                active: document.querySelector('.view-toggle-btn.active').dataset.arg,
-                sharkPressed: shark.getAttribute('aria-pressed'),
-                busy: shark.classList.contains('view-toggle-busy'),
-                attention: shark.classList.contains('view-toggle-attention'),
-            }};
-        """)
-
-    def test_toggle_marks_the_active_view_and_shark_crates_state(self):
-        self.assertEqual(self._toggle({'status': 'running'}),
-                         {'active': 'suricata', 'sharkPressed': 'false', 'busy': True, 'attention': False})
-        self.assertEqual(self._toggle({'status': 'too_large'})['attention'], True)
-        self.assertEqual(self._toggle({'status': 'error', 'message': 'x'})['attention'], True)
-        self.assertEqual(self._toggle({'status': 'ready', 'flows': 1, 'app_protos': {}}, 'shark'),
-                         {'active': 'shark', 'sharkPressed': 'true', 'busy': False, 'attention': False})
-
-    def test_switching_to_a_capture_too_large_to_run_unasked_starts_it(self):
-        from tests.jsdom_helper import js_statements
-        result = js_statements("""
-            var calls = [];
-            window.fetch = function(url, opts) {
-                calls.push([url, opts && opts.method]);
-                return Promise.resolve({json: () => Promise.resolve({status: 'queued', position: 1})});
-            };
-            currentMd5 = 'a'.repeat(32);
-            document.getElementById('viewBarContainer').innerHTML = viewBarHtml();
-            sharkStatus = {status: 'too_large'};
-            await switchAnalysisView('shark');
-            stopSharkPolling();
-            window.__jsdom_result = {calls: calls, view: currentView, status: sharkStatus.status};
-        """)
-        self.assertEqual([c for c in result['calls'] if 'shark' in c[0]], [['/api/shark-start', 'POST']])
-        self.assertEqual(result['view'], 'suricata', 'stays on SURI-CRATES until SHAR-CRATES is ready')
-        self.assertEqual(result['status'], 'queued')
-
-    def test_switching_while_shark_crates_is_busy_does_nothing_but_explain(self):
-        from tests.jsdom_helper import js_statements
-        result = js_statements("""
-            var calls = 0;
-            window.fetch = function() { calls++; return Promise.resolve({json: () => Promise.resolve({})}); };
-            document.getElementById('viewBarContainer').innerHTML = viewBarHtml();
-            sharkStatus = {status: 'running'};
-            await switchAnalysisView('shark');
-            window.__jsdom_result = {calls: calls, view: currentView, toast: (document.querySelector('.socrates-toast') || {}).textContent || ''};
-        """)
-        self.assertEqual(result['calls'], 0)
-        self.assertEqual(result['view'], 'suricata')
-        self.assertIn('tshark is analyzing', result['toast'])
 
     def test_a_status_reply_for_an_analysis_the_user_left_is_dropped(self):
         from tests.jsdom_helper import js_statements
@@ -21622,30 +21586,17 @@ class TestSharkCratesUI(unittest.TestCase):
         welcome = JS_CONTENT[JS_CONTENT.index('async function showWelcome()'):]
         self.assertIn("currentView = 'suricata';", welcome[:welcome.index('\n        }\n')])
 
-    def test_pivot_menu_offers_the_same_flow_in_the_other_view(self):
+    def test_the_pivot_menu_has_no_other_view(self):
+        """REGRESSION GUARD: there is one view now - no "View in SHAR-CRATES"."""
         from tests.jsdom_helper import js_statements
         result = js_statements("""
             document.getElementById('viewBarContainer').innerHTML = viewBarHtml();
-            function items() {
-                return [...document.querySelectorAll('.pivot-menu .pivot-menu-item')].map(b => b.textContent.trim());
-            }
-            sharkStatus = {status: 'running'};
+            sharkStatus = {status: 'ready', merged: true, flows: 1, app_protos: {}};
             showPivotMenu({clientX: 1, clientY: 1}, null, 'Dest IP', '10.0.0.2', false, null, '1:abc=');
-            var notReady = items();
-            sharkStatus = {status: 'ready', flows: 1, app_protos: {}};
-            showPivotMenu({clientX: 1, clientY: 1}, null, 'Dest IP', '10.0.0.2', false, null, '1:abc=');
-            var ready = items();
-            currentView = 'shark';
-            showPivotMenu({clientX: 1, clientY: 1}, null, 'Dest IP', '10.0.0.2', false, null, '1:abc=');
-            var fromShark = items();
-            showPivotMenu({clientX: 1, clientY: 1}, null, 'Dest IP', '10.0.0.2', false, null, null);
-            var noCid = items();
-            window.__jsdom_result = {notReady: notReady, ready: ready, fromShark: fromShark, noCid: noCid};
+            window.__jsdom_result = [...document.querySelectorAll('.pivot-menu .pivot-menu-item')].map(b => b.textContent.trim());
         """)
-        self.assertNotIn('View in SHAR-CRATES', result['notReady'])
-        self.assertIn('View in SHAR-CRATES', result['ready'])
-        self.assertIn('View in SURI-CRATES', result['fromShark'])
-        self.assertFalse(any(i.startswith('View in') for i in result['noCid']), 'needs a Community ID to match on')
+        self.assertIn('Correlate', result)
+        self.assertFalse([i for i in result if i.startswith('View in')])
 
     def test_connection_tabs_label_sort_and_use_shark_flow_columns(self):
         from tests.jsdom_helper import js_statements
@@ -21665,19 +21616,19 @@ class TestSharkCratesUI(unittest.TestCase):
         self.assertIn('App Proto', result['columns'])
         self.assertEqual(result['connOf'], ['conn_s7comm', None])
 
-    def test_record_cards_badge_protocols_suricata_lacks(self):
-        """REGRESSION: only connection tabs were checked, so S7comm's,
-        NBNS's, LLMNR's and SSDP's own record tabs had no badge."""
+    def test_the_dot_marks_the_types_tshark_added(self):
+        """The server says which types tshark added (stats' tshark_types);
+        nothing else - Suricata's own fileinfo or anomaly - gets a dot."""
         from tests.jsdom_helper import js_statements
         result = js_statements("""
-            currentView = 'shark';
-            eventTypes = ['flow', 's7comm', 'nbns', 'llmnr', 'ssdp', 'dns', 'mdns', 'ftp_data', 'quic', 'modbus'];
+            eventTypes = ['flow', 's7comm', 'nbns', 'dns', 'fileinfo', 'anomaly', 'conn_rsh'];
             eventStats = Object.fromEntries(eventTypes.map(t => [t, 1]));
+            tsharkTypes = new Set(['s7comm', 'nbns', 'conn_rsh']);
             buildStats(null);
             window.__jsdom_result = Object.fromEntries([...document.querySelectorAll('.stat-card')].map(c =>
                 [c.dataset.section.replace('section-', ''), !!c.querySelector('.stat-badge')]));
         """)
-        self.assertEqual({t for t, badge in result.items() if badge}, {'s7comm', 'nbns', 'llmnr', 'ssdp'})
+        self.assertEqual({t for t, badge in result.items() if badge}, {'s7comm', 'nbns', 'conn_rsh'})
 
     def test_the_status_counts_seconds_while_tshark_runs_and_gives_the_total_once_ready(self):
         from tests.jsdom_helper import js_statements
@@ -21692,45 +21643,64 @@ class TestSharkCratesUI(unittest.TestCase):
             now += 3400; tickSharkClock();
             var later = timer.textContent;
             var ticking = sharkClockTimer !== null;
-            sharkStatus = {status: 'ready', flows: 1234, app_protos: {dns: 1, '': 2}, seconds: 48};
+            tsharkTypes = new Set(['s7comm', 'nbns']);
+            sharkStatus = {status: 'ready', merged: true, seconds: 48};
             updateViewToggle();
             window.__jsdom_result = {first: first, later: later, ticking: ticking, hidden: timer.getAttribute('aria-hidden'),
-                stoppedAfter: sharkClockTimer === null, ready: document.getElementById('viewBarStatus').textContent,
-                older: sharkStatusHtml({status: 'ready', flows: 1, app_protos: {}})};
+                stoppedAfter: sharkClockTimer === null, ready: document.getElementById('viewBarStatus').textContent};
         """)
-        self.assertEqual(result['first'], 'Analyzing with tshark\u2026 12s')
+        self.assertEqual(result['first'], 'Adding tshark protocols\u2026 12s')
         self.assertEqual(result['later'], '15s')
         self.assertTrue(result['ticking'])
         self.assertEqual(result['hidden'], 'true', 'not read out every second from the live region')
         self.assertTrue(result['stoppedAfter'])
-        self.assertEqual(result['ready'], 'tshark: 1,234 flows, 1 protocol in 48s')
-        self.assertEqual(result['older'], 'tshark: 1 flow, 0 protocols', "a shark.db that didn't record its time")
+        self.assertEqual(result['ready'], "tshark added 2 protocols Suricata doesn't parse in 48s")
 
     def test_the_badge_is_a_corner_dot_with_a_key_and_hidden_text(self):
         """The badge keeps the card at two lines: a dot, explained by the
-        view bar's key, and readable text only for screen readers."""
+        tshark line's key, and readable text only for screen readers."""
         from tests.jsdom_helper import js_statements
         result = js_statements("""
             document.getElementById('viewBarContainer').innerHTML = viewBarHtml();
-            currentView = 'shark';
             eventTypes = ['flow', 's7comm'];
             eventStats = {flow: 1, s7comm: 1};
+            tsharkTypes = new Set(['s7comm']);
             buildStats(null);
             var badge = document.querySelector('.stat-badge');
             var shown = !document.getElementById('viewBarKey').hidden;
-            eventTypes = ['flow', 'dns']; eventStats = {flow: 1, dns: 1};
+            eventTypes = ['flow', 'dns']; eventStats = {flow: 1, dns: 1}; tsharkTypes = new Set();
             buildStats(null);
             window.__jsdom_result = {text: badge.textContent, visibleText: [...badge.childNodes].filter(n => n.nodeType === 3).length,
                 srOnly: !!badge.querySelector('.sr-only'), keyShown: shown, keyHiddenWithout: document.getElementById('viewBarKey').hidden,
-                keyText: document.getElementById('viewBarKey').textContent};
+                keyText: document.getElementById('viewBarKey').textContent, title: badge.title};
         """)
-        self.assertEqual(result['text'], 'not in Suricata')
+        self.assertEqual(result['text'], 'from tshark')
         self.assertTrue(result['srOnly'])
         self.assertEqual(result['visibleText'], 0)
         self.assertTrue(result['keyShown'])
         self.assertTrue(result['keyHiddenWithout'])
-        self.assertEqual(result['keyText'], 'not in Suricata')
+        self.assertEqual(result['keyText'], 'from tshark')
+        self.assertEqual(result['title'], "From tshark: Suricata doesn't parse this protocol")
         self.assertIn('.stat-badge { position: absolute;', CSS_CONTENT)
+
+    def test_tshark_connection_rows_show_its_flow_columns_and_say_so(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""
+            var e = {id: 1, event_type: 'conn_rsh', source: 'tshark', proto: 'TCP', app_proto: 'rsh', src_ip: '10.0.0.1',
+                     dest_ip: '10.0.0.2', src_port: 51877, dest_port: 514, timestamp: '2015-10-21T10:09:22',
+                     flow: {pkts_toserver: 6, pkts_toclient: 3, bytes_toserver: 100, bytes_toclient: 200, age: 0},
+                     shark: {protocols: {rsh: 2}}};
+            var tb = document.createElement('tbody');
+            tb.innerHTML = buildRowForEvent(e);
+            var d = document.createElement('div'); d.innerHTML = formatEvent(e);
+            window.__jsdom_result = {cols: getColumnsForType('conn_rsh'), cells: [...tb.querySelector('tr').children].map(td => td.textContent),
+                                     detail: d.textContent};
+        """)
+        self.assertEqual(result['cols'][6:8], ['App Proto', 'Pkts \u2192'])
+        self.assertNotIn('State', result['cols'])
+        self.assertEqual(result['cells'][6:8], ['rsh', '6'])
+        self.assertIn('Decoded bytshark', result['detail'])
+        self.assertIn('rsh (2 packets)', result['detail'])
 
     def test_an_unknown_protocols_underscores_become_spaces_so_its_label_can_wrap(self):
         """REGRESSION: STEAM_IHS_DISCOVERY had nowhere to wrap and ran out
@@ -21765,18 +21735,16 @@ class TestSharkCratesUI(unittest.TestCase):
         self.assertGreater(result['long'], 10.5, 'shrunk only as far as it needs')
         self.assertEqual(result['short'], '', 'a label that fits keeps its size')
 
-    def test_switched_off_hides_the_tab_and_points_to_settings(self):
+    def test_switched_off_there_is_no_tshark_line(self):
         from tests.jsdom_helper import js_statements
         result = js_statements("""
             document.getElementById('viewBarContainer').innerHTML = viewBarHtml();
             sharkStatus = {status: 'disabled'};
             updateViewToggle();
-            var status = document.getElementById('viewBarStatus');
-            window.__jsdom_result = {hidden: document.querySelector('[data-arg="shark"]').hidden, text: status.textContent,
-                                     action: status.querySelector('a').dataset.action};
+            window.__jsdom_result = {tabs: document.querySelectorAll('.view-toggle-btn').length,
+                                     hidden: document.querySelector('.view-bar').hidden};
         """)
-        self.assertEqual(result, {'hidden': True, 'text': 'SHAR-CRATES is off \u2013 turn it on in Settings',
-                                  'action': 'show-settings-modal'})
+        self.assertEqual(result, {'tabs': 0, 'hidden': True})
 
     def test_the_tshark_switch_is_saved_to_the_server_only_when_changed(self):
         from tests.jsdom_helper import js_statements
@@ -21809,23 +21777,21 @@ class TestSharkCratesUI(unittest.TestCase):
         """)
         self.assertEqual(result, 0)
 
-    def test_connection_cards_badge_protocols_suricata_lacks_and_stay_out_of_all_events(self):
+    def test_connection_cards_follow_the_records_and_stay_out_of_all_events(self):
+        """One card order: alerts, record types alphabetically (Suricata's
+        and tshark's mixed), connection cards, then ALL EVENTS last - which
+        doesn't count connections, each already one of Suricata's flows."""
         from tests.jsdom_helper import js_statements
         result = js_statements("""
-            currentView = 'shark';
-            eventTypes = ['flow', 'conn_ftp', 'conn_s7comm', 'conn_icmp'];
-            eventStats = {flow: 10, conn_ftp: 2, conn_s7comm: 3, conn_icmp: 1};
+            eventTypes = sortEventTypes(['flow', 'conn_rsh', 's7comm', 'alert', 'dns', 'conn_prp', 'nbns']);
+            eventStats = {flow: 10, conn_rsh: 2, s7comm: 3, alert: 1, dns: 4, conn_prp: 5, nbns: 1};
+            tsharkTypes = new Set(['s7comm', 'nbns', 'conn_rsh', 'conn_prp']);
             buildStats(null);
-            window.__jsdom_result = [...document.querySelectorAll('.stat-card')].map(c => ({
-                section: c.dataset.section, count: c.querySelector('.stat-number').getAttribute('aria-label'),
-                badge: !!c.querySelector('.stat-badge')}));
+            window.__jsdom_result = [...document.querySelectorAll('.stat-card')].map(c => [c.dataset.section.replace('section-', ''),
+                c.querySelector('.stat-number').getAttribute('aria-label')]);
         """)
-        by = {c['section']: c for c in result}
-        self.assertEqual(by['section-all']['count'], '10', 'connections are flows - counted once')
-        self.assertTrue(by['section-conn_s7comm']['badge'])
-        self.assertFalse(by['section-conn_ftp']['badge'], 'Suricata parses FTP')
-        self.assertFalse(by['section-conn_icmp']['badge'], 'Suricata logs ICMP flows')
-        self.assertFalse(by['section-flow']['badge'])
+        self.assertEqual([t for t, _ in result], ['alert', 'dns', 'flow', 'nbns', 's7comm', 'conn_prp', 'conn_rsh', 'all'])
+        self.assertEqual(dict(result)['all'], '19', 'alert, dns, flow, nbns and s7comm - not the connections')
 
     def test_column_filters_count_connection_tabs_from_their_flows(self):
         from tests.jsdom_helper import js_statements

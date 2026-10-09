@@ -185,9 +185,9 @@
 
                     <label for="sharkEnabledInput" style="color: var(--text-muted); font-size: 0.9rem; display: flex; gap: 8px; align-items: center;">
                         <input type="checkbox" id="sharkEnabledInput" checked>
-                        Also analyze PCAPs with tshark (SHAR-CRATES)
+                        Add protocols decoded by tshark
                     </label>
-                    <div style="color: var(--text-muted); font-size: 0.8rem; margin-top: 6px;">tshark decodes protocols Suricata doesn't. It runs in the background on each PCAP, at low priority and with a memory limit. Applies to every analysis on this server.</div>
+                    <div style="color: var(--text-muted); font-size: 0.8rem; margin-top: 6px;">tshark decodes protocols Suricata doesn't parse, alongside Suricata, at low priority and with a memory limit; they join each PCAP's results marked with a dot. Applies to every analysis on this server. Turning it off stops new runs; analyses keep the protocols already added.</div>
                     <div id="sharkSettingError" style="color: var(--badge-warning-text); font-size: 0.85rem; margin-top: 6px; display: none;"></div>
 
                     <div style="border-top: 1px solid var(--bg-hover); margin: 18px 0;"></div>

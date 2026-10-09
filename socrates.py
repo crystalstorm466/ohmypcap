@@ -25,7 +25,7 @@ from db import (
     query_sigma_alerts_sqlite, get_sigma_stats_sqlite,
     get_sigma_alert_count_sqlite, get_event_date_range_sqlite,
     get_sankey_data_sqlite, get_aggregation_data_sqlite, get_aggregation_totals_sqlite,
-    get_shark_summary_sqlite, get_connection_type_counts_sqlite,
+    get_shark_summary_sqlite, get_connection_type_counts_sqlite, tshark_types,
     AGGREGATION_TOP_N, AGGREGATION_PAGE_SIZE_OPTIONS,
     set_row_note, has_row_notes,
     set_acknowledged, set_acknowledged_bulk,
@@ -880,10 +880,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     # see db.CONNECTION_TYPE_PREFIX.
                     counts.update(get_connection_type_counts_sqlite(db_file, q, RECORDED_APP_PROTOS))
                 date_range = get_event_date_range_sqlite(db_file, q)
+                tshark = tshark_types(db_file) if params.get('view', [''])[0] != 'shark' else []
             except Exception:
                 self._send_error(500, 'Database error')
                 return
-        self._send_json({'counts': counts, 'date_range': date_range})
+        else:
+            tshark = []
+        # tshark_types: the types tshark added to this analysis (the cards
+        # marked as tshark's)
+        self._send_json({'counts': counts, 'date_range': date_range, 'tshark_types': tshark})
 
     def handle_get_count(self, params):
         md5 = params.get('md5', [''])[0]

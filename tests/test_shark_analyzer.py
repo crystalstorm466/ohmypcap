@@ -939,6 +939,7 @@ class TestMerge(unittest.TestCase):
         self.assertEqual(self._added(), {'s7comm': 4, 'ssdp': 3, 'nbns': 2, 'llmnr': 1},
                          "tshark's DNS, mDNS, HTTP and FTP records stay out - Suricata has those")
         self.assertTrue(shark_analyzer.merged(self.dir))
+        self.assertEqual(db.tshark_types(self.events_db), ['llmnr', 'nbns', 's7comm', 'ssdp'], 'the cards marked as tshark\'s')
         self.assertIsNone(shark_analyzer.merge(self.dir), 'the same shark.db is merged once')
 
     def test_a_new_shark_db_replaces_the_rows_of_the_last(self):
@@ -1212,6 +1213,8 @@ class TestSharkAPI(unittest.TestCase):
         self.assertIsInstance(body.pop('seconds'), int)
         self.assertEqual(body, {'status': 'ready', 'flows': 3, 'app_protos': {'ftp': 1, 'ftp-data': 1, 'http': 1},
                                 'merged': True})
+        _, stats = self._get(f'/api/stats?md5={self.md5}')
+        self.assertEqual(stats['tshark_types'], [], 'nothing here Suricata lacks - but the stats say so')
 
     def test_view_shark_reads_shark_db_and_the_default_reads_events_db(self):
         self._get(f'/api/shark-status?md5={self.md5}')
