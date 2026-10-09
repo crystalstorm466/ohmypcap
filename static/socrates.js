@@ -2151,6 +2151,8 @@
                 telnet: '#ffa726',
                 iec104: '#ef5350',
                 bacnet: '#ab47bc',
+                opcua: '#29b6f6',
+                opcua_action: '#ff7043',
                 bacnet_property: '#5c6bc0',
                 bacnet_device: '#8d6e63',
                 iec104_point: '#26a69a',
@@ -3766,6 +3768,45 @@
             return html;
         }
 
+        // tshark's OPC UA records (shark_protocols.OPCUA): a connection's
+        // session, and a change (write, call, node added...).
+        function renderOpcuaDetails(e) {
+            const u = e.opcua || {};
+            let html = htmlSection('OPC UA Details', COLORS.EVENT.opcua);
+            html += htmlRowText('Endpoint', u.endpoint, 'mono');
+            html += htmlRowText('Security', [u.security_policy, u.security_mode && `mode ${u.security_mode}`].filter(Boolean).join(', '));
+            if (u.encrypted_messages) html += htmlRowText('Encrypted', `${u.encrypted_messages.toLocaleString()} messages unreadable`);
+            html += htmlRowText('Application', u.client_application);
+            html += htmlRowText('Application URI', u.client_uri, 'mono');
+            html += htmlRowText('Product URI', u.client_product, 'mono');
+            html += htmlRowText('Session', u.session_name);
+            html += htmlRowText('User Token', [u.user_token, u.user_policy && `policy ${u.user_policy}`].filter(Boolean).join(', '));
+            html += htmlRowText('User', u.username);
+            if (u.password !== undefined) html += htmlRowText('Password', u.password === '' ? '(empty)' : u.password, 'mono');
+            else if (u.password_encrypted) html += htmlRowText('Password', '(encrypted)');
+            html += htmlRowText('Activation', u.activation);
+            html += htmlRowText('Services', Object.entries(u.services || {}).map(([s, n]) => `${s} ${n.toLocaleString()}`).join(', '));
+            if (u.errors) html += htmlRowText('Errors', `${u.errors.toLocaleString()} (last: ${u.last_error || ''})`);
+            html += htmlRowText('Transport Error', u.transport_error);
+            return html;
+        }
+
+        function renderOpcuaActionDetails(e) {
+            const a = e.opcua_action || {};
+            let html = htmlSection('OPC UA Action Details', COLORS.EVENT.opcua_action);
+            html += htmlRowText('Service', a.service);
+            html += htmlRowText(a.service === 'Call' ? 'Method' : 'Node', a.node, 'mono');
+            html += htmlRowText('Object', a.object, 'mono');
+            html += htmlRowText('Parent', a.parent, 'mono');
+            html += htmlRowText('Target', a.target, 'mono');
+            html += htmlRowText('Browse Name', a.browse_name);
+            html += htmlRowText('Attribute', a.attribute);
+            html += htmlRowText('Value', a.value !== undefined ? String(a.value) : '', 'mono');
+            if (a.arguments) html += htmlRowText('Arguments', a.arguments.join(', '), 'mono');
+            html += htmlRowText('Result', a.result);
+            return html;
+        }
+
         // tshark's BACnet records (shark_protocols.BACnet): an action with
         // its reply, a read/notification summary, a device.
         function renderBacnetDetails(e) {
@@ -4221,6 +4262,8 @@
             telnet: renderTelnetDetails,
             iec104: renderIec104Details,
             bacnet: renderBacnetDetails,
+            opcua: renderOpcuaDetails,
+            opcua_action: renderOpcuaActionDetails,
             bacnet_property: renderBacnetPropertyDetails,
             bacnet_device: renderBacnetDeviceDetails,
             iec104_point: renderIec104PointDetails,
@@ -6884,6 +6927,8 @@
             telnet: 'Telnet',
             iec104: 'IEC 104',
             bacnet: 'BACnet',
+            opcua: 'OPC UA',
+            opcua_action: 'OPC UA Actions',
             bacnet_property: 'BACnet Properties',
             bacnet_device: 'BACnet Devices',
             iec104_point: 'IEC 104 Points',
@@ -7269,6 +7314,10 @@
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Command', 'Station', 'IOA', 'Value', 'Result'];
                 case 'bacnet':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Service', 'Object', 'Property', 'Value', 'Password', 'Result'];
+                case 'opcua':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Endpoint', 'Security', 'Application', 'User', 'Password', 'Activation'];
+                case 'opcua_action':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Service', 'Node', 'Value', 'Result'];
                 case 'bacnet_property':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Service', 'Object', 'Property', 'Count', 'Errors', 'Last Value'];
                 case 'bacnet_device':
@@ -7741,7 +7790,9 @@
                 case 'iec104_point':
                 case 'bacnet':
                 case 'bacnet_property':
-                case 'bacnet_device': {
+                case 'bacnet_device':
+                case 'opcua':
+                case 'opcua_action': {
                     const cols = getColumnsForType(etype).slice(6);
                     colSpan = cols.length + 6;
                     row = rowPrefixCells(e) + cols.map(col => `<td${['Search Target', 'Location', 'User', 'Password'].includes(col) ? ' class="mono"' : ''}>${escapeHtml(extractValue(e, col))}</td>`).join('') + '</tr>';
@@ -9925,8 +9976,12 @@
                 // IEC 104: a control action's, or a monitored point's
                 case 'Station': { const r = e.iec104 || e.iec104_point; return r?.station !== undefined ? String(r.station) : ''; }
                 case 'IOA': { const r = e.iec104 || e.iec104_point; return r?.ioa !== undefined ? String(r.ioa) : ''; }
-                case 'Value': { const r = e.iec104 || e.bacnet; return r?.value !== undefined ? String(r.value) : ''; }
-                case 'Result': return e.iec104?.result || e.bacnet?.result || '';
+                case 'Value': {
+                    const r = e.iec104 || e.bacnet || e.opcua_action;
+                    if (r?.value !== undefined) return String(r.value);
+                    return e.opcua_action?.arguments ? e.opcua_action.arguments.join(', ') : '';
+                }
+                case 'Result': return e.iec104?.result || e.bacnet?.result || e.opcua_action?.result || '';
                 case 'Updates': return e.iec104_point?.updates !== undefined ? String(e.iec104_point.updates) : '';
                 case 'Last Value': { const r = e.iec104_point || e.bacnet_property; return r?.last_value !== undefined ? String(r.last_value) : ''; }
                 // BACnet: an action's, a read/notification summary's, a device's
@@ -9937,8 +9992,14 @@
                 case 'Device': return e.bacnet_device?.device !== undefined ? String(e.bacnet_device.device) : '';
                 case 'Vendor': { const d = e.bacnet_device; return d?.vendor || (d?.vendor_id !== undefined ? String(d.vendor_id) : ''); }
                 case 'Announcements': return e.bacnet_device?.announcements !== undefined ? String(e.bacnet_device.announcements) : '';
-                case 'User': return e.telnet?.username || '';
-                case 'Password': return e.telnet?.password || e.bacnet?.password || '';
+                case 'User': return e.telnet?.username || e.opcua?.username || '';
+                // OPC UA: a connection's, an action's
+                case 'Endpoint': return e.opcua?.endpoint || '';
+                case 'Security': return e.opcua?.security_policy || '';
+                case 'Application': return e.opcua?.client_application || '';
+                case 'Activation': return e.opcua?.activation || '';
+                case 'Node': return e.opcua_action?.node || '';
+                case 'Password': return e.telnet?.password || e.bacnet?.password || e.opcua?.password || '';
                 case 'Login': return e.telnet?.login || '';
                 case 'Area': return e.s7comm?.items?.[0]?.area || '';
                 case 'Error': return e.s7comm?.response?.error_class || '';
@@ -10066,6 +10127,7 @@
                     if (e.event_type === 'nbns') return e.nbns?.service || '';
                     if (e.event_type === 'bacnet') return e.bacnet?.service || '';
                     if (e.event_type === 'bacnet_property') return e.bacnet_property?.service || '';
+                    if (e.event_type === 'opcua_action') return e.opcua_action?.service || '';
                     return e.krb5?.sname || '';
                 }
                 // The name alone, as the server aggregates it - the <suffix> is

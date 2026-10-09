@@ -60,7 +60,7 @@ SHARK_ARTIFACTS = (SHARK_DB, SHARK_DB + '-wal', SHARK_DB + '-shm', SHARK_DB + '.
 # change here or in shark_protocols changes what a run produces: a
 # shark.db stamped with an older version is rebuilt the next time its
 # status is asked for, so existing analyses pick up the change.
-SHARK_FORMAT_VERSION = 11
+SHARK_FORMAT_VERSION = 12
 
 # The fields every packet is read for, one per column of tshark's
 # tab-separated output, in this order - then each of shark_protocols'
@@ -449,7 +449,15 @@ def iter_records(lines, pcap_path=None, deadline=None):
 
 
 # The layers every structured-pass packet is read for, to find its flow
-_STRUCTURED_BASE = ('eth', 'ethertype', 'vlan', 'ip', 'ipv6', 'tcp', 'udp')
+# What the structured pass has to decode to reach a protocol: the link
+# layers a capture can start with (Ethernet, BSD and Linux loopback/cooked
+# captures, raw IP, PPP) and tunnels, then IP and the transports - all
+# other dissectors are off, and a packet whose link layer is missing here
+# isn't decoded at all.
+_STRUCTURED_LINKS = ('eth', 'ethertype', 'vlan', 'null', 'loop', 'sll', 'raw', 'ppp', 'pppoes', 'llc', 'mpls',
+                     'gre', 'vxlan')
+_STRUCTURED_TRANSPORT = ('ip', 'ipv6', 'tcp', 'udp')
+_STRUCTURED_BASE = _STRUCTURED_LINKS + _STRUCTURED_TRANSPORT
 _STRUCTURED_MAX_RANGES = 500
 
 
@@ -474,7 +482,7 @@ def _frame_ranges(flows, max_ranges=_STRUCTURED_MAX_RANGES):
 
 def _structured_command(source, handlers):
     protocols = ','.join(dict.fromkeys(_STRUCTURED_BASE + tuple(p for h in handlers for p in h.tshark_protocols)))
-    layers = ' '.join(dict.fromkeys(('frame',) + _STRUCTURED_BASE[3:] + tuple(l for h in handlers for l in h.layers)))
+    layers = ' '.join(dict.fromkeys(('frame',) + _STRUCTURED_TRANSPORT + tuple(l for h in handlers for l in h.layers)))
     return ['tshark', '-n', '-r', source, '--disable-all-protocols', '--enable-protocol', protocols,
             '-Y', ' || '.join(f'({h.display_filter})' for h in handlers),
             '-T', 'json', '--no-duplicate-keys', '-J', layers]

@@ -25,6 +25,11 @@ each card marked with a dot:
   it carried, a subscription) with the device's reply, one for each
   object and property polled or reported (how often, errors, last value),
   and one for each device announcing itself, with its vendor
+- **OPC UA** (industrial automation) - a record for each connection: the
+  endpoint, security policy, client application, the user it logged in as
+  (and the password, when it was sent unencrypted) and the services it
+  called; and one for each change - a node written, a method called, a
+  node added or deleted - with that operation's result
 - **A card for every other protocol tshark recognizes** - OpenVPN, PRP,
   RADIUS, MongoDB and so on - listing its connections
 - **Suricata stays in charge** of everything it parses: nothing from tshark

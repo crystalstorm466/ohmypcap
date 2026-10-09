@@ -7,6 +7,7 @@ real tshark output skip when tshark isn't installed."""
 import json
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -572,9 +573,85 @@ class TestBACnet(unittest.TestCase):
         self.assertNotIn('conn_bvlc', counts, 'records, not a connection card')
 
 
+@unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
+class TestOPCUA(unittest.TestCase):
+    """tests/protocol_fixtures.write_opcua_pcap, read by the structured
+    pass: the connection's session, and its changes with their own
+    statuses - with what Suricata 8.0.7 logged for the capture
+    (tests/data/opcua_fixture.eve.json): a flow it gives no protocol,
+    since it doesn't parse OPC UA."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests.protocol_fixtures import write_opcua_pcap
+        cls.tmpdir = tempfile.mkdtemp()
+        cls.pcap = os.path.join(cls.tmpdir, 'opcua.pcap')
+        write_opcua_pcap(cls.pcap)
+        cls.records = shark_analyzer.run_tshark(cls.pcap)
+        cls.sessions = [r['opcua'] for r in cls.records if r['event_type'] == 'opcua']
+        cls.actions = [r['opcua_action'] for r in cls.records if r['event_type'] == 'opcua_action']
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    def test_the_session(self):
+        self.assertEqual(len(self.sessions), 1)
+        s = self.sessions[0]
+        self.assertEqual({k: s.get(k) for k in ('endpoint', 'security_policy', 'security_mode', 'client_application',
+                                                'session_name', 'user_token', 'username', 'activation')},
+                         {'endpoint': 'opc.tcp://10.1.0.48:4840/fixture', 'security_policy': 'None', 'security_mode': 'None',
+                          'client_application': 'Fixture Client', 'session_name': 'Fixture Session',
+                          'user_token': 'username', 'username': 'user1', 'activation': 'Good'})
+        self.assertEqual(s['password'], 's3cret', 'a UserName token with no encryption algorithm carries it in the clear')
+        self.assertEqual((s['services']['Read'], s['services']['Publish'], s['errors'], s['last_error']),
+                         (1, 1, 1, 'Publish: BadNoSubscription'))
+
+    def test_changes_with_their_own_statuses(self):
+        self.assertEqual(self.actions, [
+            {'service': 'Write', 'node': 'ns=1;s=the.answer', 'attribute': 'Value', 'value': '42', 'result': 'Good'},
+            {'service': 'Call', 'node': 'ns=1;i=62541', 'object': 'i=85', 'arguments': ['Hello'],
+             'result': 'BadNodeIdUnknown'},
+        ], 'the call was refused for its one operation though the response itself was Good')
+
+    def test_status_names_are_tsharks(self):
+        from shark_protocols import _opcua_status
+        self.assertEqual([_opcua_status(c) for c in ('0x00000000', '0x80340000', '0x801f0000', '0x80ff0000')],
+                         ['Good', 'BadNodeIdUnknown', 'BadUserAccessDenied', '0x80ff0000'])
+
+    def test_the_flow_matches_suricatas_and_the_merge_adds_the_records(self):
+        from scripts.compare_shark_suricata import compare
+        report = compare(_load_eve('opcua_fixture.eve.json'), self.records)['flow']
+        self.assertEqual((report['matched'], report['named_by_tshark'], report['differences']), (1, 1, []))
+        d = os.path.join(self.tmpdir, 'analysis')
+        os.makedirs(d)
+        shutil.copy(self.pcap, d)
+        events_db = os.path.join(d, 'events.db')
+        db.create_sqlite_db(events_db, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data',
+                                                    'opcua_fixture.eve.json'))
+        self.assertTrue(shark_analyzer.build(d, os.path.join(d, 'opcua.pcap')))
+        shark_analyzer.merge(d)
+        counts = db.get_event_types_sqlite(events_db)
+        self.assertEqual((counts.get('opcua'), counts.get('opcua_action')), (1, 2))
+        self.assertNotIn('conn_opcua', counts, 'records, not a connection card')
+
+    def test_a_loopback_capture_is_decoded_too(self):
+        """The structured pass decodes only the link layers it enables;
+        OPC UA test servers are often captured on loopback."""
+        from tests.protocol_fixtures import opcua_packets
+        path = os.path.join(self.tmpdir, 'loopback.pcap')
+        with open(path, 'wb') as f:
+            f.write(struct.pack('<IHHiIII', 0xa1b2c3d4, 2, 4, 0, 0, 65535, 0))          # DLT_NULL
+            for i, p in enumerate(opcua_packets()):
+                p = struct.pack('<I', 2) + p[14:]                                      # AF_INET, not Ethernet
+                f.write(struct.pack('<IIII', 1700000000 + i, 0, len(p), len(p)) + p)
+        records = shark_analyzer.run_tshark(path)
+        self.assertEqual(sum(r['event_type'] == 'opcua_action' for r in records), 2)
+
+
 class _NbnsFromJson:
-    """A structured protocol for testing the structured pass, which no
-    protocol uses yet: NBNS names, read from each packet's JSON tree."""
+    """A structured protocol for testing the structured pass on its own:
+    NBNS names, read from each packet's JSON tree."""
     app_protos = ('nbns',)
     tshark_protocols = ('nbns',)
     layers = ('nbns',)

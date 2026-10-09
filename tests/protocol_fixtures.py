@@ -594,3 +594,99 @@ def bacnet_packets():
 
 def write_bacnet_pcap(path):
     write_pcap(path, bacnet_packets())
+
+
+# ---------------------------------------------------------------- OPC UA
+#
+# A client (CLIENT:48400) and a server (OPCUA_SERVER:4840) over one
+# connection, security policy None: hello, open secure channel (mode None),
+# create a session as "Fixture Client", activate it as user1 with the
+# password sent in the clear, a write of 42 to ns=1;s=the.answer (Good), a
+# method call refused for its one operation (BadNodeIdUnknown), a read, a
+# publish answered with a ServiceFault (BadNoSubscription), and close.
+
+OPCUA_SERVER = '10.1.0.48'
+_OPCUA_ENDPOINT = 'opc.tcp://10.1.0.48:4840/fixture'
+
+
+def _ua_string(text):
+    if text is None:
+        return struct.pack('<i', -1)
+    data = text.encode() if isinstance(text, str) else text
+    return struct.pack('<i', len(data)) + data
+
+
+def _ua_node(ns, ident):
+    if isinstance(ident, str):
+        return struct.pack('<BH', 0x03, ns) + _ua_string(ident)
+    if ns == 0 and ident < 256:
+        return struct.pack('<BB', 0x00, ident)
+    return struct.pack('<BBH', 0x01, ns, ident)
+
+
+_UA_NULL_EXTOBJ = b'\x00\x00\x00'
+
+
+def _ua_request_header(handle):
+    return _ua_node(0, 0) + struct.pack('<qII', 0, handle, 0) + _ua_string(None) + struct.pack('<I', 0) + _UA_NULL_EXTOBJ
+
+
+def _ua_response_header(handle, result=0):
+    return struct.pack('<qII', 0, handle, result) + b'\x00' + struct.pack('<i', -1) + _UA_NULL_EXTOBJ
+
+
+def _ua_message(kind, header, body):
+    return kind + b'F' + struct.pack('<I', 8 + len(header) + len(body)) + header + body
+
+
+def _ua_msg(service, request_id, body):
+    header = struct.pack('<IIII', 7, 1, request_id + 1, request_id)
+    return _ua_message(b'MSG', header, struct.pack('<BBH', 0x01, 0, service) + body)
+
+
+def opcua_packets():
+    hello = _ua_message(b'HEL', b'', struct.pack('<IIIII', 0, 65536, 65536, 0, 0) + _ua_string(_OPCUA_ENDPOINT))
+    ack = _ua_message(b'ACK', b'', struct.pack('<IIIII', 0, 65536, 65536, 0, 0))
+    opn_header = struct.pack('<I', 0) + _ua_string('http://opcfoundation.org/UA/SecurityPolicy#None') \
+        + _ua_string(None) + _ua_string(None) + struct.pack('<II', 1, 1)
+    open_request = _ua_message(b'OPN', opn_header, struct.pack('<BBH', 0x01, 0, 446) + _ua_request_header(1)
+                               + struct.pack('<III', 0, 0, 1) + _ua_string(b'') + struct.pack('<I', 3600000))
+    open_response = _ua_message(b'OPN', opn_header, struct.pack('<BBH', 0x01, 0, 449) + _ua_response_header(1)
+                                + struct.pack('<IIIqI', 0, 7, 1, 0, 3600000) + _ua_string(b''))
+    client = (_ua_string('urn:fixture:client') + _ua_string('urn:fixture') + b'\x02' + _ua_string('Fixture Client')
+              + struct.pack('<I', 1) + _ua_string(None) + _ua_string(None) + struct.pack('<i', 0))
+    create = _ua_msg(461, 2, _ua_request_header(2) + client + _ua_string(None) + _ua_string(_OPCUA_ENDPOINT)
+                     + _ua_string('Fixture Session') + _ua_string(None) + _ua_string(None) + struct.pack('<dI', 60000.0, 0))
+    create_response = _ua_msg(464, 2, _ua_response_header(2) + _ua_node(1, 1001) + _ua_node(1, 1002)
+                              + struct.pack('<d', 60000.0) + _ua_string(None) + _ua_string(None)
+                              + struct.pack('<ii', 0, 0) + _ua_string(None) + _ua_string(None) + struct.pack('<I', 0))
+    token = _ua_string('username-policy') + _ua_string('user1') + _ua_string(b's3cret') + _ua_string(None)
+    activate = _ua_msg(467, 3, _ua_request_header(3) + _ua_string(None) + _ua_string(None) + struct.pack('<ii', 0, 0)
+                       + _ua_node(0, 324) + b'\x01' + struct.pack('<i', len(token)) + token
+                       + _ua_string(None) + _ua_string(None))
+    activate_response = _ua_msg(470, 3, _ua_response_header(3) + _ua_string(None) + struct.pack('<ii', 0, 0))
+    write = _ua_msg(673, 4, _ua_request_header(4) + struct.pack('<i', 1) + _ua_node(1, 'the.answer')
+                    + struct.pack('<I', 13) + _ua_string(None) + b'\x01' + b'\x06' + struct.pack('<i', 42))
+    write_response = _ua_msg(676, 4, _ua_response_header(4) + struct.pack('<iI', 1, 0) + struct.pack('<i', 0))
+    call = _ua_msg(712, 5, _ua_request_header(5) + struct.pack('<i', 1) + _ua_node(0, 85) + _ua_node(1, 62541)
+                   + struct.pack('<i', 1) + b'\x0c' + _ua_string('Hello'))
+    call_response = _ua_msg(715, 5, _ua_response_header(5) + struct.pack('<i', 1) + struct.pack('<I', 0x80340000)
+                            + struct.pack('<iii', -1, -1, -1) + struct.pack('<i', -1))
+    read = _ua_msg(631, 6, _ua_request_header(6) + struct.pack('<dI', 0.0, 0) + struct.pack('<i', 1)
+                   + _ua_node(1, 'the.answer') + struct.pack('<I', 13) + _ua_string(None) + struct.pack('<H', 0)
+                   + _ua_string(None))
+    read_response = _ua_msg(634, 6, _ua_response_header(6) + struct.pack('<i', 1) + b'\x01' + b'\x06'
+                            + struct.pack('<i', 42) + struct.pack('<i', 0))
+    publish = _ua_msg(826, 7, _ua_request_header(7) + struct.pack('<i', 0))
+    fault = _ua_msg(397, 7, _ua_response_header(7, 0x80790000))
+    close = _ua_msg(473, 8, _ua_request_header(8) + b'\x01')
+    close_response = _ua_msg(476, 8, _ua_response_header(8))
+    segments = [(True, hello), (False, ack), (True, open_request), (False, open_response), (True, create),
+                (False, create_response), (True, activate), (False, activate_response), (True, write),
+                (False, write_response), (True, call), (False, call_response), (True, read), (False, read_response),
+                (True, publish), (False, fault), (True, close), (False, close_response)]
+    return tcp_segments(CLIENT, OPCUA_SERVER, 48400, 4840, segments)
+
+
+def write_opcua_pcap(path):
+    write_pcap(path, opcua_packets())

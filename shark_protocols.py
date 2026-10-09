@@ -1015,10 +1015,367 @@ class BACnet:
         return records
 
 
+# ---------------------------------------------------------------- OPC UA
+#
+# OPC UA binary (opc.tcp, port 4840), industrial automation's
+# client/server protocol: a client opens a secure channel, creates and
+# activates a session as some user, then reads, browses, subscribes,
+# writes and calls methods on the server's nodes. Its messages nest
+# deeply (even a request header carries node ids), so it's read from the
+# structured pass's JSON trees. Two record types: 'opcua', one per
+# connection - its endpoint, security policy and mode, the client
+# application and session, the user (and the password, when the token
+# isn't encrypted - with security policy None it often isn't), whether
+# activation worked, and how many of each service it called; and
+# 'opcua_action', one per change - a node written (with the value), a
+# method called (with its arguments), a node or reference added or
+# deleted - with that operation's own status. With SignAndEncrypt the
+# messages after the channel opens can't be read, which the session
+# record counts (encrypted_messages). tshark recognizes OPC UA on port
+# 4840; on another port it's a plain TCP connection.
+
+_OPCUA_STATUS = {
+    0x0000: 'Good', 0x002d: 'GoodSubscriptionTransferred', 0x002e: 'GoodCompletesAsynchronously',
+    0x002f: 'GoodOverload', 0x0030: 'GoodClamped', 0x0096: 'GoodLocalOverride', 0x00a2: 'GoodEntryInserted',
+    0x00a3: 'GoodEntryReplaced', 0x00a5: 'GoodNoData', 0x00a6: 'GoodMoreData', 0x00a7: 'GoodCommunicationEvent',
+    0x00a8: 'GoodShutdownEvent', 0x00a9: 'GoodCallAgain', 0x00aa: 'GoodNonCriticalTimeout',
+    0x00ba: 'GoodResultsMayBeIncomplete', 0x00d9: 'GoodDataIgnored', 0x00dc: 'GoodEdited',
+    0x00dd: 'GoodPostActionFailed', 0x00e0: 'GoodDependentValueChanged', 0x4000: 'Uncertain',
+    0x406c: 'UncertainReferenceOutOfServer', 0x408f: 'UncertainNoCommunicationLastUsableValue',
+    0x4090: 'UncertainLastUsableValue', 0x4091: 'UncertainSubstituteValue', 0x4092: 'UncertainInitialValue',
+    0x4093: 'UncertainSensorNotAccurate', 0x4094: 'UncertainEngineeringUnitsExceeded', 0x4095: 'UncertainSubNormal',
+    0x40a4: 'UncertainDataSubNormal', 0x40bc: 'UncertainReferenceNotDeleted',
+    0x40c0: 'UncertainNotAllNodesAvailable', 0x40de: 'UncertainDominantValueChanged',
+    0x40e2: 'UncertainDependentValueChanged', 0x8000: 'Bad', 0x8001: 'BadUnexpectedError',
+    0x8002: 'BadInternalError', 0x8003: 'BadOutOfMemory', 0x8004: 'BadResourceUnavailable',
+    0x8005: 'BadCommunicationError', 0x8006: 'BadEncodingError', 0x8007: 'BadDecodingError',
+    0x8008: 'BadEncodingLimitsExceeded', 0x8009: 'BadUnknownResponse', 0x800a: 'BadTimeout',
+    0x800b: 'BadServiceUnsupported', 0x800c: 'BadShutdown', 0x800d: 'BadServerNotConnected',
+    0x800e: 'BadServerHalted', 0x800f: 'BadNothingToDo', 0x8010: 'BadTooManyOperations',
+    0x8011: 'BadDataTypeIdUnknown', 0x8012: 'BadCertificateInvalid', 0x8013: 'BadSecurityChecksFailed',
+    0x8014: 'BadCertificateTimeInvalid', 0x8015: 'BadCertificateIssuerTimeInvalid',
+    0x8016: 'BadCertificateHostNameInvalid', 0x8017: 'BadCertificateUriInvalid',
+    0x8018: 'BadCertificateUseNotAllowed', 0x8019: 'BadCertificateIssuerUseNotAllowed',
+    0x801a: 'BadCertificateUntrusted', 0x801b: 'BadCertificateRevocationUnknown',
+    0x801c: 'BadCertificateIssuerRevocationUnknown', 0x801d: 'BadCertificateRevoked',
+    0x801e: 'BadCertificateIssuerRevoked', 0x801f: 'BadUserAccessDenied', 0x8020: 'BadIdentityTokenInvalid',
+    0x8021: 'BadIdentityTokenRejected', 0x8022: 'BadSecureChannelIdInvalid', 0x8023: 'BadInvalidTimestamp',
+    0x8024: 'BadNonceInvalid', 0x8025: 'BadSessionIdInvalid', 0x8026: 'BadSessionClosed',
+    0x8027: 'BadSessionNotActivated', 0x8028: 'BadSubscriptionIdInvalid', 0x802a: 'BadRequestHeaderInvalid',
+    0x802b: 'BadTimestampsToReturnInvalid', 0x802c: 'BadRequestCancelledByClient', 0x8031: 'BadNoCommunication',
+    0x8032: 'BadWaitingForInitialData', 0x8033: 'BadNodeIdInvalid', 0x8034: 'BadNodeIdUnknown',
+    0x8035: 'BadAttributeIdInvalid', 0x8036: 'BadIndexRangeInvalid', 0x8037: 'BadIndexRangeNoData',
+    0x8038: 'BadDataEncodingInvalid', 0x8039: 'BadDataEncodingUnsupported', 0x803a: 'BadNotReadable',
+    0x803b: 'BadNotWritable', 0x803c: 'BadOutOfRange', 0x803d: 'BadNotSupported', 0x803e: 'BadNotFound',
+    0x803f: 'BadObjectDeleted', 0x8040: 'BadNotImplemented', 0x8041: 'BadMonitoringModeInvalid',
+    0x8042: 'BadMonitoredItemIdInvalid', 0x8043: 'BadMonitoredItemFilterInvalid',
+    0x8044: 'BadMonitoredItemFilterUnsupported', 0x8045: 'BadFilterNotAllowed', 0x8046: 'BadStructureMissing',
+    0x8047: 'BadEventFilterInvalid', 0x8048: 'BadContentFilterInvalid', 0x8049: 'BadFilterOperandInvalid',
+    0x804a: 'BadContinuationPointInvalid', 0x804b: 'BadNoContinuationPoints', 0x804c: 'BadReferenceTypeIdInvalid',
+    0x804d: 'BadBrowseDirectionInvalid', 0x804e: 'BadNodeNotInView', 0x804f: 'BadServerUriInvalid',
+    0x8050: 'BadServerNameMissing', 0x8051: 'BadDiscoveryUrlMissing', 0x8052: 'BadSemaphoreFileMissing',
+    0x8053: 'BadRequestTypeInvalid', 0x8054: 'BadSecurityModeRejected', 0x8055: 'BadSecurityPolicyRejected',
+    0x8056: 'BadTooManySessions', 0x8057: 'BadUserSignatureInvalid', 0x8058: 'BadApplicationSignatureInvalid',
+    0x8059: 'BadNoValidCertificates', 0x805a: 'BadRequestCancelledByRequest', 0x805b: 'BadParentNodeIdInvalid',
+    0x805c: 'BadReferenceNotAllowed', 0x805d: 'BadNodeIdRejected', 0x805e: 'BadNodeIdExists',
+    0x805f: 'BadNodeClassInvalid', 0x8060: 'BadBrowseNameInvalid', 0x8061: 'BadBrowseNameDuplicated',
+    0x8062: 'BadNodeAttributesInvalid', 0x8063: 'BadTypeDefinitionInvalid', 0x8064: 'BadSourceNodeIdInvalid',
+    0x8065: 'BadTargetNodeIdInvalid', 0x8066: 'BadDuplicateReferenceNotAllowed', 0x8067: 'BadInvalidSelfReference',
+    0x8068: 'BadReferenceLocalOnly', 0x8069: 'BadNoDeleteRights', 0x806a: 'BadServerIndexInvalid',
+    0x806b: 'BadViewIdUnknown', 0x806d: 'BadTooManyMatches', 0x806e: 'BadQueryTooComplex', 0x806f: 'BadNoMatch',
+    0x8070: 'BadMaxAgeInvalid', 0x8071: 'BadHistoryOperationInvalid', 0x8072: 'BadHistoryOperationUnsupported',
+    0x8073: 'BadWriteNotSupported', 0x8074: 'BadTypeMismatch', 0x8075: 'BadMethodInvalid',
+    0x8076: 'BadArgumentsMissing', 0x8077: 'BadTooManySubscriptions', 0x8078: 'BadTooManyPublishRequests',
+    0x8079: 'BadNoSubscription', 0x807a: 'BadSequenceNumberUnknown', 0x807b: 'BadMessageNotAvailable',
+    0x807c: 'BadInsufficientClientProfile', 0x807d: 'BadTcpServerTooBusy', 0x807e: 'BadTcpMessageTypeInvalid',
+    0x807f: 'BadTcpSecureChannelUnknown', 0x8080: 'BadTcpMessageTooLarge', 0x8081: 'BadTcpNotEnoughResources',
+    0x8082: 'BadTcpInternalError', 0x8083: 'BadTcpEndpointUrlInvalid', 0x8084: 'BadRequestInterrupted',
+    0x8085: 'BadRequestTimeout', 0x8086: 'BadSecureChannelClosed', 0x8087: 'BadSecureChannelTokenUnknown',
+    0x8088: 'BadSequenceNumberInvalid', 0x8089: 'BadConfigurationError', 0x808a: 'BadNotConnected',
+    0x808b: 'BadDeviceFailure', 0x808c: 'BadSensorFailure', 0x808d: 'BadOutOfService',
+    0x808e: 'BadDeadbandFilterInvalid', 0x8097: 'BadRefreshInProgress', 0x8098: 'BadConditionAlreadyDisabled',
+    0x8099: 'BadConditionDisabled', 0x809a: 'BadEventIdUnknown', 0x809b: 'BadNoData', 0x809d: 'BadDataLost',
+    0x809e: 'BadDataUnavailable', 0x809f: 'BadEntryExists', 0x80a0: 'BadNoEntryExists',
+    0x80a1: 'BadTimestampNotSupported', 0x80ab: 'BadInvalidArgument', 0x80ac: 'BadConnectionRejected',
+    0x80ad: 'BadDisconnect', 0x80ae: 'BadConnectionClosed', 0x80af: 'BadInvalidState', 0x80b0: 'BadEndOfStream',
+    0x80b1: 'BadNoDataAvailable', 0x80b2: 'BadWaitingForResponse', 0x80b3: 'BadOperationAbandoned',
+    0x80b4: 'BadExpectedStreamToBlock', 0x80b5: 'BadWouldBlock', 0x80b6: 'BadSyntaxError',
+    0x80b7: 'BadMaxConnectionsReached', 0x80b8: 'BadRequestTooLarge', 0x80b9: 'BadResponseTooLarge',
+    0x80bb: 'BadEventNotAcknowledgeable', 0x80bd: 'BadInvalidTimestampArgument',
+    0x80be: 'BadProtocolVersionUnsupported', 0x80bf: 'BadStateNotActive', 0x80c1: 'BadFilterOperatorInvalid',
+    0x80c2: 'BadFilterOperatorUnsupported', 0x80c3: 'BadFilterOperandCountMismatch',
+    0x80c4: 'BadFilterElementInvalid', 0x80c5: 'BadFilterLiteralInvalid', 0x80c6: 'BadIdentityChangeNotSupported',
+    0x80c8: 'BadNotTypeDefinition', 0x80c9: 'BadViewTimestampInvalid', 0x80ca: 'BadViewParameterMismatch',
+    0x80cb: 'BadViewVersionInvalid', 0x80cc: 'BadConditionAlreadyEnabled', 0x80cd: 'BadDialogNotActive',
+    0x80ce: 'BadDialogResponseInvalid', 0x80cf: 'BadConditionBranchAlreadyAcked',
+    0x80d0: 'BadConditionBranchAlreadyConfirmed', 0x80d1: 'BadConditionAlreadyShelved',
+    0x80d2: 'BadConditionNotShelved', 0x80d3: 'BadShelvingTimeOutOfRange', 0x80d4: 'BadAggregateListMismatch',
+    0x80d5: 'BadAggregateNotSupported', 0x80d6: 'BadAggregateInvalidInputs', 0x80d7: 'BadBoundNotFound',
+    0x80d8: 'BadBoundNotSupported', 0x80da: 'BadAggregateConfigurationRejected', 0x80db: 'BadTooManyMonitoredItems',
+    0x80e1: 'BadDominantValueChanged', 0x80e3: 'BadDependentValueChanged', 0x80e4: 'BadRequestNotAllowed',
+    0x80e5: 'BadTooManyArguments', 0x80e6: 'BadSecurityModeInsufficient'}
+_OPCUA_SECURITY_MODES = {1: 'None', 2: 'Sign', 3: 'SignAndEncrypt'}
+_OPCUA_TOKENS = {321: 'anonymous', 324: 'username', 327: 'certificate', 940: 'issued'}
+_OPCUA_ATTRIBUTES = {
+    1: 'NodeId', 2: 'NodeClass', 3: 'BrowseName', 4: 'DisplayName', 5: 'Description', 6: 'WriteMask',
+    7: 'UserWriteMask', 8: 'IsAbstract', 9: 'Symmetric', 10: 'InverseName', 11: 'ContainsNoLoops',
+    12: 'EventNotifier', 13: 'Value', 14: 'DataType', 15: 'ValueRank', 16: 'ArrayDimensions', 17: 'AccessLevel',
+    18: 'UserAccessLevel', 19: 'MinimumSamplingInterval', 20: 'Historizing', 21: 'Executable',
+    22: 'UserExecutable', 23: 'DataTypeDefinition', 24: 'RolePermissions', 25: 'UserRolePermissions',
+    26: 'AccessRestrictions', 27: 'AccessLevelEx'}
+# Requests that change the server, and the list each one's operations are in
+_OPCUA_CHANGES = {'WriteRequest': 'NodesToWrite', 'CallRequest': 'MethodsToCall', 'AddNodesRequest': 'NodesToAdd',
+                  'DeleteNodesRequest': 'NodesToDelete', 'AddReferencesRequest': 'ReferencesToAdd',
+                  'DeleteReferencesRequest': 'ReferencesToDelete'}
+_OPCUA_MAX_ACTIONS_PER_REQUEST = 100
+
+
+def _opcua_hex(text):
+    """An enumeration or status code tshark writes as hex ('0x0000000d')."""
+    try:
+        return int(text, 16) if str(text).startswith('0x') else int(text)
+    except (TypeError, ValueError):
+        return None
+
+
+def _opcua_status(text):
+    """A status code's name (tshark's), or its hex."""
+    code = _opcua_hex(text)
+    if code is None:
+        return str(text)
+    if code & 0xffff == 0 and (code >> 16) in _OPCUA_STATUS:
+        return _OPCUA_STATUS[code >> 16]
+    return f'0x{code:08x}'
+
+
+def _child(tree, name):
+    """A JSON subtree's child by its label's name - tshark keys a
+    structure 'Name: Type'."""
+    if not isinstance(tree, dict):
+        return None
+    for key, value in tree.items():
+        if key == name or key.split(':', 1)[0] == name:
+            return value
+    return None
+
+
+def _items(array):
+    """An 'Array of X' subtree's elements, in order."""
+    if not isinstance(array, dict):
+        return []
+    return [value for key, value in array.items() if key.startswith('[') and isinstance(value, dict)]
+
+
+def _opcua_node(tree):
+    """A NodeId subtree as OPC UA writes one: 'ns=1;s=the.answer', 'i=85'."""
+    if not isinstance(tree, dict):
+        return ''
+    ns = tree.get('opcua.nodeid.nsindex') or tree.get('opcua.nodeid.nsid') or '0'
+    for field, kind in (('numeric', 'i'), ('string', 's'), ('guid', 'g'), ('bytestring', 'b')):
+        value = tree.get(f'opcua.nodeid.{field}')
+        if value is not None:
+            return (f'ns={ns};' if ns != '0' else '') + f'{kind}={value}'
+    return ''
+
+
+def _opcua_variant(tree):
+    """A Variant subtree's value: a scalar, or the first few of an array."""
+    if not isinstance(tree, dict):
+        return None
+    values = [v for k, v in _flatten(tree).items() if k.startswith('opcua.') and not k.startswith('opcua.variant.')
+              and k not in ('opcua.ArraySize',)]
+    flat = [x for v in values for x in v]
+    if not flat:
+        return None
+    if len(flat) == 1:
+        return flat[0]
+    return ', '.join(str(x) for x in flat[:10]) + (' ...' if len(flat) > 10 else '')
+
+
+def _opcua_password(token):
+    """A UserName token's password, if it was sent in the clear."""
+    password = token.get('opcua.Password')
+    if password is None or token.get('opcua.EncryptionAlgorithm'):
+        return None
+    try:
+        return bytes.fromhex(password.replace(':', '')).decode('utf-8', 'replace')
+    except ValueError:
+        return None
+
+
+class _OPCUASession:
+    __slots__ = ('flow', 'first', 'body', 'waiting')
+
+    def __init__(self, flow, first):
+        self.flow, self.first = flow, first
+        self.body = {'services': {}, 'errors': 0}
+        self.waiting = {}      # request id -> (service, [action bodies])
+
+
+class OPCUA:
+    """OPC UA - see the comment above."""
+    event_type = 'opcua'
+    app_protos = ('opcua',)
+    tshark_protocols = ('opcua',)
+    layers = ('opcua',)
+    display_filter = 'opcua'
+
+    def __init__(self):
+        self.sessions = {}     # flow key -> _OPCUASession
+        self.actions = []
+
+    def feed_json(self, pkt, layers):
+        session = self.sessions.get(pkt.flow.key)
+        if session is None:
+            session = self.sessions[pkt.flow.key] = _OPCUASession(pkt.flow, pkt.when)
+        for pdu in _pdus(layers.get('opcua')):
+            if isinstance(pdu, dict):
+                self._message(pkt, session, pdu)
+
+    def _message(self, pkt, session, pdu):
+        body = session.body
+        kind = pdu.get('opcua.transport.type')
+        if kind == 'HEL' and pdu.get('opcua.transport.endpoint'):
+            body.setdefault('endpoint', pdu['opcua.transport.endpoint'])
+        elif kind == 'ERR':
+            body['transport_error'] = _opcua_status(pdu.get('opcua.transport.error', ''))
+        elif kind == 'OPN' and pdu.get('opcua.security.spu'):
+            body.setdefault('security_policy', pdu['opcua.security.spu'].rsplit('#', 1)[-1])
+        message = _child(pdu, 'Message')
+        if not isinstance(message, dict):
+            # A channel's security policy is in the clear; with one other
+            # than None its mode may be SignAndEncrypt (which an encrypted
+            # OPN hides), and a final chunk that doesn't decode is encrypted
+            if kind == 'MSG' and pdu.get('opcua.transport.chunk') == 'F' and body.get('security_policy') not in (None, 'None'):
+                body['encrypted_messages'] = body.get('encrypted_messages', 0) + 1
+            return
+        name = next((k.split(':', 1)[0] for k in message if not k.startswith('TypeId')), None)
+        tree = message.get(name) if name in message else _child(message, name) if name else None
+        if not name or not isinstance(tree, dict):
+            return
+        request_id = pdu.get('opcua.sequence.rqid')
+        if name.endswith('Request'):
+            self._request(pkt, session, name, tree, request_id)
+        elif name.endswith('Response') or name == 'ServiceFault':
+            self._response(session, name, tree, request_id)
+
+    def _request(self, pkt, session, name, tree, request_id):
+        body = session.body
+        service = name[:-len('Request')]
+        body['services'][service] = body['services'].get(service, 0) + 1
+        if name == 'OpenSecureChannelRequest':
+            mode = _opcua_hex(tree.get('opcua.MessageSecurityMode'))
+            if mode in _OPCUA_SECURITY_MODES:
+                body['security_mode'] = _OPCUA_SECURITY_MODES[mode]
+        elif name == 'CreateSessionRequest':
+            client = _child(tree, 'ClientDescription') or {}
+            app_name = (_child(client, 'ApplicationName') or {}).get('opcua.loctext.Text') if isinstance(client, dict) else None
+            for key, value in (('client_application', app_name), ('client_uri', client.get('opcua.ApplicationUri')),
+                               ('client_product', client.get('opcua.ProductUri')),
+                               ('session_name', tree.get('opcua.SessionName')),
+                               ('endpoint', tree.get('opcua.EndpointUrl'))):
+                if value:
+                    body[key] = value if key != 'endpoint' else body.get('endpoint', value)
+        elif name == 'ActivateSessionRequest':
+            token_tree = _child(tree, 'UserIdentityToken') or {}
+            type_id = _int((_child(token_tree, 'TypeId') or {}).get('opcua.nodeid.numeric'), None)
+            token = next((v for k, v in token_tree.items() if k.endswith('IdentityToken') or 'IdentityToken:' in k), {})                 if isinstance(token_tree, dict) else {}
+            if type_id in _OPCUA_TOKENS:
+                body['user_token'] = _OPCUA_TOKENS[type_id]
+            if isinstance(token, dict):
+                if token.get('opcua.PolicyId'):
+                    body['user_policy'] = token['opcua.PolicyId']
+                if token.get('opcua.UserName'):
+                    body['username'] = token['opcua.UserName']
+                password = _opcua_password(token)
+                if password is not None:
+                    body['password'] = password
+                elif token.get('opcua.Password'):
+                    body['password_encrypted'] = True
+        actions = self._changes(pkt, name, tree) if name in _OPCUA_CHANGES else []
+        if request_id is not None:
+            session.waiting[request_id] = (service, actions)
+            if len(session.waiting) > 256:
+                session.waiting.pop(next(iter(session.waiting)))
+
+    def _changes(self, pkt, name, tree):
+        actions = []
+        for item in _items(_child(tree, _OPCUA_CHANGES[name]))[:_OPCUA_MAX_ACTIONS_PER_REQUEST]:
+            action = {'service': name[:-len('Request')]}
+            if name == 'WriteRequest':
+                action['node'] = _opcua_node(_child(item, 'NodeId'))
+                attribute = _opcua_hex(item.get('opcua.AttributeId'))
+                if attribute is not None:
+                    action['attribute'] = _OPCUA_ATTRIBUTES.get(attribute, str(attribute))
+                value = _opcua_variant(_child(_child(item, 'Value') or {}, 'Value'))
+                if value is not None:
+                    action['value'] = value
+            elif name == 'CallRequest':
+                action['node'] = _opcua_node(_child(item, 'MethodId'))
+                action['object'] = _opcua_node(_child(item, 'ObjectId'))
+                arguments = [_opcua_variant(arg) for arg in _items(_child(item, 'InputArguments'))]
+                if arguments:
+                    action['arguments'] = [a for a in arguments[:10] if a is not None]
+            elif name == 'AddNodesRequest':
+                action['node'] = _opcua_node(_child(item, 'RequestedNewNodeId'))
+                action['parent'] = _opcua_node(_child(item, 'ParentNodeId'))
+                browse = _child(item, 'BrowseName') or {}
+                if isinstance(browse, dict) and browse.get('opcua.qualname.Name'):
+                    action['browse_name'] = browse['opcua.qualname.Name']
+            elif name == 'DeleteNodesRequest':
+                action['node'] = _opcua_node(_child(item, 'NodeId'))
+            else:
+                action['node'] = _opcua_node(_child(item, 'SourceNodeId'))
+                target = _child(item, 'TargetNodeId')
+                if isinstance(target, dict):
+                    action['target'] = _opcua_node(target)
+            action['result'] = 'no response'
+            self.actions.append((pkt.flow, pkt.when, 'opcua_action', action))
+            actions.append(action)
+        return actions
+
+    def _response(self, session, name, tree, request_id):
+        body = session.body
+        header = _child(tree, 'ResponseHeader') or {}
+        result = _opcua_status(header.get('opcua.ServiceResult', '0x00000000')) if isinstance(header, dict) else 'Good'
+        waiting = session.waiting.pop(request_id, None) if request_id is not None else None
+        service, actions = waiting if waiting else (name[:-len('Response')], [])
+        if name == 'ServiceFault' or not result.startswith('Good'):
+            body['errors'] += 1
+            body['last_error'] = f'{service}: {result}'
+        if service == 'ActivateSession':
+            body['activation'] = result
+        if not actions:
+            return
+        results = _child(tree, 'Results')
+        statuses = []
+        if isinstance(results, dict):
+            listed = results.get('opcua.Results')
+            if listed is not None:
+                statuses = listed if isinstance(listed, list) else [listed]
+            else:
+                statuses = [item.get('opcua.StatusCode') for item in _items(results)]
+        for i, action in enumerate(actions):
+            if not result.startswith('Good'):
+                action['result'] = result
+            elif i < len(statuses) and statuses[i] is not None:
+                action['result'] = _opcua_status(statuses[i])
+            else:
+                action['result'] = result
+
+    def finish(self):
+        records = []
+        for session in self.sessions.values():
+            # a lone response, its request before the capture, says nothing
+            if session.body['services'] or len(session.body) > 2:
+                records.append((session.flow, session.first, 'opcua', session.body))
+        return records + self.actions
+
+
 # ---------------------------------------------------------------- structured protocols
 #
-# Protocols whose messages nest - several SMB2 commands in one packet, a
-# Kerberos ticket inside an SMB session setup - can't be read from flat
+# Protocols whose messages nest - an OPC UA write's node ids beside its
+# request header's, several commands in one packet - can't be read from flat
 # per-packet fields: a field present in only some of a packet's commands
 # can't be told apart. These are read instead from a second tshark pass
 # that writes each packet as a JSON tree (shark_analyzer's structured
@@ -1060,7 +1417,7 @@ PROTOCOLS = (LLMNR, NBNS, SSDP, S7comm, Telnet, IEC104, BACnet)
 # ... and from the structured pass (shark_analyzer._structured_pass): none
 # yet - it's for a protocol whose messages nest, which flat fields can't
 # keep apart (several commands per packet, a token inside a command).
-STRUCTURED_PROTOCOLS = ()
+STRUCTURED_PROTOCOLS = (OPCUA,)
 # Flow application protocols with transaction records here - every other
 # one gets a connection tab (db.CONNECTION_TYPE_PREFIX) instead.
 RECORDED_APP_PROTOS = frozenset(p for proto in PROTOCOLS + STRUCTURED_PROTOCOLS for p in proto.app_protos)

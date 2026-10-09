@@ -1388,6 +1388,20 @@ AGGREGATION_JSON_PATHS = {
         'Area': ['$.s7comm.items[0].area'],
         'Error': ['$.s7comm.response.error_class'],
     },
+    'opcua': {
+        'Endpoint': ['$.opcua.endpoint'],
+        'Security': ['$.opcua.security_policy'],
+        'Application': ['$.opcua.client_application'],
+        'User': ['$.opcua.username'],
+        'Password': ['$.opcua.password'],
+        'Activation': ['$.opcua.activation'],
+    },
+    'opcua_action': {
+        'Service': ['$.opcua_action.service'],
+        'Node': ['$.opcua_action.node'],
+        'Value': ['$.opcua_action.value'],
+        'Result': ['$.opcua_action.result'],
+    },
     'bacnet': {
         'Service': ['$.bacnet.service'],
         'Object': ['$.bacnet.object'],

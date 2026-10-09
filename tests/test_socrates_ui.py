@@ -21764,6 +21764,12 @@ class TestTsharkUI(unittest.TestCase):
         's7comm': {'event_type': 's7comm', 's7comm': {'type': 'job', 'function': 'Read Var',
                                                       'items': [{'area': 'Data blocks', 'db': 1, 'address': '10.0'}],
                                                       'response': {'error_class': 'Error on supplies'}}},
+        'opcua': {'event_type': 'opcua', 'opcua': {'endpoint': 'opc.tcp://10.1.0.48:4840/fixture', 'security_policy': 'None',
+                                                  'security_mode': 'None', 'client_application': 'Fixture Client',
+                                                  'username': 'user1', 'password': 's3cret', 'activation': 'Good',
+                                                  'services': {'Write': 1}, 'errors': 0}},
+        'opcua_action': {'event_type': 'opcua_action', 'opcua_action': {'service': 'Call', 'node': 'ns=1;i=62541', 'object': 'i=85',
+                                                                        'arguments': ['Hello'], 'result': 'BadNodeIdUnknown'}},
         'bacnet': {'event_type': 'bacnet', 'bacnet': {'service': 'reinitializeDevice', 'kind': 'confirmed', 'state': 'warmstart',
                                                       'password': 'filister', 'result': 'error: services: password-failure'}},
         'bacnet_property': {'event_type': 'bacnet_property', 'bacnet_property': {
@@ -21788,6 +21794,8 @@ class TestTsharkUI(unittest.TestCase):
         'ssdp': ['M-SEARCH', 'upnp:rootdevice', 'http://10.1.0.60/d.xml', 'TestGateway/1.0'],
         'telnet': ['MOXA EtherDevice Switch EDS-508A', 'admin', 'admin', 'failed'],
         'iec104': ['Single command', '7', '2001', 'on', 'confirmed, terminated'],
+        'opcua': ['opc.tcp://10.1.0.48:4840/fixture', 'None', 'Fixture Client', 'user1', 's3cret', 'Good'],
+        'opcua_action': ['Call', 'ns=1;i=62541', 'Hello', 'BadNodeIdUnknown'],
         'bacnet': ['reinitializeDevice', '', '', '', 'filister', 'error: services: password-failure'],
         'bacnet_property': ['readProperty', 'analog-value,1', 'present-value', '2', '1', '72.5'],
         'bacnet_device': ['1047', 'Acuity Brands Lighting, Inc.', '2'],
@@ -21808,7 +21816,9 @@ class TestTsharkUI(unittest.TestCase):
                 var tb = document.createElement('tbody');
                 tb.innerHTML = buildRowForEvent(e);
                 out[t] = {{cols: cols, cells: [...tb.querySelector('tr').children].map(td => td.textContent),
-                          values: cols.slice(6).map(c => extractValue(e, c)), detail: formatEvent(e),
+                          values: cols.slice(6).map(c => extractValue(e, c)),
+                          // just its section titles: the helper's output is limited to 64 KB
+                          detail: (formatEvent(e).match(/[^<>]+ Details(?=<)/g) || []).join('|'),
                           label: eventTypeLabel(t)}};
             }});
             window.__jsdom_result = out;
@@ -21821,7 +21831,7 @@ class TestTsharkUI(unittest.TestCase):
                 self.assertEqual(r['cells'][6:6 + len(expected)], expected)
                 # one record per point, so its section is a point's
                 section = {'iec104_point': 'IEC 104 Point', 'bacnet_property': 'BACnet Property',
-                           'bacnet_device': 'BACnet Device'}.get(t, r['label'])
+                           'bacnet_device': 'BACnet Device', 'opcua_action': 'OPC UA Action'}.get(t, r['label'])
                 self.assertIn(f'{section} Details', r['detail'])
 
     def test_telnet_details_list_the_commands_one_per_line(self):
@@ -21861,7 +21871,7 @@ class TestTsharkUI(unittest.TestCase):
         import db
         from tests.jsdom_helper import js_statements
         cols = js_statements("""window.__jsdom_result = Object.fromEntries(
-            ['llmnr', 'nbns', 's7comm', 'ssdp', 'telnet', 'iec104', 'iec104_point', 'bacnet', 'bacnet_property', 'bacnet_device'].map(t => [t, getColumnsForType(t).slice(6)]));""")
+            ['llmnr', 'nbns', 's7comm', 'ssdp', 'telnet', 'iec104', 'iec104_point', 'bacnet', 'bacnet_property', 'bacnet_device', 'opcua', 'opcua_action'].map(t => [t, getColumnsForType(t).slice(6)]));""")
         for t, columns in cols.items():
             self.assertEqual(list(db.AGGREGATION_JSON_PATHS[t]), columns, t)
 
