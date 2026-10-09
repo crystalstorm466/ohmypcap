@@ -429,6 +429,66 @@ class TestTelnet(unittest.TestCase):
         self.assertNotIn('conn_telnet', db.get_event_types_sqlite(events_db))
 
 
+@unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
+class TestIEC104(unittest.TestCase):
+    """tests/protocol_fixtures.write_iec104_pcap: control actions paired with
+    their replies, and monitored points summarized - with what Suricata
+    8.0.7 logged for the capture (tests/data/iec104_fixture.eve.json): a
+    flow it gives no protocol, since it doesn't parse IEC 104."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests.protocol_fixtures import write_iec104_pcap
+        cls.tmpdir = tempfile.mkdtemp()
+        cls.pcap = os.path.join(cls.tmpdir, 'iec104.pcap')
+        write_iec104_pcap(cls.pcap)
+        cls.records = shark_analyzer.run_tshark(cls.pcap)
+        cls.actions = [r['iec104'] for r in cls.records if r['event_type'] == 'iec104']
+        cls.points = {p['ioa']: p for p in (r['iec104_point'] for r in cls.records if r['event_type'] == 'iec104_point')}
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    def test_control_actions_with_their_replies(self):
+        self.assertEqual([(a['action'], a.get('value'), a['result']) for a in self.actions], [
+            ('Interrogation', 'station', 'confirmed, terminated'),
+            ('Single command', 'on', 'confirmed, terminated'),
+            ('Set point (float)', 3.25, 'negative'),
+            ('Interrogation', 'station', 'confirmed, terminated'),
+            ('Interrogation', 'station', 'confirmed, terminated'),
+            ('Clock synchronization', None, 'confirmed (request not seen)'),
+        ], 'two interrogations sent before either was answered each get their own replies, in order')
+        command = self.actions[1]
+        self.assertEqual((command['type'], command['station'], command['ioa'], command['response']),
+                         ('C_SC_NA_1', 7, 2001, {'cause': 'actcon', 'negative': False}))
+
+    def test_points_summarize_their_updates(self):
+        """Including a packet that carries two messages, split by their
+        object counts."""
+        self.assertEqual(sorted(self.points), [1001, 1002, 1003])
+        p = self.points[1001]
+        self.assertEqual((p['type'], p['updates'], p['causes'], p['last_value']),
+                         ('M_ME_NC_1', 2, {'inrogen': 1, 'spont': 1}, 231.0))
+        self.assertEqual((self.points[1003]['type'], self.points[1003]['last_value']), ('M_SP_NA_1', 1))
+
+    def test_the_flow_matches_suricatas_and_the_merge_adds_both_kinds(self):
+        from scripts.compare_shark_suricata import compare
+        report = compare(_load_eve('iec104_fixture.eve.json'), self.records)['flow']
+        self.assertEqual((report['matched'], report['named_by_tshark'], report['differences']), (1, 1, []))
+        d = os.path.join(self.tmpdir, 'analysis')
+        os.makedirs(d)
+        shutil.copy(self.pcap, d)
+        events_db = os.path.join(d, 'events.db')
+        db.create_sqlite_db(events_db, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data',
+                                                    'iec104_fixture.eve.json'))
+        self.assertTrue(shark_analyzer.build(d, os.path.join(d, 'iec104.pcap')))
+        shark_analyzer.merge(d)
+        counts = db.get_event_types_sqlite(events_db)
+        self.assertEqual((counts.get('iec104'), counts.get('iec104_point')), (6, 3))
+        self.assertNotIn('conn_iec60870_104', counts, 'records, not a connection card')
+
+
 class _NbnsFromJson:
     """A structured protocol for testing the structured pass, which no
     protocol uses yet: NBNS names, read from each packet's JSON tree."""

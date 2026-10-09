@@ -1388,6 +1388,20 @@ AGGREGATION_JSON_PATHS = {
         'Area': ['$.s7comm.items[0].area'],
         'Error': ['$.s7comm.response.error_class'],
     },
+    'iec104': {
+        'Command': ['$.iec104.action'],
+        'Station': ['$.iec104.station'],
+        'IOA': ['$.iec104.ioa'],
+        'Value': ['$.iec104.value'],
+        'Result': ['$.iec104.result'],
+    },
+    'iec104_point': {
+        'Station': ['$.iec104_point.station'],
+        'IOA': ['$.iec104_point.ioa'],
+        'Type': ['$.iec104_point.type'],
+        'Updates': ['$.iec104_point.updates'],
+        'Last Value': ['$.iec104_point.last_value'],
+    },
     'telnet': {
         'Banner': ['$.telnet.banner'],
         'User': ['$.telnet.username'],

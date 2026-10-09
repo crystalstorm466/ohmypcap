@@ -429,3 +429,67 @@ def telnet_packets():
 
 def write_telnet_pcap(path):
     write_pcap(path, telnet_packets())
+
+
+# ---------------------------------------------------------------- IEC 60870-5-104
+#
+# A controlling station (CLIENT) and a substation (IEC104_RTU:2404, common
+# address 7): STARTDT, a station interrogation answered by two float
+# points and terminated, a single command (on) confirmed and terminated,
+# a float set point refused (negative confirmation), a packet carrying
+# two messages, two interrogations sent back to back, and a confirmation
+# whose request isn't in the capture.
+
+IEC104_RTU = '10.1.0.104'
+_IEC104_STATION = 7
+
+
+def _apci_i(asdu, tx, rx):
+    return bytes([0x68, 4 + len(asdu)]) + struct.pack('<HH', tx << 1, rx << 1) + asdu
+
+
+def _apci_u(control):
+    return bytes([0x68, 4, control, 0, 0, 0])
+
+
+def _asdu(typeid, cause, objects, negative=False, sq=False):
+    """objects: (ioa, element bytes) - each with its address unless sq."""
+    vsq = len(objects) | (0x80 if sq else 0)
+    cot = cause | (0x40 if negative else 0)
+    body = b''
+    for i, (ioa, element) in enumerate(objects):
+        if not sq or i == 0:
+            body += ioa.to_bytes(3, 'little')
+        body += element
+    return bytes([typeid, vsq, cot, 0]) + struct.pack('<H', _IEC104_STATION) + body
+
+
+def iec104_packets():
+    float_point = lambda value: struct.pack('<f', value) + b'\x00'          # value, quality
+    interrogation = lambda cause: _asdu(100, cause, [(0, b'\x14')])         # QOI 20: station
+    segments = [
+        (True, _apci_u(0x07)), (False, _apci_u(0x0b)),                         # STARTDT act / con
+        (True, _apci_i(interrogation(6), 0, 0)),
+        (False, _apci_i(interrogation(7), 0, 1)),
+        (False, _apci_i(_asdu(13, 20, [(1001, float_point(230.5)), (1002, float_point(49.98))]), 1, 1)),
+        (False, _apci_i(interrogation(10), 2, 1)),
+        (True, _apci_i(_asdu(45, 6, [(2001, b'\x01')]), 1, 3)),                 # single command: on
+        (False, _apci_i(_asdu(45, 7, [(2001, b'\x01')]), 3, 2)),
+        (False, _apci_i(_asdu(45, 10, [(2001, b'\x01')]), 4, 2)),
+        (True, _apci_i(_asdu(50, 6, [(3001, struct.pack('<f', 3.25) + b'\x00')]), 2, 5)),   # set point
+        (False, _apci_i(_asdu(50, 7, [(3001, struct.pack('<f', 3.25) + b'\x00')], negative=True), 5, 3)),
+        # one packet, two messages: a float and a single point, spontaneous
+        (False, _apci_i(_asdu(13, 3, [(1001, float_point(231.0))]), 6, 3)
+                + _apci_i(_asdu(1, 3, [(1003, b'\x01')]), 7, 3)),
+        # two interrogations before either is answered; replies in order
+        (True, _apci_i(interrogation(6), 3, 8)), (True, _apci_i(interrogation(6), 4, 8)),
+        (False, _apci_i(interrogation(7), 8, 5)), (False, _apci_i(interrogation(10), 9, 5)),
+        (False, _apci_i(interrogation(7), 10, 5)), (False, _apci_i(interrogation(10), 11, 5)),
+        # a clock sync confirmation whose activation the capture missed
+        (False, _apci_i(_asdu(103, 7, [(0, b'\x00' * 7)]), 12, 5)),
+    ]
+    return tcp_segments(CLIENT, IEC104_RTU, 42404, 2404, segments)
+
+
+def write_iec104_pcap(path):
+    write_pcap(path, iec104_packets())

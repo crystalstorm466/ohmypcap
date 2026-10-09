@@ -16,6 +16,10 @@ each card marked with a dot:
 - **Telnet** - one record per session: the device's banner, the user name
   and password typed at its login, whether the login failed, and the
   commands typed (Suricata recognizes Telnet but logs nothing about it)
+- **IEC 104** (power grid telecontrol) - a record for each control action
+  (command, set point, interrogation, clock sync, file transfer) with
+  whether the substation confirmed, refused or finished it, and one for
+  each monitored point: how often it updated, why, and its last value
 - **A card for every other protocol tshark recognizes** - OpenVPN, PRP,
   RADIUS, MongoDB and so on - listing its connections
 - **Suricata stays in charge** of everything it parses: nothing from tshark

@@ -4,7 +4,8 @@ trusting a change to shark_analyzer, a tshark or Suricata upgrade, or a
 new protocol in shark_protocols.
 
 The corpus is a directory of capture subdirectories plus Suricata's output
-for each in eve/, named <subdir>__<capture>.eve.json (run Suricata in the
+for each in eve/, named <subdir>__<capture>.eve.json - a nested subdir with
++ for / (ics_iti+BACnet__bacnet_test.pcap.eve.json) - (run Suricata in the
 SO-CRATES image, so it's the same version and config). For each capture,
 this runs tshark and the merge's selection (shark_analyzer.merge_rows),
 compares flows with Suricata's (compare_shark_suricata), and prints totals:
@@ -41,12 +42,12 @@ def main(argv):
         if not name.endswith('.eve.json') or '__' not in name:
             continue
         subdir, pcap = name[:-len('.eve.json')].split('__', 1)
-        if only and subdir not in only:
+        if only and not (subdir in only or subdir.split('+')[0] in only):
             continue
         eve = os.path.join(corpus, 'eve', name)
-        shark = shark_analyzer.run_tshark(os.path.join(corpus, subdir, pcap), timeout=1800)
+        shark = shark_analyzer.run_tshark(os.path.join(corpus, *subdir.split('+'), pcap), timeout=1800)
         r = compare(_load_eve(eve), shark)['flow']
-        for k in ('suricata', 'shark', 'matched', 'reoriented'):
+        for k in ('suricata', 'shark', 'matched', 'reoriented', 'named_by_tshark'):
             flows[k] += r[k]
         with tempfile.TemporaryDirectory() as tmp:
             events_db = os.path.join(tmp, 'events.db')
@@ -54,10 +55,11 @@ def main(argv):
             rows = list(shark_analyzer.merge_rows((json.dumps(e) for e in shark), db.suricata_identified_flows(events_db)))
         these = collections.Counter(e['event_type'] for e in rows)
         added.update(these)
-        print(f"{subdir}/{pcap[:50]}: flows {r['matched']}/{r['suricata']} matched, {r['reoriented']} reoriented; "
+        print(f"{subdir}/{pcap[:50]}: flows {r['matched']}/{r['suricata']} matched ({r['named_by_tshark']} named by tshark), "
+              f"{r['reoriented']} reoriented; "
               f"adds {dict(these.most_common(6))}", flush=True)
-    print(f"\nflows: {flows['matched']} of Suricata's {flows['suricata']} matched (tshark {flows['shark']}), "
-          f"{flows['reoriented']} reoriented")
+    print(f"\nflows: {flows['matched']} of Suricata's {flows['suricata']} matched (tshark {flows['shark']}; "
+          f"{flows['named_by_tshark']} named only by tshark), {flows['reoriented']} reoriented")
     print('rows tshark adds:', dict(added.most_common()))
     return 0
 

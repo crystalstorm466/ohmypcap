@@ -48,7 +48,8 @@ def _reversed_flow(fields):
 
 def compare(suricata_events, shark_events):
     """{'flow': {'suricata': n, 'shark': n, 'matched': n, 'reoriented': n,
-    'differences': [...]}}. A reoriented flow - tshark's client is whoever
+    'named_by_tshark': n, 'differences': [...]}} - named_by_tshark of the
+    matched being flows Suricata gave no protocol and tshark did. A reoriented flow - tshark's client is whoever
     made the first request, or was answered first, where Suricata's is
     whoever sent the first packet (shark_analyzer._Flow.orient) - is
     compared from Suricata's side, so only its other fields can differ."""
@@ -62,7 +63,7 @@ def compare(suricata_events, shark_events):
                 out[(cid, seen[cid])] = e
         return out
     a, b = index(suricata_events), index(shark_events)
-    result = {'suricata': len(a), 'shark': len(b), 'matched': 0, 'reoriented': 0, 'differences': []}
+    result = {'suricata': len(a), 'shark': len(b), 'matched': 0, 'reoriented': 0, 'named_by_tshark': 0, 'differences': []}
     for key in sorted(set(a) | set(b), key=str):
         if key not in b:
             result['differences'].append({'key': key, 'only': 'suricata', 'record': _flow_fields(a[key])})
@@ -75,6 +76,11 @@ def compare(suricata_events, shark_events):
             fb = _reversed_flow(fb)
             result['reoriented'] += 1
         diff = {k: (fa.get(k), fb.get(k)) for k in fa if fa.get(k) != fb.get(k)}
+        if set(diff) == {'app_proto'} and diff['app_proto'][0] is None:
+            # a protocol Suricata doesn't parse, which tshark named - what
+            # it's there for, not a difference
+            result['named_by_tshark'] += 1
+            diff = {}
         if diff:
             result['differences'].append({'key': key, 'fields': diff})
         else:
@@ -113,7 +119,7 @@ def main(argv):
         return 2
     r = compare(_load_eve(eve), shark)['flow']
     print(f"flow  suricata {r['suricata']}  shark {r['shark']}  matched {r['matched']}  "
-          f"differences {len(r['differences'])}  reoriented {r['reoriented']}")
+          f"differences {len(r['differences'])}  reoriented {r['reoriented']}  named by tshark {r['named_by_tshark']}")
     for d in r['differences']:
         print('   ', json.dumps(d, default=str))
     return 1 if r['differences'] else 0

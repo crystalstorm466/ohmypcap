@@ -2149,6 +2149,8 @@
                 s7comm: '#00897b',
                 ssdp: '#7e57c2',
                 telnet: '#ffa726',
+                iec104: '#ef5350',
+                iec104_point: '#26a69a',
                 email: '#4fc3f7',
                 filealerts: '#e91e63',
                 fileinfo: '#9c27b0',
@@ -3761,6 +3763,36 @@
             return html;
         }
 
+        // tshark's IEC 104 records (shark_protocols.IEC104): a control
+        // action with its replies, and a monitored point's summary.
+        function renderIec104Details(e) {
+            const c = e.iec104 || {};
+            let html = htmlSection('IEC 104 Details', COLORS.EVENT.iec104);
+            html += htmlRowText('Command', c.action);
+            html += htmlRowText('Type', c.type ? `${c.type} (${c.type_id})` : '', 'mono');
+            html += htmlRowText('Cause', c.cause);
+            html += htmlRowText('Station', c.station !== undefined ? String(c.station) : '');
+            html += htmlRowText('IOA', c.ioa !== undefined ? String(c.ioa) : '');
+            html += htmlRowText('Value', c.value !== undefined ? String(c.value) : '', 'mono');
+            if (c.test) html += htmlRowText('Test', 'yes');
+            html += htmlRowText('Result', c.result);
+            if (c.response) html += htmlRowText('Reply', `${c.response.cause}${c.response.negative ? ' (negative)' : ''}`);
+            return html;
+        }
+
+        function renderIec104PointDetails(e) {
+            const p = e.iec104_point || {};
+            let html = htmlSection('IEC 104 Point Details', COLORS.EVENT.iec104_point);
+            html += htmlRowText('Station', p.station !== undefined ? String(p.station) : '');
+            html += htmlRowText('IOA', p.ioa !== undefined ? String(p.ioa) : '');
+            html += htmlRowText('Type', p.type ? `${p.type} (${p.type_id})` : '', 'mono');
+            html += htmlRowText('Updates', p.updates !== undefined ? p.updates.toLocaleString() : '');
+            html += htmlRowText('Causes', Object.entries(p.causes || {}).map(([c, n]) => `${c} ${n.toLocaleString()}`).join(', '));
+            html += htmlRowText('Last Value', p.last_value !== undefined ? String(p.last_value) : '', 'mono');
+            html += htmlRowText('Last Update', (p.last_update || '').slice(0, 23).replace('T', ' '));
+            return html;
+        }
+
         // tshark's Telnet records (shark_protocols.Telnet): one per session.
         function renderTelnetDetails(e) {
             const t = e.telnet || {};
@@ -4137,6 +4169,8 @@
             s7comm: renderS7commDetails,
             ssdp: renderSsdpDetails,
             telnet: renderTelnetDetails,
+            iec104: renderIec104Details,
+            iec104_point: renderIec104PointDetails,
             dnp3: renderDnp3Details,
             http: renderHttpDetails,
             modbus: renderModbusDetails,
@@ -6795,6 +6829,8 @@
             s7comm: 'S7comm',
             ssdp: 'SSDP',
             telnet: 'Telnet',
+            iec104: 'IEC 104',
+            iec104_point: 'IEC 104 Points',
             dns_heuristics: 'DNS Heuristics',
             email: 'Emails',
             filealerts: 'File Alerts',
@@ -7173,6 +7209,10 @@
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Method', 'Search Target', 'Location', 'Server'];
                 case 'telnet':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Banner', 'User', 'Password', 'Login'];
+                case 'iec104':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Command', 'Station', 'IOA', 'Value', 'Result'];
+                case 'iec104_point':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Station', 'IOA', 'Type', 'Updates', 'Last Value'];
                 case 'ldap':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Operation', 'Message ID', 'Result Code'];
                 case 'arp':
@@ -7634,9 +7674,11 @@
                 }
                 case 's7comm':
                 case 'ssdp':
-                case 'telnet': {
+                case 'telnet':
+                case 'iec104':
+                case 'iec104_point': {
                     const cols = getColumnsForType(etype).slice(6);
-                    colSpan = 10;
+                    colSpan = cols.length + 6;
                     row = rowPrefixCells(e) + cols.map(col => `<td${['Search Target', 'Location', 'User', 'Password'].includes(col) ? ' class="mono"' : ''}>${escapeHtml(extractValue(e, col))}</td>`).join('') + '</tr>';
                     break;
                 }
@@ -9798,6 +9840,7 @@
                 case 'Severity': return 'Sev ' + (e.alert?.severity || 0);
                 case 'Ruleset': return classifyRuleset(e.alert?.signature_id);
                 case 'Type': {
+                    if (e.event_type === 'iec104_point') return e.iec104_point?.type || '';
                     if (e.event_type === 'dnp3') return e.dnp3?.type || '';
                     if (e.event_type === 's7comm') return e.s7comm?.type || '';
                     if (e.event_type === 'anomaly') return e.anomaly?.type || '';
@@ -9814,6 +9857,13 @@
                 case 'Location': return e.ssdp?.location || '';
                 case 'Server': return e.ssdp?.server || '';
                 case 'Banner': return e.telnet?.banner || '';
+                // IEC 104: a control action's, or a monitored point's
+                case 'Station': { const r = e.iec104 || e.iec104_point; return r?.station !== undefined ? String(r.station) : ''; }
+                case 'IOA': { const r = e.iec104 || e.iec104_point; return r?.ioa !== undefined ? String(r.ioa) : ''; }
+                case 'Value': return e.iec104?.value !== undefined ? String(e.iec104.value) : '';
+                case 'Result': return e.iec104?.result || '';
+                case 'Updates': return e.iec104_point?.updates !== undefined ? String(e.iec104_point.updates) : '';
+                case 'Last Value': return e.iec104_point?.last_value !== undefined ? String(e.iec104_point.last_value) : '';
                 case 'User': return e.telnet?.username || '';
                 case 'Password': return e.telnet?.password || '';
                 case 'Login': return e.telnet?.login || '';
@@ -9904,6 +9954,7 @@
                     return e.dns?.rrname || e.dns?.queries?.[0]?.rrname || '';
                 }
                 case 'Command': {
+                    if (e.event_type === 'iec104') return e.iec104?.action || e.iec104?.type || '';
                     if (e.event_type === 'pgsql') return e.pgsql?.response?.command_completed || '';
                     if (e.event_type === 'enip') return e.enip?.request?.command || e.enip?.response?.command || '';
                     if (e.event_type === 'pop3') return e.pop3?.request?.command || '';

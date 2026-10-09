@@ -480,6 +480,217 @@ class Telnet:
         return records
 
 
+# ---------------------------------------------------------------- IEC 60870-5-104
+#
+# Telecontrol between a power grid's control centre and its substations.
+# Two record types: 'iec104', one per control action - a command, set
+# point, interrogation, clock sync, read, reset, parameter or file
+# transfer - with its confirmation and termination paired in; and
+# 'iec104_point', one per monitored point per connection (its updates
+# counted, the last value kept), so a busy link's hundreds of thousands
+# of measurements don't each become a record. A packet often carries
+# several messages (ASDUs): each has one type, cause and station, and
+# numix objects, by which the flat object and value fields split up.
+
+_IEC104_TYPES = {
+    1: 'M_SP_NA_1', 2: 'M_SP_TA_1', 3: 'M_DP_NA_1', 4: 'M_DP_TA_1', 5: 'M_ST_NA_1', 6: 'M_ST_TA_1', 7: 'M_BO_NA_1',
+    8: 'M_BO_TA_1', 9: 'M_ME_NA_1', 10: 'M_ME_TA_1', 11: 'M_ME_NB_1', 12: 'M_ME_TB_1', 13: 'M_ME_NC_1', 14: 'M_ME_TC_1',
+    15: 'M_IT_NA_1', 16: 'M_IT_TA_1', 17: 'M_EP_TA_1', 18: 'M_EP_TB_1', 19: 'M_EP_TC_1', 20: 'M_PS_NA_1', 21: 'M_ME_ND_1',
+    30: 'M_SP_TB_1', 31: 'M_DP_TB_1', 32: 'M_ST_TB_1', 33: 'M_BO_TB_1', 34: 'M_ME_TD_1', 35: 'M_ME_TE_1', 36: 'M_ME_TF_1',
+    37: 'M_IT_TB_1', 38: 'M_EP_TD_1', 39: 'M_EP_TE_1', 40: 'M_EP_TF_1', 45: 'C_SC_NA_1', 46: 'C_DC_NA_1', 47: 'C_RC_NA_1',
+    48: 'C_SE_NA_1', 49: 'C_SE_NB_1', 50: 'C_SE_NC_1', 51: 'C_BO_NA_1', 58: 'C_SC_TA_1', 59: 'C_DC_TA_1', 60: 'C_RC_TA_1',
+    61: 'C_SE_TA_1', 62: 'C_SE_TB_1', 63: 'C_SE_TC_1', 64: 'C_BO_TA_1', 70: 'M_EI_NA_1', 100: 'C_IC_NA_1', 101: 'C_CI_NA_1',
+    102: 'C_RD_NA_1', 103: 'C_CS_NA_1', 104: 'C_TS_NA_1', 105: 'C_RP_NA_1', 106: 'C_CD_NA_1', 107: 'C_TS_TA_1',
+    110: 'P_ME_NA_1', 111: 'P_ME_NB_1', 112: 'P_ME_NC_1', 113: 'P_AC_NA_1', 120: 'F_FR_NA_1', 121: 'F_SR_NA_1',
+    122: 'F_SC_NA_1', 123: 'F_LS_NA_1', 124: 'F_AF_NA_1', 125: 'F_SG_NA_1', 126: 'F_DR_TA_1', 127: 'F_SC_NB_1'}
+_IEC104_ACTIONS = {
+    45: 'Single command', 46: 'Double command', 47: 'Regulating step command', 48: 'Set point (normalized)',
+    49: 'Set point (scaled)', 50: 'Set point (float)', 51: 'Bitstring command', 58: 'Single command', 59: 'Double command',
+    60: 'Regulating step command', 61: 'Set point (normalized)', 62: 'Set point (scaled)', 63: 'Set point (float)',
+    64: 'Bitstring command', 70: 'End of initialization', 100: 'Interrogation', 101: 'Counter interrogation', 102: 'Read',
+    103: 'Clock synchronization', 104: 'Test', 105: 'Reset process', 106: 'Delay acquisition', 107: 'Test',
+    110: 'Parameter (normalized)', 111: 'Parameter (scaled)', 112: 'Parameter (float)', 113: 'Parameter activation',
+    120: 'File ready', 121: 'Section ready', 122: 'Call directory/file/section', 123: 'Last section/segment',
+    124: 'Acknowledge file/section', 125: 'File segment', 126: 'Directory', 127: 'Query log'}
+_IEC104_CAUSES = {
+    1: 'per/cyc', 2: 'back', 3: 'spont', 4: 'init', 5: 'req', 6: 'act', 7: 'actcon', 8: 'deact', 9: 'deactcon',
+    10: 'actterm', 11: 'retrem', 12: 'retloc', 13: 'file', 14: 'auth', 15: 'seskey', 16: 'usrkey', 20: 'inrogen',
+    37: 'reqcogen', 44: 'unknown type', 45: 'unknown cause', 46: 'unknown station', 47: 'unknown address'}
+for _n in range(1, 17):
+    _IEC104_CAUSES[20 + _n] = f'inro{_n}'
+for _n in range(1, 5):
+    _IEC104_CAUSES[37 + _n] = f'reqco{_n}'
+# Each object's value: the field it's in, and how to read it, by type
+_IEC104_VALUE_FIELDS = {'siq': 'iec60870_asdu.siq.spi', 'diq': 'iec60870_asdu.diq.dpi', 'vti': 'iec60870_asdu.vti.v',
+                        'bits': 'iec60870_asdu.bitstring', 'norm': 'iec60870_asdu.normval', 'scal': 'iec60870_asdu.scalval',
+                        'float': 'iec60870_asdu.float', 'bcr': 'iec60870_asdu.bcr.count', 'sco': 'iec60870_asdu.sco.on',
+                        'dco': 'iec60870_asdu.dco.on', 'rco': 'iec60870_asdu.rco.up', 'qoi': 'iec60870_asdu.qoi',
+                        'qcc': 'iec60870_asdu.qcc', 'qrp': 'iec60870_asdu.qrp'}
+_IEC104_VALUE_KIND = {}
+for _kind, _types in (('siq', (1, 2, 30)), ('diq', (3, 4, 31)), ('vti', (5, 6, 32)), ('bits', (7, 8, 33, 51, 64)),
+                      ('norm', (9, 10, 34, 21, 48, 61)), ('scal', (11, 12, 35, 49, 62)), ('float', (13, 14, 36, 50, 63)),
+                      ('bcr', (15, 16, 37)), ('sco', (45, 58)), ('dco', (46, 59)), ('rco', (47, 60)), ('qoi', (100,)),
+                      ('qcc', (101,)), ('qrp', (105,))):
+    for _t in _types:
+        _IEC104_VALUE_KIND[_t] = _kind
+_IEC104_DOUBLE_POINT = {0: 'indeterminate', 1: 'off', 2: 'on', 3: 'indeterminate'}
+_IEC104_INTERROGATIONS = {20: 'station'}
+for _n in range(1, 17):
+    _IEC104_INTERROGATIONS[20 + _n] = f'group {_n}'
+
+
+_IEC104_COMMAND_STATES = {'sco': {0: 'off', 1: 'on'}, 'dco': {1: 'off', 2: 'on'}, 'rco': {1: 'lower', 2: 'higher'}}
+
+
+def _iec104_value(kind, text):
+    if kind == 'siq':
+        return 1 if text in ('1', 'True') else 0
+    if kind in _IEC104_COMMAND_STATES:
+        number = 1 if text == 'True' else 0 if text == 'False' else _int(text)
+        return _IEC104_COMMAND_STATES[kind].get(number, text)
+    if kind == 'diq':
+        return _IEC104_DOUBLE_POINT.get(_int(text), text)
+    if kind == 'qoi':
+        return _IEC104_INTERROGATIONS.get(_int(text), text)
+    if kind in ('norm', 'float'):
+        try:
+            return float(text)
+        except ValueError:
+            return text
+    number = _int(text)
+    return number if number is not None else text
+
+
+def _iso_utc(when):
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(when, timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f+0000')
+
+
+class _IEC104Point:
+    __slots__ = ('flow', 'first', 'body')
+
+    def __init__(self, flow, first, body):
+        self.flow, self.first, self.body = flow, first, body
+
+
+class IEC104:
+    """IEC 60870-5-104 - see the comment above."""
+    event_type = 'iec104'
+    app_protos = ('iec60870_104',)
+    fields = ('iec60870_asdu.typeid', 'iec60870_asdu.causetx', 'iec60870_asdu.nega', 'iec60870_asdu.test',
+              'iec60870_asdu.addr', 'iec60870_asdu.numix', 'iec60870_asdu.ioa') + tuple(_IEC104_VALUE_FIELDS.values())
+
+    # Causes that open a control action: activation, deactivation, and a
+    # read's request
+    _OPENS = (6, 8)
+
+    def __init__(self):
+        self.records = []
+        # (flow key, type, station, first object) -> the actions waiting on
+        # their replies, oldest first: a station can be sent another
+        # interrogation before the last is answered, and replies in order
+        self.open = {}
+        self.points = {}       # (flow key, station, object, type) -> _IEC104Point
+
+    def feed(self, pkt, v):
+        values = {kind: list(v[field]) for kind, field in _IEC104_VALUE_FIELDS.items()}
+        objects = list(v['iec60870_asdu.ioa'])
+        for tid, cot, addr, count, negative, test in zip(
+                v['iec60870_asdu.typeid'], v['iec60870_asdu.causetx'], v['iec60870_asdu.addr'], v['iec60870_asdu.numix'],
+                v['iec60870_asdu.nega'] or [''] * len(v['iec60870_asdu.typeid']),
+                v['iec60870_asdu.test'] or [''] * len(v['iec60870_asdu.typeid'])):
+            tid, cot, addr, count = _int(tid), _int(cot, 0), _int(addr, 0), _int(count, 0)
+            if tid is None:
+                continue
+            ioas = [_int(x, 0) for x in objects[:count]]
+            del objects[:count]
+            kind = _IEC104_VALUE_KIND.get(tid)
+            vals = []
+            if kind:
+                vals = [_iec104_value(kind, x) for x in values[kind][:count]]
+                del values[kind][:count]
+            if tid >= 45:
+                self._control(pkt, tid, cot, addr, ioas, vals, negative in ('1', 'True'), test in ('1', 'True'))
+            else:
+                self._points(pkt, tid, cot, addr, ioas, vals)
+
+    def _control(self, pkt, tid, cot, addr, ioas, vals, negative, test):
+        key = (pkt.flow.key, tid, addr, ioas[0] if ioas else None)
+        cause = _IEC104_CAUSES.get(cot, str(cot))
+        waiting = self.open.get(key, [])
+        if cot in (7, 9) or 44 <= cot <= 47:
+            body = next((b for b in waiting if 'response' not in b), None)
+        elif cot == 10:
+            body = next((b for b in waiting if 'terminated' not in b), None)
+        else:
+            body = None
+        if cot in self._OPENS or (tid == 102 and cot == 5) or body is None:
+            body = {'type_id': tid, 'type': _IEC104_TYPES.get(tid, str(tid)), 'action': _IEC104_ACTIONS.get(tid, ''),
+                    'cause': cause, 'station': addr}
+            if ioas:
+                body['ioa'] = ioas[0]
+            if vals:
+                body['value'] = vals[0]
+            if test:
+                body['test'] = True
+            opens = cot in self._OPENS or (tid == 102 and cot == 5)
+            # A reply whose request the capture doesn't have (it started
+            # after, or lost the packet) is still a record
+            if opens:
+                body['result'] = 'no confirmation'
+            elif cot in (7, 9):
+                body['result'] = 'negative (request not seen)' if negative else 'confirmed (request not seen)'
+            elif cot == 10:
+                body['result'] = 'terminated (request not seen)'
+            else:
+                body['result'] = cause
+            self.records.append((pkt.flow, pkt.when, 'iec104', body))
+            if opens:
+                self.open.setdefault(key, []).append(body)
+            return
+        # its confirmation, termination, or an "unknown ..." refusal
+        if cot in (7, 9):
+            body['response'] = {'cause': cause, 'negative': negative}
+            body['result'] = 'negative' if negative else 'confirmed'
+        elif cot == 10:
+            body['terminated'] = True
+            if body['result'] == 'confirmed':
+                body['result'] = 'confirmed, terminated'
+            waiting.remove(body)
+        elif 44 <= cot <= 47:
+            body['response'] = {'cause': cause, 'negative': True}
+            body['result'] = cause
+            waiting.remove(body)
+        # A command that needs no termination is done once confirmed; keep
+        # the queue to what can still be answered
+        if len(waiting) > 64:
+            del waiting[:-64]
+
+    def _points(self, pkt, tid, cot, addr, ioas, vals):
+        cause = _IEC104_CAUSES.get(cot, str(cot))
+        for i, ioa in enumerate(ioas):
+            key = (pkt.flow.key, addr, ioa, tid)
+            point = self.points.get(key)
+            if point is None:
+                body = {'station': addr, 'ioa': ioa, 'type_id': tid, 'type': _IEC104_TYPES.get(tid, str(tid)),
+                        'updates': 0, 'causes': {}}
+                point = self.points[key] = _IEC104Point(pkt.flow, pkt.when, body)
+            body = point.body
+            body['updates'] += 1
+            body['causes'][cause] = body['causes'].get(cause, 0) + 1
+            body['last_update'] = pkt.when
+            if i < len(vals):
+                body['last_value'] = vals[i]
+
+    def finish(self):
+        records = list(self.records)
+        for point in self.points.values():
+            body = point.body
+            body['last_update'] = _iso_utc(body['last_update'])
+            records.append((point.flow, point.first, 'iec104_point', body))
+        return records
+
+
 # ---------------------------------------------------------------- structured protocols
 #
 # Protocols whose messages nest - several SMB2 commands in one packet, a
@@ -521,7 +732,7 @@ def _pdus(layer):
 
 # Every protocol with records here, from tshark's fields, in the order their
 # fields follow the base fields in tshark's output.
-PROTOCOLS = (LLMNR, NBNS, SSDP, S7comm, Telnet)
+PROTOCOLS = (LLMNR, NBNS, SSDP, S7comm, Telnet, IEC104)
 # ... and from the structured pass (shark_analyzer._structured_pass): none
 # yet - it's for a protocol whose messages nest, which flat fields can't
 # keep apart (several commands per packet, a token inside a command).

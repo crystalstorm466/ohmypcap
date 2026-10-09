@@ -21764,6 +21764,11 @@ class TestTsharkUI(unittest.TestCase):
         's7comm': {'event_type': 's7comm', 's7comm': {'type': 'job', 'function': 'Read Var',
                                                       'items': [{'area': 'Data blocks', 'db': 1, 'address': '10.0'}],
                                                       'response': {'error_class': 'Error on supplies'}}},
+        'iec104': {'event_type': 'iec104', 'iec104': {'type_id': 45, 'type': 'C_SC_NA_1', 'action': 'Single command', 'cause': 'act',
+                                                      'station': 7, 'ioa': 2001, 'value': 'on', 'result': 'confirmed, terminated',
+                                                      'response': {'cause': 'actcon', 'negative': False}, 'terminated': True}},
+        'iec104_point': {'event_type': 'iec104_point', 'iec104_point': {'station': 7, 'ioa': 1001, 'type_id': 13, 'type': 'M_ME_NC_1',
+                                                                        'updates': 2, 'causes': {'spont': 2}, 'last_value': 231.0}},
         'telnet': {'event_type': 'telnet', 'telnet': {'banner': 'MOXA EtherDevice Switch EDS-508A', 'username': 'admin',
                                                       'password': 'admin', 'login': 'failed', 'commands': ['ls', 'exit']}},
         'ssdp': {'event_type': 'ssdp', 'ssdp': {'type': 'request', 'method': 'M-SEARCH', 'search_target': 'upnp:rootdevice',
@@ -21775,6 +21780,8 @@ class TestTsharkUI(unittest.TestCase):
         's7comm': ['job', 'Read Var', 'Data blocks', 'Error on supplies'],
         'ssdp': ['M-SEARCH', 'upnp:rootdevice', 'http://10.1.0.60/d.xml', 'TestGateway/1.0'],
         'telnet': ['MOXA EtherDevice Switch EDS-508A', 'admin', 'admin', 'failed'],
+        'iec104': ['Single command', '7', '2001', 'on', 'confirmed, terminated'],
+        'iec104_point': ['7', '1001', 'M_ME_NC_1', '2', '231'],
     }
 
     def test_tshark_record_types_render_their_columns(self):
@@ -21802,7 +21809,9 @@ class TestTsharkUI(unittest.TestCase):
                 self.assertEqual(r['values'], expected)
                 self.assertEqual(len(r['cells']), len(r['cols']) + 1)
                 self.assertEqual(r['cells'][6:6 + len(expected)], expected)
-                self.assertIn(f'{r["label"]} Details', r['detail'])
+                # one record per point, so its section is a point's
+                section = 'IEC 104 Point' if t == 'iec104_point' else r['label']
+                self.assertIn(f'{section} Details', r['detail'])
 
     def test_telnet_details_list_the_commands_one_per_line(self):
         from tests.jsdom_helper import js_statements
@@ -21841,7 +21850,7 @@ class TestTsharkUI(unittest.TestCase):
         import db
         from tests.jsdom_helper import js_statements
         cols = js_statements("""window.__jsdom_result = Object.fromEntries(
-            ['llmnr', 'nbns', 's7comm', 'ssdp', 'telnet'].map(t => [t, getColumnsForType(t).slice(6)]));""")
+            ['llmnr', 'nbns', 's7comm', 'ssdp', 'telnet', 'iec104', 'iec104_point'].map(t => [t, getColumnsForType(t).slice(6)]));""")
         for t, columns in cols.items():
             self.assertEqual(list(db.AGGREGATION_JSON_PATHS[t]), columns, t)
 
