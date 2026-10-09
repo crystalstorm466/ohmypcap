@@ -21764,6 +21764,13 @@ class TestTsharkUI(unittest.TestCase):
         's7comm': {'event_type': 's7comm', 's7comm': {'type': 'job', 'function': 'Read Var',
                                                       'items': [{'area': 'Data blocks', 'db': 1, 'address': '10.0'}],
                                                       'response': {'error_class': 'Error on supplies'}}},
+        'bacnet': {'event_type': 'bacnet', 'bacnet': {'service': 'reinitializeDevice', 'kind': 'confirmed', 'state': 'warmstart',
+                                                      'password': 'filister', 'result': 'error: services: password-failure'}},
+        'bacnet_property': {'event_type': 'bacnet_property', 'bacnet_property': {
+            'service': 'readProperty', 'object': 'analog-value,1', 'property': 'present-value', 'count': 2, 'errors': 1,
+            'last_value': 72.5, 'last_error': 'error: property: unknown-property'}},
+        'bacnet_device': {'event_type': 'bacnet_device', 'bacnet_device': {'device': 1047, 'vendor_id': 42, 'announcements': 2,
+                                                                           'vendor': 'Acuity Brands Lighting, Inc.'}},
         'iec104': {'event_type': 'iec104', 'iec104': {'type_id': 45, 'type': 'C_SC_NA_1', 'action': 'Single command', 'cause': 'act',
                                                       'station': 7, 'ioa': 2001, 'value': 'on', 'result': 'confirmed, terminated',
                                                       'response': {'cause': 'actcon', 'negative': False}, 'terminated': True}},
@@ -21781,6 +21788,9 @@ class TestTsharkUI(unittest.TestCase):
         'ssdp': ['M-SEARCH', 'upnp:rootdevice', 'http://10.1.0.60/d.xml', 'TestGateway/1.0'],
         'telnet': ['MOXA EtherDevice Switch EDS-508A', 'admin', 'admin', 'failed'],
         'iec104': ['Single command', '7', '2001', 'on', 'confirmed, terminated'],
+        'bacnet': ['reinitializeDevice', '', '', '', 'filister', 'error: services: password-failure'],
+        'bacnet_property': ['readProperty', 'analog-value,1', 'present-value', '2', '1', '72.5'],
+        'bacnet_device': ['1047', 'Acuity Brands Lighting, Inc.', '2'],
         'iec104_point': ['7', '1001', 'M_ME_NC_1', '2', '231'],
     }
 
@@ -21810,7 +21820,8 @@ class TestTsharkUI(unittest.TestCase):
                 self.assertEqual(len(r['cells']), len(r['cols']) + 1)
                 self.assertEqual(r['cells'][6:6 + len(expected)], expected)
                 # one record per point, so its section is a point's
-                section = 'IEC 104 Point' if t == 'iec104_point' else r['label']
+                section = {'iec104_point': 'IEC 104 Point', 'bacnet_property': 'BACnet Property',
+                           'bacnet_device': 'BACnet Device'}.get(t, r['label'])
                 self.assertIn(f'{section} Details', r['detail'])
 
     def test_telnet_details_list_the_commands_one_per_line(self):
@@ -21850,7 +21861,7 @@ class TestTsharkUI(unittest.TestCase):
         import db
         from tests.jsdom_helper import js_statements
         cols = js_statements("""window.__jsdom_result = Object.fromEntries(
-            ['llmnr', 'nbns', 's7comm', 'ssdp', 'telnet', 'iec104', 'iec104_point'].map(t => [t, getColumnsForType(t).slice(6)]));""")
+            ['llmnr', 'nbns', 's7comm', 'ssdp', 'telnet', 'iec104', 'iec104_point', 'bacnet', 'bacnet_property', 'bacnet_device'].map(t => [t, getColumnsForType(t).slice(6)]));""")
         for t, columns in cols.items():
             self.assertEqual(list(db.AGGREGATION_JSON_PATHS[t]), columns, t)
 

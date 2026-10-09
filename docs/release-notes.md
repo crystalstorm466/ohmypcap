@@ -20,6 +20,11 @@ each card marked with a dot:
   (command, set point, interrogation, clock sync, file transfer) with
   whether the substation confirmed, refused or finished it, and one for
   each monitored point: how often it updated, why, and its last value
+- **BACnet** (building automation) - a record for each action (a write,
+  a file write, a reinitialize or communication control with the password
+  it carried, a subscription) with the device's reply, one for each
+  object and property polled or reported (how often, errors, last value),
+  and one for each device announcing itself, with its vendor
 - **A card for every other protocol tshark recognizes** - OpenVPN, PRP,
   RADIUS, MongoDB and so on - listing its connections
 - **Suricata stays in charge** of everything it parses: nothing from tshark

@@ -493,3 +493,104 @@ def iec104_packets():
 
 def write_iec104_pcap(path):
     write_pcap(path, iec104_packets())
+
+
+# ---------------------------------------------------------------- BACnet/IP
+#
+# A workstation (CLIENT:47808) and a controller (BACNET_DEVICE:47808,
+# device 1047, vendor 42): Who-Is broadcasts (one with a range), the
+# device's I-Am twice, a present-value read answered with 72.5 and then
+# refused (unknown-property), a write of a binary output to active, a
+# write and a read both sent as invoke id 4 before either reply - the
+# replies in the other order, as a real client and router did - a
+# reinitialize with a wrong password (password-failure), a communication
+# control disabling the device for 5 minutes with its password, and a
+# change-of-value notification of an analog input.
+
+BACNET_DEVICE = '10.1.0.47'
+_BACNET_BROADCAST = '10.1.255.255'
+_BACNET_PORT = 47808
+_ANALOG_INPUT, _ANALOG_VALUE, _BINARY_OUTPUT, _DEVICE = 0, 2, 4, 8
+_PRESENT_VALUE, _STATUS_FLAGS = 85, 111
+
+
+def _bacnet_ip(src, dst, apdu, expecting_reply=False, broadcast=False):
+    npdu = bytes([0x01, 0x04 if expecting_reply else 0x00]) + apdu
+    bvlc = bytes([0x81, 0x0b if broadcast else 0x0a]) + struct.pack('!H', 4 + len(npdu))
+    return _udp_packet(src, dst, _BACNET_PORT, _BACNET_PORT, bvlc + npdu)
+
+
+def _bacnet_object(obj_type, instance):
+    return struct.pack('!I', (obj_type << 22) | instance)
+
+
+def _ctx(number, value):
+    """A context tag with a short value."""
+    if len(value) <= 4:
+        return bytes([(number << 4) | 0x08 | len(value)]) + value
+    return bytes([(number << 4) | 0x08 | 5, len(value)]) + value
+
+
+def _bacnet_string(text):
+    return b'\x00' + text.encode()      # character set 0: UTF-8
+
+
+def _bacnet_real(value):
+    return b'\x44' + struct.pack('!f', value)
+
+
+def _confirmed(invoke, service, body):
+    return bytes([0x00, 0x05, invoke, service]) + body
+
+
+def _read_property(invoke, obj_type, instance, prop=_PRESENT_VALUE):
+    return _confirmed(invoke, 12, _ctx(0, _bacnet_object(obj_type, instance)) + _ctx(1, bytes([prop])))
+
+
+def _read_property_ack(invoke, obj_type, instance, value, prop=_PRESENT_VALUE):
+    return bytes([0x30, invoke, 12]) + _ctx(0, _bacnet_object(obj_type, instance)) + _ctx(1, bytes([prop])) \
+        + b'\x3e' + value + b'\x3f'
+
+
+def _write_property(invoke, obj_type, instance, value):
+    return _confirmed(invoke, 15, _ctx(0, _bacnet_object(obj_type, instance)) + _ctx(1, bytes([_PRESENT_VALUE]))
+                      + b'\x3e' + value + b'\x3f' + _ctx(4, b'\x08'))
+
+
+def _bacnet_error(invoke, service, error_class, error_code):
+    return bytes([0x50, invoke, service, 0x91, error_class, 0x91, error_code])
+
+
+def bacnet_packets():
+    device = _bacnet_object(_DEVICE, 1047)
+    i_am = b'\x10\x00' + b'\xc4' + device + b'\x22\x05\xc4' + b'\x91\x00' + b'\x21\x2a'
+    to_device = lambda apdu: _bacnet_ip(CLIENT, BACNET_DEVICE, apdu, expecting_reply=apdu[0] == 0x00)
+    from_device = lambda apdu: _bacnet_ip(BACNET_DEVICE, CLIENT, apdu)
+    cov = (b'\x10\x02' + _ctx(0, b'\x01') + _ctx(1, device) + _ctx(2, _bacnet_object(_ANALOG_INPUT, 2)) + _ctx(3, b'\x00')
+           + b'\x4e' + _ctx(0, bytes([_PRESENT_VALUE])) + b'\x2e' + _bacnet_real(21.5) + b'\x2f'
+           + _ctx(0, bytes([_STATUS_FLAGS])) + b'\x2e' + b'\x82\x04\x00' + b'\x2f' + b'\x4f')
+    return [
+        _bacnet_ip(CLIENT, _BACNET_BROADCAST, b'\x10\x08', broadcast=True),
+        _bacnet_ip(CLIENT, _BACNET_BROADCAST, b'\x10\x08' + _ctx(0, b'\x64') + _ctx(1, b'\xc8'), broadcast=True),
+        _bacnet_ip(BACNET_DEVICE, _BACNET_BROADCAST, i_am, broadcast=True),
+        to_device(_read_property(1, _ANALOG_VALUE, 1)),
+        from_device(_read_property_ack(1, _ANALOG_VALUE, 1, _bacnet_real(72.5))),
+        to_device(_read_property(2, _ANALOG_VALUE, 1)),
+        from_device(_bacnet_error(2, 12, 2, 32)),                                # property: unknown-property
+        to_device(_write_property(3, _BINARY_OUTPUT, 3, b'\x91\x01')),          # active
+        from_device(bytes([0x20, 3, 15])),
+        to_device(_write_property(4, _ANALOG_VALUE, 2, _bacnet_real(50.0))),
+        to_device(_read_property(4, _ANALOG_VALUE, 2)),
+        from_device(_read_property_ack(4, _ANALOG_VALUE, 2, _bacnet_real(49.0))),
+        from_device(bytes([0x20, 4, 15])),
+        to_device(_confirmed(5, 20, _ctx(0, b'\x01') + _ctx(1, _bacnet_string('filister')))),   # warmstart
+        from_device(_bacnet_error(5, 20, 5, 26)),                               # services: password-failure
+        to_device(_confirmed(6, 17, _ctx(0, b'\x05') + _ctx(1, b'\x01') + _ctx(2, _bacnet_string('secret')))),
+        from_device(bytes([0x20, 6, 17])),
+        _bacnet_ip(BACNET_DEVICE, _BACNET_BROADCAST, i_am, broadcast=True),
+        from_device(cov),
+    ]
+
+
+def write_bacnet_pcap(path):
+    write_pcap(path, bacnet_packets())

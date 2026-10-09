@@ -2150,6 +2150,9 @@
                 ssdp: '#7e57c2',
                 telnet: '#ffa726',
                 iec104: '#ef5350',
+                bacnet: '#ab47bc',
+                bacnet_property: '#5c6bc0',
+                bacnet_device: '#8d6e63',
                 iec104_point: '#26a69a',
                 email: '#4fc3f7',
                 filealerts: '#e91e63',
@@ -3763,6 +3766,53 @@
             return html;
         }
 
+        // tshark's BACnet records (shark_protocols.BACnet): an action with
+        // its reply, a read/notification summary, a device.
+        function renderBacnetDetails(e) {
+            const b = e.bacnet || {};
+            let html = htmlSection('BACnet Details', COLORS.EVENT.bacnet);
+            html += htmlRowText('Service', b.service ? `${b.service} (${b.kind})` : '');
+            html += htmlRowText('Device', b.device);
+            html += htmlRowText('Object', b.object, 'mono');
+            html += htmlRowText('Property', b.property);
+            html += htmlRowText('Value', b.value !== undefined ? String(b.value) : '', 'mono');
+            html += htmlRowText('Range', b.range);
+            if (b.count !== undefined) {
+                html += htmlRowText('Count', b.count.toLocaleString());
+                html += htmlRowText('Last Seen', (b.last_seen || '').slice(0, 23).replace('T', ' '));
+            }
+            html += htmlRowText('State', b.state);
+            html += htmlRowText('Duration', b.duration !== undefined ? `${b.duration} min` : '');
+            if (b.password !== undefined) html += htmlRowText('Password', b.password === '' ? '(empty)' : b.password, 'mono');
+            html += htmlRowText('Result', b.result);
+            return html;
+        }
+
+        function renderBacnetPropertyDetails(e) {
+            const p = e.bacnet_property || {};
+            let html = htmlSection('BACnet Property Details', COLORS.EVENT.bacnet_property);
+            html += htmlRowText('Service', p.service);
+            html += htmlRowText('Device', p.device);
+            html += htmlRowText('Object', p.object, 'mono');
+            html += htmlRowText('Property', p.property);
+            html += htmlRowText('Count', p.count !== undefined ? p.count.toLocaleString() : '');
+            html += htmlRowText('Errors', p.errors ? p.errors.toLocaleString() : '');
+            html += htmlRowText('Last Error', p.last_error);
+            html += htmlRowText('Last Value', p.last_value !== undefined ? String(p.last_value) : '', 'mono');
+            html += htmlRowText('Last Update', (p.last_update || '').slice(0, 23).replace('T', ' '));
+            return html;
+        }
+
+        function renderBacnetDeviceDetails(e) {
+            const d = e.bacnet_device || {};
+            let html = htmlSection('BACnet Device Details', COLORS.EVENT.bacnet_device);
+            html += htmlRowText('Device', d.device !== undefined ? String(d.device) : '');
+            html += htmlRowText('Vendor', d.vendor ? `${d.vendor} (${d.vendor_id})` : (d.vendor_id !== undefined ? String(d.vendor_id) : ''));
+            html += htmlRowText('Announcements', d.announcements !== undefined ? d.announcements.toLocaleString() : '');
+            html += htmlRowText('Last Seen', (d.last_seen || '').slice(0, 23).replace('T', ' '));
+            return html;
+        }
+
         // tshark's IEC 104 records (shark_protocols.IEC104): a control
         // action with its replies, and a monitored point's summary.
         function renderIec104Details(e) {
@@ -4170,6 +4220,9 @@
             ssdp: renderSsdpDetails,
             telnet: renderTelnetDetails,
             iec104: renderIec104Details,
+            bacnet: renderBacnetDetails,
+            bacnet_property: renderBacnetPropertyDetails,
+            bacnet_device: renderBacnetDeviceDetails,
             iec104_point: renderIec104PointDetails,
             dnp3: renderDnp3Details,
             http: renderHttpDetails,
@@ -6830,6 +6883,9 @@
             ssdp: 'SSDP',
             telnet: 'Telnet',
             iec104: 'IEC 104',
+            bacnet: 'BACnet',
+            bacnet_property: 'BACnet Properties',
+            bacnet_device: 'BACnet Devices',
             iec104_point: 'IEC 104 Points',
             dns_heuristics: 'DNS Heuristics',
             email: 'Emails',
@@ -7211,6 +7267,12 @@
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Banner', 'User', 'Password', 'Login'];
                 case 'iec104':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Command', 'Station', 'IOA', 'Value', 'Result'];
+                case 'bacnet':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Service', 'Object', 'Property', 'Value', 'Password', 'Result'];
+                case 'bacnet_property':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Service', 'Object', 'Property', 'Count', 'Errors', 'Last Value'];
+                case 'bacnet_device':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Device', 'Vendor', 'Announcements'];
                 case 'iec104_point':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Station', 'IOA', 'Type', 'Updates', 'Last Value'];
                 case 'ldap':
@@ -7676,7 +7738,10 @@
                 case 'ssdp':
                 case 'telnet':
                 case 'iec104':
-                case 'iec104_point': {
+                case 'iec104_point':
+                case 'bacnet':
+                case 'bacnet_property':
+                case 'bacnet_device': {
                     const cols = getColumnsForType(etype).slice(6);
                     colSpan = cols.length + 6;
                     row = rowPrefixCells(e) + cols.map(col => `<td${['Search Target', 'Location', 'User', 'Password'].includes(col) ? ' class="mono"' : ''}>${escapeHtml(extractValue(e, col))}</td>`).join('') + '</tr>';
@@ -9860,12 +9925,20 @@
                 // IEC 104: a control action's, or a monitored point's
                 case 'Station': { const r = e.iec104 || e.iec104_point; return r?.station !== undefined ? String(r.station) : ''; }
                 case 'IOA': { const r = e.iec104 || e.iec104_point; return r?.ioa !== undefined ? String(r.ioa) : ''; }
-                case 'Value': return e.iec104?.value !== undefined ? String(e.iec104.value) : '';
-                case 'Result': return e.iec104?.result || '';
+                case 'Value': { const r = e.iec104 || e.bacnet; return r?.value !== undefined ? String(r.value) : ''; }
+                case 'Result': return e.iec104?.result || e.bacnet?.result || '';
                 case 'Updates': return e.iec104_point?.updates !== undefined ? String(e.iec104_point.updates) : '';
-                case 'Last Value': return e.iec104_point?.last_value !== undefined ? String(e.iec104_point.last_value) : '';
+                case 'Last Value': { const r = e.iec104_point || e.bacnet_property; return r?.last_value !== undefined ? String(r.last_value) : ''; }
+                // BACnet: an action's, a read/notification summary's, a device's
+                case 'Object': return e.bacnet?.object || e.bacnet_property?.object || '';
+                case 'Property': return e.bacnet?.property || e.bacnet_property?.property || '';
+                case 'Count': return e.bacnet_property?.count !== undefined ? String(e.bacnet_property.count) : '';
+                case 'Errors': return e.bacnet_property?.errors !== undefined ? String(e.bacnet_property.errors) : '';
+                case 'Device': return e.bacnet_device?.device !== undefined ? String(e.bacnet_device.device) : '';
+                case 'Vendor': { const d = e.bacnet_device; return d?.vendor || (d?.vendor_id !== undefined ? String(d.vendor_id) : ''); }
+                case 'Announcements': return e.bacnet_device?.announcements !== undefined ? String(e.bacnet_device.announcements) : '';
                 case 'User': return e.telnet?.username || '';
-                case 'Password': return e.telnet?.password || '';
+                case 'Password': return e.telnet?.password || e.bacnet?.password || '';
                 case 'Login': return e.telnet?.login || '';
                 case 'Area': return e.s7comm?.items?.[0]?.area || '';
                 case 'Error': return e.s7comm?.response?.error_class || '';
@@ -9989,7 +10062,12 @@
                     return e.ssh?.server?.software_version || '';
                 }
                 case 'Client': return e.krb5?.cname || '';
-                case 'Service': return e.event_type === 'nbns' ? (e.nbns?.service || '') : (e.krb5?.sname || '');
+                case 'Service': {
+                    if (e.event_type === 'nbns') return e.nbns?.service || '';
+                    if (e.event_type === 'bacnet') return e.bacnet?.service || '';
+                    if (e.event_type === 'bacnet_property') return e.bacnet_property?.service || '';
+                    return e.krb5?.sname || '';
+                }
                 // The name alone, as the server aggregates it - the <suffix> is
                 // in the detail panel, and Service says what it means.
                 case 'NetBIOS Name': return e.nbns?.name || '';

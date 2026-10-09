@@ -1388,6 +1388,27 @@ AGGREGATION_JSON_PATHS = {
         'Area': ['$.s7comm.items[0].area'],
         'Error': ['$.s7comm.response.error_class'],
     },
+    'bacnet': {
+        'Service': ['$.bacnet.service'],
+        'Object': ['$.bacnet.object'],
+        'Property': ['$.bacnet.property'],
+        'Value': ['$.bacnet.value'],
+        'Password': ['$.bacnet.password'],
+        'Result': ['$.bacnet.result'],
+    },
+    'bacnet_property': {
+        'Service': ['$.bacnet_property.service'],
+        'Object': ['$.bacnet_property.object'],
+        'Property': ['$.bacnet_property.property'],
+        'Count': ['$.bacnet_property.count'],
+        'Errors': ['$.bacnet_property.errors'],
+        'Last Value': ['$.bacnet_property.last_value'],
+    },
+    'bacnet_device': {
+        'Device': ['$.bacnet_device.device'],
+        'Vendor': ['$.bacnet_device.vendor'],
+        'Announcements': ['$.bacnet_device.announcements'],
+    },
     'iec104': {
         'Command': ['$.iec104.action'],
         'Station': ['$.iec104.station'],

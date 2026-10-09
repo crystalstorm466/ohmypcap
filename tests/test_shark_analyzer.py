@@ -489,6 +489,89 @@ class TestIEC104(unittest.TestCase):
         self.assertNotIn('conn_iec60870_104', counts, 'records, not a connection card')
 
 
+@unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
+class TestBACnet(unittest.TestCase):
+    """tests/protocol_fixtures.write_bacnet_pcap: actions paired with their
+    replies, reads and value notifications summarized per object and
+    property, devices from their I-Ams - with what Suricata 8.0.7 logged
+    for the capture (tests/data/bacnet_fixture.eve.json): flows it gives
+    no protocol, since it doesn't parse BACnet."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests.protocol_fixtures import write_bacnet_pcap
+        cls.tmpdir = tempfile.mkdtemp()
+        cls.pcap = os.path.join(cls.tmpdir, 'bacnet.pcap')
+        write_bacnet_pcap(cls.pcap)
+        cls.records = shark_analyzer.run_tshark(cls.pcap)
+        cls.actions = [r['bacnet'] for r in cls.records if r['event_type'] == 'bacnet']
+        cls.properties = {p['object']: p for p in (r['bacnet_property'] for r in cls.records
+                                                   if r['event_type'] == 'bacnet_property')}
+        cls.devices = [r['bacnet_device'] for r in cls.records if r['event_type'] == 'bacnet_device']
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    def test_actions_with_their_replies(self):
+        self.assertEqual([(a['service'], a.get('object'), a.get('value'), a.get('result')) for a in self.actions], [
+            ('who-Is', None, None, None),
+            ('who-Is', None, None, None),
+            ('writeProperty', 'binary-output,3', 'active', 'ok'),
+            ('writeProperty', 'analog-value,2', 50.0, 'ok'),
+            ('reinitializeDevice', None, None, 'error: services: password-failure'),
+            ('deviceCommunicationControl', None, None, 'ok'),
+        ], 'a write and a read sent with the same invoke id each get their own reply, though they came in the other order')
+        self.assertEqual(self.actions[1]['range'], '100-200')
+
+    def test_the_same_discovery_question_is_one_record_counted(self):
+        from tests.protocol_fixtures import bacnet_packets, _bacnet_ip, _BACNET_BROADCAST, CLIENT
+        from tests.pcap_fixtures import write_pcap
+        who_is = _bacnet_ip(CLIENT, _BACNET_BROADCAST, b'\x10\x08', broadcast=True)
+        path = os.path.join(self.tmpdir, 'who_is.pcap')
+        write_pcap(path, bacnet_packets() + [who_is] * 3)
+        asked = [r['bacnet'] for r in shark_analyzer.run_tshark(path)
+                 if r['event_type'] == 'bacnet' and r['bacnet']['service'] == 'who-Is']
+        self.assertEqual([(a.get('range'), a['count']) for a in asked], [(None, 4), ('100-200', 1)])
+        self.assertEqual(asked[0]['last_seen'][:19], '2023-11-14T22:13:41')
+
+    def test_passwords_and_states_come_from_the_requests_bytes(self):
+        """tshark shows them only as text."""
+        reinit, control = self.actions[4], self.actions[5]
+        self.assertEqual((reinit['state'], reinit['password']), ('warmstart', 'filister'))
+        self.assertEqual((control['state'], control['duration'], control['password']), ('disable', 5, 'secret'))
+
+    def test_reads_and_notifications_are_summarized(self):
+        read = self.properties['analog-value,1']
+        self.assertEqual((read['service'], read['property'], read['count'], read['errors'], read['last_value'],
+                          read['last_error']),
+                         ('readProperty', 'present-value', 2, 1, 72.5, 'error: property: unknown-property'))
+        self.assertEqual(self.properties['analog-value,2']['last_value'], 49.0)
+        cov = self.properties['analog-input,2']
+        self.assertEqual((cov['service'], cov['device'], cov['last_value']),
+                         ('unconfirmedCOVNotification', 'device,1047', 21.5))
+
+    def test_devices_from_their_i_ams_with_tsharks_vendor_name(self):
+        self.assertEqual([(d['device'], d['vendor_id'], d['vendor'], d['announcements']) for d in self.devices],
+                         [(1047, 42, 'Acuity Brands Lighting, Inc.', 2)])
+
+    def test_flows_match_suricatas_and_the_merge_adds_the_records(self):
+        from scripts.compare_shark_suricata import compare
+        report = compare(_load_eve('bacnet_fixture.eve.json'), self.records)['flow']
+        self.assertEqual((report['matched'], report['named_by_tshark'], report['differences']), (3, 3, []))
+        d = os.path.join(self.tmpdir, 'analysis')
+        os.makedirs(d)
+        shutil.copy(self.pcap, d)
+        events_db = os.path.join(d, 'events.db')
+        db.create_sqlite_db(events_db, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data',
+                                                    'bacnet_fixture.eve.json'))
+        self.assertTrue(shark_analyzer.build(d, os.path.join(d, 'bacnet.pcap')))
+        shark_analyzer.merge(d)
+        counts = db.get_event_types_sqlite(events_db)
+        self.assertEqual((counts.get('bacnet'), counts.get('bacnet_property'), counts.get('bacnet_device')), (6, 3, 1))
+        self.assertNotIn('conn_bvlc', counts, 'records, not a connection card')
+
+
 class _NbnsFromJson:
     """A structured protocol for testing the structured pass, which no
     protocol uses yet: NBNS names, read from each packet's JSON tree."""

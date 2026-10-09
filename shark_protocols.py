@@ -691,6 +691,330 @@ class IEC104:
         return records
 
 
+# ---------------------------------------------------------------- BACnet
+#
+# Building automation (HVAC, lighting, access control), over UDP 47808
+# (BACnet/IP, which tshark calls bvlc) or straight over Ethernet. Three
+# record types, since reads dwarf everything else: 'bacnet', one per
+# action - a confirmed request other than a read (a write, a file write,
+# a reinitialize or communication-control with its password, a
+# subscription) paired with its reply, and each unconfirmed message
+# other than I-Am and value notifications (event notifications, time
+# syncs, and Who-Is/Who-Has discovery - one record per sender and question,
+# counted, since a workstation can ask the same thing every few seconds
+# for a day); 'bacnet_property', one per object and
+# property read or reported on each connection (reads and change-of-value
+# notifications counted, the last value kept); and 'bacnet_device', one
+# per device announcing itself (I-Am), with its vendor. Names come from
+# tshark (vals()), so its vendor and property lists stay its own. tshark
+# runs a ReadPropertyMultiple reply's values together, so a value is kept
+# only when a message carries exactly one.
+
+_BACNET_READS = {'readProperty', 'readPropertyMultiple', 'readRange', 'atomicReadFile'}
+_BACNET_DISCOVERY = {'who-Is', 'who-Has'}
+_BACNET_VALUE_NOTIFICATIONS = {'confirmedCOVNotification', 'unconfirmedCOVNotification'}
+# Messages whose first object is the device sending them, the object
+# they're about following
+_BACNET_FROM_DEVICE = _BACNET_VALUE_NOTIFICATIONS | {'confirmedEventNotification', 'unconfirmedEventNotification'}
+_BACNET_VALUE_FIELDS = ('bacapp.present_value.real', 'bacapp.present_value.double', 'bacapp.present_value.uint',
+                        'bacapp.present_value.int', 'bacapp.present_value.enum_index', 'bacapp.present_value.boolean',
+                        'bacapp.present_value.char_string')
+_BACNET_BINARY_OBJECTS = {'binary-input', 'binary-output', 'binary-value'}
+_BACNET_REINIT_STATES = {0: 'coldstart', 1: 'warmstart', 2: 'start-backup', 3: 'end-backup', 4: 'start-restore',
+                         5: 'end-restore', 6: 'abort-restore', 7: 'activate-changes'}
+_BACNET_ENABLE = {0: 'enable', 1: 'disable', 2: 'disable-initiation'}
+# APDU types (bacapp.type)
+_BACNET_CONFIRMED, _BACNET_UNCONFIRMED, _BACNET_SIMPLE_ACK, _BACNET_COMPLEX_ACK = 0, 1, 2, 3
+_BACNET_ERROR, _BACNET_REJECT, _BACNET_ABORT = 5, 6, 7
+
+
+def _bacnet_tags(data, pos):
+    """A BACnet APDU's tags from pos: (context tag number, value bytes),
+    opening and closing tags skipped."""
+    while pos < len(data):
+        first = data[pos]
+        pos += 1
+        number, lvt = first >> 4, first & 7
+        if number == 15 and pos < len(data):
+            number, pos = data[pos], pos + 1
+        if first & 8 and lvt in (6, 7):
+            continue
+        length = lvt
+        if lvt == 5 and pos < len(data):
+            length, pos = data[pos], pos + 1
+            if length in (254, 255):
+                size = 2 if length == 254 else 4
+                length, pos = int.from_bytes(data[pos:pos + size], 'big'), pos + size
+        yield number, data[pos:pos + length]
+        pos += length
+
+
+def _bacnet_string(value):
+    """A character string: its character set byte, then the text."""
+    if not value:
+        return ''
+    codec = {0: 'utf-8', 4: 'utf-16-be'}.get(value[0], 'latin-1')
+    return value[1:].decode(codec, 'replace')
+
+
+def _bacnet_request_details(service, hexbytes):
+    """What tshark shows only as text: a reinitialize's state and
+    password, a communication control's duration, enable/disable and
+    password - read from the APDU's own bytes."""
+    try:
+        data = bytes.fromhex(hexbytes.replace(':', ''))
+    except ValueError:
+        return {}
+    if len(data) < 4:
+        return {}
+    pos = 6 if data[0] & 0x08 else 4        # a segmented request's header is longer
+    tags = dict(_bacnet_tags(data, pos))
+    details = {}
+    if service == 'reinitializeDevice':
+        if 0 in tags:
+            details['state'] = _BACNET_REINIT_STATES.get(int.from_bytes(tags[0], 'big'), str(int.from_bytes(tags[0], 'big')))
+        if 1 in tags:
+            details['password'] = _bacnet_string(tags[1])
+    elif service == 'deviceCommunicationControl':
+        if 0 in tags:
+            details['duration'] = int.from_bytes(tags[0], 'big')
+        if 1 in tags:
+            details['state'] = _BACNET_ENABLE.get(int.from_bytes(tags[1], 'big'), str(int.from_bytes(tags[1], 'big')))
+        if 2 in tags:
+            details['password'] = _bacnet_string(tags[2])
+    return details
+
+
+def _bacnet_named(names, numbers):
+    """tshark's names for a field's values, its numbers where it has none."""
+    return [name or number for name, number in zip(names, numbers)] if len(names) == len(numbers) else list(numbers)
+
+
+class _BACnetSummary:
+    __slots__ = ('flow', 'first', 'body')
+
+    def __init__(self, flow, first, body):
+        self.flow, self.first, self.body = flow, first, body
+
+
+class BACnet:
+    """BACnet - see the comment above."""
+    event_type = 'bacnet'
+    app_protos = ('bvlc', 'bacnet', 'bacapp')
+    fields = ('bacapp.type', 'bacapp.invoke_id', 'bacapp.confirmed_service', 'vals(bacapp.confirmed_service)',
+              'bacapp.unconfirmed_service', 'vals(bacapp.unconfirmed_service)', 'bacapp.objectType',
+              'vals(bacapp.objectType)', 'bacapp.instance_number', 'bacapp.property_identifier',
+              'vals(bacapp.property_identifier)', 'bacapp.vendor_identifier', 'vals(bacapp.vendor_identifier)',
+              'vals(bacapp.error_class)', 'vals(bacapp.error_code)', 'vals(bacapp.reject_reason)',
+              'vals(bacapp.abort_reason)', 'bacapp.who_is.low_limit', 'bacapp.who_is.high_limit',
+              '@bacapp', 'bacnet.dnet', 'bacnet.dadr_mstp', 'bacnet.dadr_eth', 'bacnet.dadr_tmp', 'bacnet.snet',
+              'bacnet.sadr_mstp', 'bacnet.sadr_eth', 'bacnet.sadr_tmp') + _BACNET_VALUE_FIELDS
+
+    def __init__(self):
+        self.records = []
+        # (flow key, routed device, invoke id) -> [(service, 'action', body)
+        # or (service, 'read', summary)], oldest first. Devices behind a
+        # router share its address, and each numbers its own requests'
+        # invoke ids, so the routed device - a request's destination
+        # network and address, its reply's source - is part of the key;
+        # and a client can reuse an invoke id before its reply comes (a
+        # write and a read both [1]), so a reply naming its service takes
+        # the oldest request of that service.
+        self.pending = {}
+        self.properties = {}   # (flow key, service, object, properties) -> _BACnetSummary
+        self.devices = {}      # (flow key, device instance) -> _BACnetSummary
+        self.discovery = {}    # (flow key, service, range, object) -> body
+
+    @staticmethod
+    def _service(v, kind):
+        return (_bacnet_named(v[f'vals(bacapp.{kind}_service)'], v[f'bacapp.{kind}_service']) or [''])[0]
+
+    @staticmethod
+    def _objects(v):
+        types = _bacnet_named(v['vals(bacapp.objectType)'], v['bacapp.objectType'])
+        return [f'{t},{i}' for t, i in zip(types, v['bacapp.instance_number'])]
+
+    @staticmethod
+    def _value(v, obj):
+        """The message's one value, if it carries exactly one."""
+        found = [(f, x) for f in _BACNET_VALUE_FIELDS for x in v[f]]
+        if len(found) != 1:
+            return None
+        field, text = found[0]
+        if field.endswith('.enum_index') and obj and obj.split(',')[0] in _BACNET_BINARY_OBJECTS:
+            return {'0': 'inactive', '1': 'active'}.get(text, text)
+        if field.endswith(('.real', '.double')):
+            try:
+                return float(text)
+            except ValueError:
+                return text
+        if field.endswith('.boolean'):
+            return text in ('1', 'True')
+        if field.endswith('.char_string'):
+            return text
+        number = _int(text)
+        return number if number is not None else text
+
+    def feed(self, pkt, v):
+        apdu = _int((v['bacapp.type'] or [''])[0])
+        if apdu is None:
+            return
+        flow = pkt.flow
+        invoke = _int((v['bacapp.invoke_id'] or [''])[0])
+        side = 'd' if apdu == _BACNET_CONFIRMED else 's'
+        routed = tuple((v[f'bacnet.{side}{f}'] or [''])[0] for f in ('net', 'adr_mstp', 'adr_eth', 'adr_tmp'))
+        pending_key = (flow.key, routed, invoke)
+        objects = self._objects(v)
+        props = list(dict.fromkeys(_bacnet_named(v['vals(bacapp.property_identifier)'], v['bacapp.property_identifier'])))
+        if apdu == _BACNET_CONFIRMED:
+            service = self._service(v, 'confirmed')
+            if service in _BACNET_READS:
+                obj = objects[0] if objects else ''
+                if len(objects) > 1 and service == 'readPropertyMultiple':
+                    obj += f' (+{len(objects) - 1} more)'
+                summary = self._summary(pkt, service, obj, props)
+                summary.body['count'] += 1
+                self._wait(pending_key, (service, 'read', summary))
+            elif service in _BACNET_VALUE_NOTIFICATIONS:
+                self._notification(pkt, v, service, objects, props)
+            else:
+                body = self._action(pkt, v, service, 'confirmed', objects, props)
+                body['result'] = 'no reply'
+                self._wait(pending_key, (service, 'action', body))
+        elif apdu == _BACNET_UNCONFIRMED:
+            service = self._service(v, 'unconfirmed')
+            if service == 'i-Am':
+                self._device(pkt, v, objects)
+            elif service in _BACNET_VALUE_NOTIFICATIONS:
+                self._notification(pkt, v, service, objects, props)
+            else:
+                self._action(pkt, v, service, 'unconfirmed', objects, props)
+        elif apdu in (_BACNET_SIMPLE_ACK, _BACNET_COMPLEX_ACK, _BACNET_ERROR, _BACNET_REJECT, _BACNET_ABORT):
+            # A segmented reply's later segments find nothing waiting
+            waiting = self.pending.get(pending_key)
+            if not waiting:
+                return
+            service = self._service(v, 'confirmed')
+            entry = next((w for w in waiting if w[0] == service), None) if service else waiting[0]
+            if entry is None:
+                return
+            waiting.remove(entry)
+            if not waiting:
+                del self.pending[pending_key]
+            _, kind, target = entry
+            result = self._result(apdu, v)
+            if kind == 'action':
+                target['result'] = result
+                return
+            body = target.body
+            if result != 'ok':
+                body['errors'] += 1
+                body['last_error'] = result
+                return
+            value = self._value(v, objects[0] if objects else '') if apdu == _BACNET_COMPLEX_ACK else None
+            if value is not None:
+                body['last_value'] = value
+                body['last_update'] = pkt.when
+
+    def _wait(self, key, entry):
+        waiting = self.pending.setdefault(key, [])
+        waiting.append(entry)
+        # a request never answered shouldn't hold its slot forever
+        if len(waiting) > 8:
+            del waiting[0]
+
+    @staticmethod
+    def _result(apdu, v):
+        if apdu in (_BACNET_SIMPLE_ACK, _BACNET_COMPLEX_ACK):
+            return 'ok'
+        if apdu == _BACNET_ERROR:
+            parts = [x for x in ((v['vals(bacapp.error_class)'] or [''])[0], (v['vals(bacapp.error_code)'] or [''])[0]) if x]
+            return 'error: ' + ': '.join(parts) if parts else 'error'
+        if apdu == _BACNET_REJECT:
+            return 'rejected: ' + ((v['vals(bacapp.reject_reason)'] or ['?'])[0])
+        return 'aborted: ' + ((v['vals(bacapp.abort_reason)'] or ['?'])[0])
+
+    def _action(self, pkt, v, service, kind, objects, props):
+        body = {'service': service, 'kind': kind}
+        if service in _BACNET_FROM_DEVICE and len(objects) > 1:
+            body['device'], objects = objects[0], objects[1:]
+        if objects:
+            body['object'] = objects[0]
+        if props:
+            body['property'] = ', '.join(props[:5]) + (' ...' if len(props) > 5 else '')
+        value = self._value(v, body.get('object'))
+        if value is not None and service in ('writeProperty', 'writePropertyMultiple', 'writeGroup'):
+            body['value'] = value
+        if service == 'who-Is' and v['bacapp.who_is.low_limit']:
+            body['range'] = f"{v['bacapp.who_is.low_limit'][0]}-{(v['bacapp.who_is.high_limit'] or ['?'])[0]}"
+        if service in ('reinitializeDevice', 'deviceCommunicationControl') and v['@bacapp']:
+            body.update(_bacnet_request_details(service, v['@bacapp'][0]))
+        if service in _BACNET_DISCOVERY:
+            key = (pkt.flow.key, service, body.get('range'), body.get('object'))
+            asked = self.discovery.get(key)
+            if asked is not None:
+                asked['count'] += 1
+                asked['last_seen'] = pkt.when
+                return asked
+            body['count'], body['last_seen'] = 1, pkt.when
+            self.discovery[key] = body
+        self.records.append((pkt.flow, pkt.when, 'bacnet', body))
+        return body
+
+    def _summary(self, pkt, service, obj, props):
+        label = ', '.join(props[:5]) + (' ...' if len(props) > 5 else '')
+        key = (pkt.flow.key, service, obj, label)
+        summary = self.properties.get(key)
+        if summary is None:
+            body = {'service': service, 'object': obj, 'count': 0, 'errors': 0}
+            if label:
+                body['property'] = label
+            summary = self.properties[key] = _BACnetSummary(pkt.flow, pkt.when, body)
+        return summary
+
+    def _notification(self, pkt, v, service, objects, props):
+        """A change-of-value notification: the device sending it, then the
+        object it reports on."""
+        obj = objects[1] if len(objects) > 1 else (objects[0] if objects else '')
+        summary = self._summary(pkt, service, obj, props)
+        summary.body['count'] += 1
+        if objects and len(objects) > 1:
+            summary.body['device'] = objects[0]
+        value = self._value(v, obj)
+        if value is not None:
+            summary.body['last_value'] = value
+            summary.body['last_update'] = pkt.when
+
+    def _device(self, pkt, v, objects):
+        instance = _int(objects[0].split(',')[-1]) if objects else None
+        key = (pkt.flow.key, instance)
+        device = self.devices.get(key)
+        if device is None:
+            body = {'device': instance, 'announcements': 0}
+            vendor_ids = v['bacapp.vendor_identifier']
+            if vendor_ids:
+                body['vendor_id'] = _int(vendor_ids[0])
+                names = v['vals(bacapp.vendor_identifier)']
+                if names and names[0] and names[0] != vendor_ids[0]:
+                    body['vendor'] = names[0]
+            device = self.devices[key] = _BACnetSummary(pkt.flow, pkt.when, body)
+        device.body['announcements'] += 1
+        device.body['last_seen'] = pkt.when
+
+    def finish(self):
+        records = list(self.records)
+        for body in self.discovery.values():
+            body['last_seen'] = _iso_utc(body['last_seen'])
+        for summary in self.properties.values():
+            if 'last_update' in summary.body:
+                summary.body['last_update'] = _iso_utc(summary.body['last_update'])
+            records.append((summary.flow, summary.first, 'bacnet_property', summary.body))
+        for device in self.devices.values():
+            device.body['last_seen'] = _iso_utc(device.body['last_seen'])
+            records.append((device.flow, device.first, 'bacnet_device', device.body))
+        return records
+
+
 # ---------------------------------------------------------------- structured protocols
 #
 # Protocols whose messages nest - several SMB2 commands in one packet, a
@@ -732,7 +1056,7 @@ def _pdus(layer):
 
 # Every protocol with records here, from tshark's fields, in the order their
 # fields follow the base fields in tshark's output.
-PROTOCOLS = (LLMNR, NBNS, SSDP, S7comm, Telnet, IEC104)
+PROTOCOLS = (LLMNR, NBNS, SSDP, S7comm, Telnet, IEC104, BACnet)
 # ... and from the structured pass (shark_analyzer._structured_pass): none
 # yet - it's for a protocol whose messages nest, which flat fields can't
 # keep apart (several commands per packet, a token inside a command).
