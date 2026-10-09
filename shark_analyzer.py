@@ -480,6 +480,7 @@ def analyze(dir_path, pcap_path, on_start=None):
     db_path = shark_db_path(dir_path)
     tmp_path = db_path + '.tmp'
     _remove(os.path.join(dir_path, SHARK_ERROR))
+    started = time.monotonic()
     try:
         events = run_tshark(pcap_path, on_start=on_start)
         _remove(tmp_path)
@@ -487,6 +488,10 @@ def analyze(dir_path, pcap_path, on_start=None):
         conn = sqlite3.connect(tmp_path)
         try:
             conn.execute(f'PRAGMA user_version = {SHARK_FORMAT_VERSION}')
+            # How long the run took, tshark and building the records both
+            # (status() reports it once the run is ready)
+            conn.execute('CREATE TABLE shark_run (seconds REAL)')
+            conn.execute('INSERT INTO shark_run VALUES (?)', (time.monotonic() - started,))
             conn.commit()
         finally:
             conn.close()
@@ -517,6 +522,7 @@ _lock = threading.Lock()
 _queue = deque()          # dir_paths waiting, each with its pcap path in _pending
 _pending = {}             # dir_path -> pcap_path
 _running = None           # dir_path being analyzed now, or None
+_running_since = None     # when it started (time.time()), for status()'s elapsed
 _running_proc = None      # its tshark process, once started
 _cancelled = set()        # dir_paths whose running job was cancelled
 _worker = None
@@ -536,7 +542,7 @@ def _set_running_proc(proc):
 
 
 def _work():
-    global _running, _running_proc, _worker
+    global _running, _running_since, _running_proc, _worker
     while True:
         with _lock:
             if not _queue:
@@ -544,11 +550,11 @@ def _work():
                 return
             dir_path = _queue.popleft()
             pcap_path = _pending.pop(dir_path)
-            _running = dir_path
+            _running, _running_since = dir_path, time.time()
         if os.path.isfile(pcap_path):
             analyze(dir_path, pcap_path, on_start=_set_running_proc)
         with _lock:
-            _running = _running_proc = None
+            _running = _running_since = _running_proc = None
             _cancelled.discard(dir_path)
 
 
@@ -591,6 +597,20 @@ def background_eligible(pcap_path):
         return False
 
 
+def run_seconds(db_path):
+    """How long the run that built a shark.db took, or None if it didn't
+    record that."""
+    try:
+        conn = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
+        try:
+            row = conn.execute('SELECT seconds FROM shark_run').fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+    return row[0] if row else None
+
+
 def format_version(db_path):
     """The SHARK_FORMAT_VERSION a shark.db was built with (0 if unknown)."""
     try:
@@ -604,9 +624,10 @@ def format_version(db_path):
 
 
 def status(dir_path, pcap_path=None):
-    """This analysis's SHAR-CRATES state: 'ready', 'queued', 'running',
-    'error' (with 'message'), 'too_large' (over the background limit,
-    not yet asked for) or 'not_started'. A shark.db built by an older
+    """This analysis's SHAR-CRATES state: 'ready' (with the run's
+    'seconds', for a shark.db that recorded them), 'queued', 'running'
+    (with 'elapsed' seconds so far), 'error' (with 'message'), 'too_large'
+    (over the background limit, not yet asked for) or 'not_started'. A shark.db built by an older
     SHAR-CRATES (see SHARK_FORMAT_VERSION) is removed here, so the
     analysis reads as not started and gets rebuilt."""
     db_path = shark_db_path(dir_path)
@@ -615,13 +636,14 @@ def status(dir_path, pcap_path=None):
             busy = dir_path == _running or dir_path in _pending
         if busy or format_version(db_path) == SHARK_FORMAT_VERSION:
             if not busy:
-                return {'status': 'ready'}
+                seconds = run_seconds(db_path)
+                return {'status': 'ready'} if seconds is None else {'status': 'ready', 'seconds': round(seconds)}
         else:
             for name in (SHARK_DB, SHARK_DB + '-wal', SHARK_DB + '-shm'):
                 _remove(os.path.join(dir_path, name))
     with _lock:
         if dir_path == _running:
-            return {'status': 'running'}
+            return {'status': 'running', 'elapsed': max(0, int(time.time() - _running_since))}
         if dir_path in _pending:
             return {'status': 'queued', 'position': list(_queue).index(dir_path) + 1}
     error_path = os.path.join(dir_path, SHARK_ERROR)

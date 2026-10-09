@@ -681,7 +681,9 @@ class TestAnalyze(unittest.TestCase):
         self.assertEqual(len(events), 3)
         self.assertFalse(os.path.exists(os.path.join(self.dir, 'shark.db.tmp')))
         self.assertFalse(os.path.exists(os.path.join(self.dir, shark_analyzer.SHARK_ERROR)))
-        self.assertEqual(shark_analyzer.status(self.dir, self.pcap), {'status': 'ready'})
+        status = shark_analyzer.status(self.dir, self.pcap)
+        self.assertIsInstance(status.pop('seconds'), int, 'how long the run took')
+        self.assertEqual(status, {'status': 'ready'})
 
     def test_shark_db_is_stamped_and_an_older_format_is_rebuilt(self):
         """REGRESSION: shark.db existing meant 'ready' forever, so an
@@ -751,12 +753,43 @@ class TestQueue(unittest.TestCase):
             deadline = time.monotonic() + 5
             while shark_analyzer.status(self.dirs[0])['status'] != 'running' and time.monotonic() < deadline:
                 time.sleep(0.02)
-            self.assertEqual(shark_analyzer.status(self.dirs[0]), {'status': 'running'})
+            self.assertEqual(shark_analyzer.status(self.dirs[0]), {'status': 'running', 'elapsed': 0})
             self.assertFalse(shark_analyzer.enqueue(self.dirs[0], self.pcaps[0]), 'already running')
             self.assertEqual(shark_analyzer.status(self.dirs[1]), {'status': 'queued', 'position': 1})
             gate.set()
             self.assertTrue(shark_analyzer.wait_idle(10))
         self.assertEqual(order, self.dirs)
+
+    def test_a_run_reports_its_seconds_while_running_and_once_ready(self):
+        gate = threading.Event()
+
+        def fake(dir_path, pcap_path, on_start=None):
+            gate.wait(10)
+        with mock.patch.object(shark_analyzer, 'analyze', side_effect=fake):
+            shark_analyzer.enqueue(self.dirs[0], self.pcaps[0])
+            deadline = time.monotonic() + 5
+            while shark_analyzer.status(self.dirs[0])['status'] != 'running' and time.monotonic() < deadline:
+                time.sleep(0.02)
+            with mock.patch.object(shark_analyzer.time, 'time', return_value=shark_analyzer._running_since + 42.7):
+                self.assertEqual(shark_analyzer.status(self.dirs[0]), {'status': 'running', 'elapsed': 42})
+            gate.set()
+            self.assertTrue(shark_analyzer.wait_idle(10))
+
+    @unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
+    def test_a_built_shark_db_records_how_long_its_run_took(self):
+        from tests.protocol_fixtures import write_protocol_pcap
+        write_protocol_pcap(self.pcaps[0])
+        with mock.patch.object(shark_analyzer.time, 'monotonic', side_effect=[100.0, 117.4] + [200.0] * 50):
+            shark_analyzer.analyze(self.dirs[0], self.pcaps[0])
+        self.assertEqual(shark_analyzer.status(self.dirs[0]), {'status': 'ready', 'seconds': 17})
+
+    def test_a_shark_db_without_its_run_time_is_still_ready(self):
+        """Built before runs recorded their time: no 'seconds', no error."""
+        import sqlite3
+        conn = sqlite3.connect(shark_analyzer.shark_db_path(self.dirs[0]))
+        conn.execute(f'PRAGMA user_version = {shark_analyzer.SHARK_FORMAT_VERSION}')
+        conn.close()
+        self.assertEqual(shark_analyzer.status(self.dirs[0]), {'status': 'ready'})
 
     def test_cancel_drops_a_queued_run(self):
         gate, ran = threading.Event(), []
@@ -850,6 +883,7 @@ class TestSharkAPI(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn(body['status'], ('queued', 'running', 'ready'))
         body = self._wait_ready()
+        self.assertIsInstance(body.pop('seconds'), int)
         self.assertEqual(body, {'status': 'ready', 'flows': 3, 'app_protos': {'ftp': 1, 'ftp-data': 1, 'http': 1}})
 
     def test_view_shark_reads_shark_db_and_the_default_reads_events_db(self):

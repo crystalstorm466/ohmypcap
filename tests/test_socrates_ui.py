@@ -21486,7 +21486,7 @@ class TestSharkCratesUI(unittest.TestCase):
             };
         """)
         self.assertEqual(result['ready'], {'text': 'tshark: 1,234 flows, 2 protocols', 'link': None})
-        self.assertEqual(result['running']['text'], 'Analyzing with tshark\u2026')
+        self.assertEqual(result['running']['text'], 'Analyzing with tshark\u2026 0s')
         self.assertIn('larger than SHAR-CRATES analyzes automatically', result['tooLarge']['text'])
         self.assertEqual(result['tooLarge']['link'], ['switch-view', 'shark'], 'Analyze now starts it')
         self.assertEqual(result['error']['text'], 'SHAR-CRATES failed: <b>boom</b> \u2013 Try again', 'the message is escaped')
@@ -21664,6 +21664,84 @@ class TestSharkCratesUI(unittest.TestCase):
         self.assertEqual(result['columns'], result['flowColumns'])
         self.assertIn('App Proto', result['columns'])
         self.assertEqual(result['connOf'], ['conn_s7comm', None])
+
+    def test_record_cards_badge_protocols_suricata_lacks(self):
+        """REGRESSION: only connection tabs were checked, so S7comm's,
+        NBNS's, LLMNR's and SSDP's own record tabs had no badge."""
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""
+            currentView = 'shark';
+            eventTypes = ['flow', 's7comm', 'nbns', 'llmnr', 'ssdp', 'dns', 'mdns', 'ftp_data', 'quic', 'modbus'];
+            eventStats = Object.fromEntries(eventTypes.map(t => [t, 1]));
+            buildStats(null);
+            window.__jsdom_result = Object.fromEntries([...document.querySelectorAll('.stat-card')].map(c =>
+                [c.dataset.section.replace('section-', ''), !!c.querySelector('.stat-badge')]));
+        """)
+        self.assertEqual({t for t, badge in result.items() if badge}, {'s7comm', 'nbns', 'llmnr', 'ssdp'})
+
+    def test_the_status_counts_seconds_while_tshark_runs_and_gives_the_total_once_ready(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""
+            document.getElementById('viewBarContainer').innerHTML = viewBarHtml();
+            var realNow = Date.now(), now = realNow;
+            Date.now = function() { return now; };
+            sharkStatus = {status: 'running', elapsed: 12};
+            updateViewToggle();
+            var timer = document.getElementById('viewBarTimer');
+            var first = document.getElementById('viewBarStatus').textContent;
+            now += 3400; tickSharkClock();
+            var later = timer.textContent;
+            var ticking = sharkClockTimer !== null;
+            sharkStatus = {status: 'ready', flows: 1234, app_protos: {dns: 1, '': 2}, seconds: 48};
+            updateViewToggle();
+            window.__jsdom_result = {first: first, later: later, ticking: ticking, hidden: timer.getAttribute('aria-hidden'),
+                stoppedAfter: sharkClockTimer === null, ready: document.getElementById('viewBarStatus').textContent,
+                older: sharkStatusHtml({status: 'ready', flows: 1, app_protos: {}})};
+        """)
+        self.assertEqual(result['first'], 'Analyzing with tshark\u2026 12s')
+        self.assertEqual(result['later'], '15s')
+        self.assertTrue(result['ticking'])
+        self.assertEqual(result['hidden'], 'true', 'not read out every second from the live region')
+        self.assertTrue(result['stoppedAfter'])
+        self.assertEqual(result['ready'], 'tshark: 1,234 flows, 1 protocol in 48s')
+        self.assertEqual(result['older'], 'tshark: 1 flow, 0 protocols', "a shark.db that didn't record its time")
+
+    def test_the_badge_is_a_corner_dot_with_a_key_and_hidden_text(self):
+        """The badge keeps the card at two lines: a dot, explained by the
+        view bar's key, and readable text only for screen readers."""
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""
+            document.getElementById('viewBarContainer').innerHTML = viewBarHtml();
+            currentView = 'shark';
+            eventTypes = ['flow', 's7comm'];
+            eventStats = {flow: 1, s7comm: 1};
+            buildStats(null);
+            var badge = document.querySelector('.stat-badge');
+            var shown = !document.getElementById('viewBarKey').hidden;
+            eventTypes = ['flow', 'dns']; eventStats = {flow: 1, dns: 1};
+            buildStats(null);
+            window.__jsdom_result = {text: badge.textContent, visibleText: [...badge.childNodes].filter(n => n.nodeType === 3).length,
+                srOnly: !!badge.querySelector('.sr-only'), keyShown: shown, keyHiddenWithout: document.getElementById('viewBarKey').hidden,
+                keyText: document.getElementById('viewBarKey').textContent};
+        """)
+        self.assertEqual(result['text'], 'not in Suricata')
+        self.assertTrue(result['srOnly'])
+        self.assertEqual(result['visibleText'], 0)
+        self.assertTrue(result['keyShown'])
+        self.assertTrue(result['keyHiddenWithout'])
+        self.assertEqual(result['keyText'], 'not in Suricata')
+        self.assertIn('.stat-badge { position: absolute;', CSS_CONTENT)
+
+    def test_suricata_view_has_no_badges(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""
+            currentView = 'suricata';
+            eventTypes = ['flow', 'dns', 'anomaly', 'fileinfo', 'stats', 'protocol_decode'];
+            eventStats = Object.fromEntries(eventTypes.map(t => [t, 1]));
+            buildStats(null);
+            window.__jsdom_result = document.querySelectorAll('.stat-badge').length;
+        """)
+        self.assertEqual(result, 0)
 
     def test_connection_cards_badge_protocols_suricata_lacks_and_stay_out_of_all_events(self):
         from tests.jsdom_helper import js_statements

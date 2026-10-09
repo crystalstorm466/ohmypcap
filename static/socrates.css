@@ -1312,6 +1312,10 @@
         .view-toggle-btn:focus-visible { outline: 2px solid var(--interactive-highlight, var(--accent)); outline-offset: -2px; }
         .view-bar-status { color: var(--text-muted); font-size: 0.8rem; padding: 8px 0; }
         .view-bar-status a { color: var(--accent); font-weight: 600; }
+        .view-bar-timer { font-variant-numeric: tabular-nums; }
+        .view-bar-key { color: var(--text-muted); font-size: 0.8rem; padding: 8px 0; margin-left: auto; white-space: nowrap; }
+        .view-bar-key[hidden] { display: none; }
+        .view-bar-key .stat-badge-dot { margin-right: 6px; vertical-align: 1px; }
         /* SHAR-CRATES' state on its tab: a spinning ring while tshark works, a dot when it needs a click (too large to run unasked, or failed) */
         .view-toggle-status { display: none; width: 8px; height: 8px; border-radius: 50%; box-sizing: border-box; }
         .view-toggle-busy .view-toggle-status { display: inline-block; border: 2px solid var(--text-muted); border-top-color: transparent; animation: spin 1s linear infinite; }
@@ -1408,8 +1412,12 @@
            a lone number has no space to wrap on anyway. */
         .stat-number { font-size: clamp(1.15rem, 15cqw, 2.5rem); font-weight: bold; white-space: nowrap; }
         .stat-label { color: var(--text-muted); font-size: 0.85rem; text-transform: uppercase; letter-spacing: 1px; word-break: keep-all; overflow-wrap: normal; line-height: 1.2; }
-        /* SHAR-CRATES: a connection tab for a protocol Suricata doesn't parse */
-        .stat-badge { margin-top: 6px; display: inline-block; white-space: nowrap; font-size: 0.6rem; text-transform: uppercase; letter-spacing: 0.3px; color: var(--accent); border: 1px solid var(--accent); border-radius: 4px; padding: 1px 6px; }
+        /* SHAR-CRATES: a tab for a protocol Suricata doesn't parse - a dot in
+           the card's corner (the view bar's .view-bar-key says what it
+           means), so the card keeps its two lines */
+        .stat-badge, .stat-badge-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+        .stat-badge { position: absolute; top: 10px; right: 10px; }
+        .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
         @media (max-width: 600px) { .stat-card { padding: 15px 10px; } .stat-number { font-size: 1.8rem; } .stat-label { font-size: 0.75rem; letter-spacing: 0.5px; } }
         .section { background: var(--bg-secondary); overflow: hidden; }
         .section-hidden { display: none; }

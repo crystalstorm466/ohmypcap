@@ -88,8 +88,8 @@
             return currentView === 'shark' && e.event_type === 'flow' && e.app_proto ? CONNECTION_TYPE_PREFIX + e.app_proto : null;
         }
         // Suricata 8.0.6's app-layer parsers (suricata --list-app-layer-protos),
-        // in the names SHAR-CRATES' app_proto uses - a connection tab for any
-        // other protocol is marked "not in Suricata".
+        // in the names SHAR-CRATES' app_proto uses - a SHAR-CRATES tab for any
+        // other protocol, records or connections, is marked "not in Suricata".
         const SURICATA_APP_PROTOS = new Set(['http', 'ftp', 'ftp-data', 'smtp', 'tls', 'ssh', 'imap', 'smb', 'dcerpc', 'dns',
             'modbus', 'enip', 'dnp3', 'nfs', 'ntp', 'tftp', 'ike', 'krb5', 'quic', 'dhcp', 'sip', 'rfb', 'mqtt', 'pgsql',
             'telnet', 'websocket', 'ldap', 'doh2', 'rdp', 'http2', 'bittorrent-dht', 'pop3', 'mdns', 'snmp',
@@ -9362,12 +9362,14 @@
                     });
                 }
                 const connProto = isConnectionType(type) ? type.slice(CONNECTION_TYPE_PREFIX.length) : null;
+                // A record type is named for its protocol, with _ for - (ftp_data)
+                const tabProto = connProto || type.replace(/_/g, '-');
                 stats.push({
                     id: type,
                     label: eventTypeLabel(type),
                     count: filtered,
                     color: COLORS.EVENT[connProto || type] || (connProto ? COLORS.EVENT.flow : COLORS.EVENT.tls),
-                    notInSuricata: !!connProto && !SURICATA_APP_PROTOS.has(connProto),
+                    notInSuricata: currentView === 'shark' && type !== 'flow' && !SURICATA_APP_PROTOS.has(tabProto),
                 });
             });
 
@@ -9427,10 +9429,14 @@
                 return `
                     <div class="stat-card${activeClass}" data-action="show-tab" data-section="section-${s.id}">
                         <div class="stat-number" style="color: ${s.color}" aria-label="${countDisplay}">0</div>
-                        <div class="stat-label">${escapeHtml(s.label)}</div>${s.notInSuricata ? '<div class="stat-badge" title="Suricata doesn\'t parse this protocol - only SHAR-CRATES sees inside it">not in Suricata</div>' : ''}
+                        <div class="stat-label">${escapeHtml(s.label)}</div>${s.notInSuricata ? '<span class="stat-badge" title="Not in Suricata: Suricata doesn\'t parse this protocol - only SHAR-CRATES sees inside it"><span class="sr-only">not in Suricata</span></span>' : ''}
                     </div>
                 `;
             }).join('');
+            // The key to the cards' corner dot, beside the view tabs - only
+            // when some card carries one.
+            const badgeKey = document.getElementById('viewBarKey');
+            if (badgeKey) badgeKey.hidden = !stats.some(s => s.count > 0 && s.notInSuricata);
             const numberEls = grid.querySelectorAll('.stat-number');
             stats.filter(s => s.count > 0).forEach((s, i) => animateStatNumber(numberEls[i], s.count));
 
@@ -11697,6 +11703,11 @@
         // tshark is still working it's polled until it settles.
         var sharkStatus = null;
         var sharkPollTimer = null;
+        // While tshark runs, the seconds it's been running tick up beside
+        // the tabs: counted here every second from the 'elapsed' each poll
+        // brings, so it stays in step with the server's clock.
+        var sharkClockTimer = null;
+        var sharkRunStartedAt = null;
         const SHARK_POLL_MS = 2000;
         const SHARK_BUSY_STATES = new Set(['queued', 'running', 'waiting']);
 
@@ -11710,6 +11721,7 @@
                 + `<button type="button" class="view-toggle-btn" data-action="switch-view" data-arg="shark" aria-pressed="false">SHAR-CRATES<span class="view-toggle-status" aria-hidden="true"></span></button>`
                 + `</span>`
                 + `<span id="viewBarStatus" class="view-bar-status" aria-live="polite"></span>`
+                + `<span id="viewBarKey" class="view-bar-key" hidden><span class="stat-badge-dot" aria-hidden="true"></span>not in Suricata</span>`
                 + `</div>`;
         }
 
@@ -11717,7 +11729,8 @@
             const st = status && status.status;
             if (st === 'ready') {
                 const protocols = Object.keys(status.app_protos || {}).filter(p => p).length;
-                return `SHAR-CRATES: tshark's view of this capture - ${status.flows} flow${status.flows === 1 ? '' : 's'}, ${protocols} protocol${protocols === 1 ? '' : 's'}`;
+                const took = Number.isFinite(status.seconds) ? `, analyzed in ${status.seconds}s` : '';
+                return `SHAR-CRATES: tshark's view of this capture - ${status.flows} flow${status.flows === 1 ? '' : 's'}, ${protocols} protocol${protocols === 1 ? '' : 's'}${took}`;
             }
             if (st === 'waiting') return 'SHAR-CRATES: starts once Suricata finishes';
             if (st === 'queued') return 'SHAR-CRATES: waiting for another capture\'s tshark analysis to finish';
@@ -11733,11 +11746,15 @@
             const st = status && status.status;
             if (st === 'ready') {
                 const protocols = Object.keys(status.app_protos || {}).filter(p => p).length;
-                return `tshark: ${escapeHtml(status.flows.toLocaleString())} flow${status.flows === 1 ? '' : 's'}, ${protocols} protocol${protocols === 1 ? '' : 's'}`;
+                const took = Number.isFinite(status.seconds) ? ` in ${status.seconds.toLocaleString()}s` : '';
+                return `tshark: ${escapeHtml(status.flows.toLocaleString())} flow${status.flows === 1 ? '' : 's'}, ${protocols} protocol${protocols === 1 ? '' : 's'}${took}`;
             }
             if (st === 'waiting') return 'SHAR-CRATES starts once Suricata finishes';
             if (st === 'queued') return 'SHAR-CRATES is waiting for another capture\'s tshark analysis to finish';
-            if (st === 'running') return 'Analyzing with tshark\u2026';
+            // The ticking count is hidden from screen readers: the status is
+            // a live region, and a number changing every second would be
+            // read out every second.
+            if (st === 'running') return `Analyzing with tshark\u2026 <span id="viewBarTimer" class="view-bar-timer" aria-hidden="true">${Math.max(0, status.elapsed || 0)}s</span>`;
             if (st === 'too_large') return 'This capture is larger than SHAR-CRATES analyzes automatically \u2013 <a href="#" data-action="switch-view" data-arg="shark">Analyze now</a>';
             if (st === 'error') return `SHAR-CRATES failed: ${escapeHtml(status.message || 'tshark analysis failed')} \u2013 <a href="#" data-action="switch-view" data-arg="shark">Try again</a>`;
             return '';
@@ -11758,6 +11775,26 @@
             shark.classList.toggle('view-toggle-attention', st === 'too_large' || st === 'error');
             const statusEl = document.getElementById('viewBarStatus');
             if (statusEl) statusEl.innerHTML = sharkStatusHtml(sharkStatus);
+            syncSharkClock();
+        }
+
+        function tickSharkClock() {
+            const el = document.getElementById('viewBarTimer');
+            if (el && sharkRunStartedAt !== null) el.textContent = `${Math.max(0, Math.floor((Date.now() - sharkRunStartedAt) / 1000))}s`;
+        }
+
+        function syncSharkClock() {
+            if (!(sharkStatus && sharkStatus.status === 'running')) {
+                if (sharkClockTimer) clearInterval(sharkClockTimer);
+                sharkClockTimer = sharkRunStartedAt = null;
+                return;
+            }
+            // Re-anchored only when the server's count has drifted from
+            // ours, so a poll's rounding doesn't make the number jump back.
+            const started = Date.now() - (sharkStatus.elapsed || 0) * 1000;
+            if (sharkRunStartedAt === null || Math.abs(started - sharkRunStartedAt) > 1500) sharkRunStartedAt = started;
+            tickSharkClock();
+            if (!sharkClockTimer) sharkClockTimer = setInterval(tickSharkClock, 1000);
         }
 
         function stopSharkPolling() {

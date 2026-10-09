@@ -12,8 +12,11 @@ output into records shaped like Suricata's, so the same tabs, aggregation
 tables, Sankey diagram, search and pivot menu work on both:
 
 - **Flows** - one per conversation, with the protocol tshark found in it
-- **A tab for every protocol** tshark finds, listing its connections, with
-  a **not in Suricata** badge on the many Suricata doesn't parse
+- **A tab for every protocol** tshark finds, listing its connections
+- **A "not in Suricata" dot** in the corner of every tab's card for a
+  protocol Suricata doesn't parse - records or connections
+- **A running count of seconds** while tshark works, and how long it took
+  once it's done
 - **DNS, mDNS, HTTP, TLS, QUIC, Modbus and FTP** - one record per
   transaction, checked against Suricata's on dozens of real captures: they
   agree on nearly every field they share (see [SURI-CRATES and
