@@ -432,10 +432,11 @@ def create_file_analysis_db(db_path, file_path, yara_matches, file_md5, file_sha
         conn.commit()
 
 
-# SHAR-CRATES connection types: 'conn_<app proto>' is a view on the flow
-# rows, not stored rows of its own - the flows tshark found carrying that
-# protocol (e.g. conn_s7comm), for every protocol shark_protocols has no
-# transaction records for. Each gets its own tab, with flow's columns.
+# tshark's connection rows: 'conn_<app proto>' (e.g. conn_openvpn), one per
+# connection carrying a protocol that neither Suricata parses nor
+# shark_protocols has records for (shark_analyzer.merge). Each type gets
+# its own tab, with flow's columns; all-events queries leave them out,
+# since Suricata's own flow rows already list those connections.
 CONNECTION_TYPE_PREFIX = 'conn_'
 
 
@@ -499,14 +500,7 @@ def _build_where_conditions(has_acknowledged_table, terms, has_fts, event_type, 
             conditions.append("json_data LIKE ? ESCAPE '\\'")
             params.append(_sanitize_like(term))
 
-    if event_type and event_type.startswith(CONNECTION_TYPE_PREFIX):
-        # tshark's connection rows merged into events.db have the type
-        # itself; in a shark.db they're its flow rows with that protocol
-        # (no Suricata flow can match: these are protocols it doesn't parse)
-        app_proto_col = (event_type_col or 'event_type').replace('event_type', 'app_proto')
-        conditions.append(f"({event_type_col} = ? OR ({event_type_col} = 'flow' AND {app_proto_col} = ?))")
-        params.extend([event_type, event_type[len(CONNECTION_TYPE_PREFIX):]])
-    elif event_type:
+    if event_type:
         conditions.append(f'{event_type_col} = ?')
         params.append(event_type)
     else:
@@ -584,7 +578,7 @@ def create_email_analysis_db(db_path, events):
 
 
 def create_shark_db(db_path, events):
-    """Create shark.db for a SHAR-CRATES (tshark) view of a PCAP from the
+    """Create shark.db for tshark's records of a PCAP from the
     events shark_analyzer built - the same schema as events.db, so every
     query function here reads either one."""
     with _db_connection(db_path) as conn:
@@ -710,24 +704,11 @@ def suricata_identified_flows(db_path):
 
 
 def _iso_epoch(text):
-    """Suricata's (and SHAR-CRATES') timestamp - 2015-10-21T10:09:16.074689+0000 - in epoch seconds."""
+    """Suricata's (and tshark's) timestamp - 2015-10-21T10:09:16.074689+0000 - in epoch seconds."""
     try:
         return datetime.strptime(text, '%Y-%m-%dT%H:%M:%S.%f%z').timestamp()
     except (TypeError, ValueError):
         return None
-
-
-def get_shark_summary_sqlite(db_path):
-    """A SHAR-CRATES database's flow count and flows per application
-    protocol (most first) - what the SHAR-CRATES toggle shows before the
-    view is opened. Flows tshark found no application protocol in (bare
-    handshakes, undecoded payload) count under ''."""
-    with _db_connection(db_path) as conn:
-        rows = conn.execute(
-            "SELECT COALESCE(app_proto, ''), COUNT(*) FROM events WHERE event_type = 'flow' "
-            "GROUP BY 1 ORDER BY 2 DESC, 1"
-        ).fetchall()
-    return {'flows': sum(n for _, n in rows), 'app_protos': {proto: n for proto, n in rows}}
 
 
 def init_empty_db(db_path):
@@ -1015,28 +996,6 @@ def get_event_types_sqlite(db_path, q=None):
             return {}
 
 
-def get_connection_type_counts_sqlite(db_path, q=None, exclude=()):
-    """SHAR-CRATES' connection types (see CONNECTION_TYPE_PREFIX) and their
-    flow counts, matching q like get_event_types_sqlite - one per
-    application protocol among the flows, except those in exclude (the
-    protocols with transaction records of their own) and flows with no
-    application protocol."""
-    with _db_connection(db_path) as conn:
-        if not _has_events_table(conn):
-            return {}
-        terms = _build_search_terms(q)
-        has_fts = _has_fts5(conn) if terms else False
-        select, event_type_col = _events_select(terms, has_fts, 'app_proto, COUNT(*)', 'e.app_proto, COUNT(*)')
-        conditions, params = _build_where_conditions(_has_acknowledged_alerts_table(conn), terms, has_fts, 'flow', event_type_col)
-        app_proto_col = event_type_col.replace('event_type', 'app_proto')
-        sql = f"{select} WHERE {' AND '.join(conditions)} GROUP BY {app_proto_col} ORDER BY 2 DESC, 1"
-        try:
-            rows = conn.execute(sql, params).fetchall()
-        except sqlite3.OperationalError:
-            return {}
-    return {CONNECTION_TYPE_PREFIX + proto: n for proto, n in rows if proto and proto not in exclude}
-
-
 def get_event_date_range_sqlite(db_path, q=None):
     """MIN/MAX timestamp across all non-'stats' events, honoring the same
     search-term filtering as get_event_types_sqlite. Reuses the existing
@@ -1245,7 +1204,7 @@ AGGREGATION_JSON_PATHS = {
         'Bytes ←': ['$.flow.bytes_toclient'],
         'State': ['$.flow.state'],
         'Alerted': ['$.flow.alerted'],
-        # SHAR-CRATES' flow table shows this in place of State/Alerted,
+        # tshark's flow table shows this in place of State/Alerted,
         # which only Suricata records.
         'App Proto': ['$.app_proto'],
     },
@@ -1418,7 +1377,7 @@ AGGREGATION_JSON_PATHS = {
         'Query': ['$.mdns.queries[0].rrname'],
         'Type': ['$.mdns.queries[0].rrtype'],
     },
-    # SHAR-CRATES-only types (shark_protocols.py)
+    # tshark-only types (shark_protocols.py)
     'llmnr': {
         'Query': ['$.llmnr.queries[0].rrname'],
         'Type': ['$.llmnr.queries[0].rrtype'],
@@ -1573,7 +1532,7 @@ _FLOW_JSON_INDEX_NAMES = {
 
 def _ensure_flow_json_indexes(conn):
     """Backfill covering indexes for flow's 7 JSON-extracted aggregation
-    columns (Pkts/Bytes/State/Alerted, and App Proto for SHAR-CRATES) - measured as the standout bottleneck
+    columns (Pkts/Bytes/State/Alerted, and App Proto for tshark) - measured as the standout bottleneck
     at 1M+ rows (~2s per column, unindexed json_extract() over the full
     json_data blob). event_type leads each index, matching the real-column
     fix in _ensure_ip_port_indexes. Built from the real _aggregation_expr()

@@ -1,21 +1,20 @@
 #!/usr/bin/env python3
-"""SHAR-CRATES: a tshark view of a PCAP, alongside Suricata's (SURI-CRATES).
+"""tshark's part of a PCAP analysis: the protocols Suricata doesn't parse.
 
-Suricata stays the default analysis of every PCAP. Once it finishes, the
-same capture is queued here for tshark, which decodes far more protocols
-than Suricata - but packet by packet, the way Wireshark shows them. This
+Suricata stays the source of truth for every protocol it parses. Alongside
+it, the same capture is queued here for tshark, which decodes far more
+protocols - but packet by packet, the way Wireshark shows them. This
 module turns that packet stream into Suricata-shaped records, written to
-shark.db beside the analysis's events.db with the same schema, so the
-existing query functions and UI can read either one.
+shark.db (the same schema as the analysis's events.db), and once both are
+done merges into events.db what Suricata lacks (merge).
 
 It builds one 'flow' record per conversation (tshark's tcp.stream /
 udp.stream numbers, or addresses for anything without a stream), in
 Suricata's own flow-event layout - addresses, ports, packet and byte
 counts per direction, start and end - plus the protocols tshark found in
 it and its Community ID, which matches Suricata's community_id for the
-same flow and links the two views. shark_protocols adds one record per
-transaction for the protocols it describes (DNS, HTTP, TLS, Modbus...),
-in Suricata's layout for each.
+same flow. shark_protocols adds one record per transaction for the
+protocols it describes (LLMNR, NBNS, SSDP, S7comm).
 
 tshark runs once per capture with plain field output (-T fields): its
 JSON output is several times slower and many times larger for the same
@@ -25,7 +24,7 @@ at a time, under a timeout and a memory limit (config.SHARK_MAX_MEMORY_BYTES,
 across the build and its tshark). tshark's memory grows with the capture's
 packet count (about 930 bytes per packet measured), so captures over
 config.SHARK_BACKGROUND_MAX_PACKETS only run when the user asks. The
-Settings switch (enabled/set_enabled) turns SHAR-CRATES off altogether.
+Settings switch (enabled/set_enabled) turns tshark off altogether.
 
 Files in the analysis directory:
     shark.db       the records, written to shark.db.tmp then renamed, so
@@ -61,7 +60,7 @@ SHARK_ARTIFACTS = (SHARK_DB, SHARK_DB + '-wal', SHARK_DB + '-shm', SHARK_DB + '.
 # change here or in shark_protocols changes what a run produces: a
 # shark.db stamped with an older version is rebuilt the next time its
 # status is asked for, so existing analyses pick up the change.
-SHARK_FORMAT_VERSION = 7
+SHARK_FORMAT_VERSION = 8
 
 # The fields every packet is read for, one per column of tshark's
 # tab-separated output, in this order - then each of shark_protocols'
@@ -82,7 +81,12 @@ _FIELDS = (
 # Each field once: tshark fills only one column of a field asked for twice,
 # and protocols share fields (SSDP reads HTTP's) - so each protocol finds
 # its fields by name (_COLUMN), not by position.
-_PROTOCOL_FIELDS = tuple(dict.fromkeys(f for proto in PROTOCOLS for f in proto.fields if f not in _FIELDS))
+# The fields _is_reply reads to orient a flow by its first request or
+# reply - requested whether or not any protocol here keeps records of them.
+_ORIENTATION_FIELDS = ('dns.flags.response', 'nbns.flags.response', 'http.response.code', 'http.request.method',
+                       'ftp.response.code', 'ftp.request.command', 's7comm.header.rosctr', 'tls.handshake.type')
+_PROTOCOL_FIELDS = tuple(dict.fromkeys(f for f in [f for proto in PROTOCOLS for f in proto.fields] + list(_ORIENTATION_FIELDS)
+                                       if f not in _FIELDS))
 _ALL_FIELDS = _FIELDS + _PROTOCOL_FIELDS
 _COLUMN = {field: i for i, field in enumerate(_ALL_FIELDS)}
 # Joins a repeated field's values. tshark escapes control characters
@@ -823,7 +827,7 @@ def _work():
 
 
 def enqueue(dir_path, pcap_path):
-    """Queue a SHAR-CRATES run for this analysis, unless one is already
+    """Queue a tshark run for this analysis, unless one is already
     queued or running for it. Returns True if it was queued."""
     global _worker
     with _lock:
@@ -838,7 +842,7 @@ def enqueue(dir_path, pcap_path):
 
 
 def cancel(dir_path):
-    """Stop this analysis's SHAR-CRATES run (reanalyze/delete): drop it
+    """Stop this analysis's tshark run (reanalyze/delete): drop it
     from the queue, or kill its tshark if it's running."""
     with _lock:
         if dir_path in _pending:
@@ -894,7 +898,7 @@ SHARK_SETTINGS = 'shark_settings.json'
 
 
 def enabled(data_dir):
-    """Whether SHAR-CRATES runs at all - the Settings switch, kept in the
+    """Whether tshark runs at all - the Settings switch, kept in the
     data directory (on unless turned off)."""
     try:
         with open(os.path.join(data_dir, SHARK_SETTINGS)) as f:
@@ -943,7 +947,7 @@ def format_version(db_path):
 # ----------------------------------------------------------------------
 
 # Suricata 8's app-layer parsers (suricata --list-app-layer-protos), in the
-# names SHAR-CRATES' app_proto uses, plus what it logs below the app layer
+# names tshark's app_proto uses, plus what it logs below the app layer
 # (ICMP flows, ARP). static/socrates.js keeps the same list.
 SURICATA_APP_PROTOS = frozenset((
     'http', 'ftp', 'ftp-data', 'smtp', 'tls', 'ssh', 'imap', 'smb', 'dcerpc', 'dns', 'modbus', 'enip', 'dnp3', 'nfs',
@@ -1002,7 +1006,7 @@ def merge_rows(shark_rows, identified):
 
 def merge(dir_path):
     """Add tshark's rows (merge_rows) to the analysis's events.db - once
-    both Suricata (its events.db imported, no .phase left) and SHAR-CRATES
+    both Suricata (its events.db imported, no .phase left) and tshark
     (a current shark.db) are done, whichever finishes last calls this. A
     later shark.db (a retried run) replaces the rows of an earlier one.
     Returns how many rows were added, or None if it wasn't time to."""
@@ -1055,11 +1059,11 @@ def merged(dir_path):
 
 
 def status(dir_path, pcap_path=None):
-    """This analysis's SHAR-CRATES state: 'ready' (with the run's
+    """This analysis's tshark state: 'ready' (with the run's
     'seconds', for a shark.db that recorded them), 'queued', 'running'
     (with 'elapsed' seconds so far), 'error' (with 'message'), 'too_large'
     (over the background limit, not yet asked for) or 'not_started'. A shark.db built by an older
-    SHAR-CRATES (see SHARK_FORMAT_VERSION) is removed here, so the
+    tshark (see SHARK_FORMAT_VERSION) is removed here, so the
     analysis reads as not started and gets rebuilt."""
     db_path = shark_db_path(dir_path)
     if os.path.exists(db_path):

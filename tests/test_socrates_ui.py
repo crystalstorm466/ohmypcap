@@ -3591,8 +3591,6 @@ class TestThemeAndMenu(unittest.TestCase):
             '.detail-value-pivot.keyboard-selected',
             '.autocomplete-item.keyboard-selected',
             '.agg-page-btn.keyboard-selected',
-            '.view-toggle-btn.active',
-            '.view-toggle-btn:focus-visible',
         )
         fallback = 'var(--interactive-highlight, var(--accent))'
         for selector in documented_consumers:
@@ -14821,7 +14819,7 @@ class TestSearchUI(unittest.TestCase):
                       'Search button CSS must exist')
 
     def test_search_fetches_stats_with_q(self):
-        self.assertIn("'/api/stats?md5=' + encodeURIComponent(currentMd5) + viewParam() + qParam", JS_CONTENT,
+        self.assertIn("'/api/stats?md5=' + encodeURIComponent(currentMd5) + qParam", JS_CONTENT,
                       'refreshAnalysisData must fetch stats with q parameter')
 
     def test_search_fetches_events_with_q(self):
@@ -21423,42 +21421,29 @@ class TestEmailAnalysisUI(unittest.TestCase):
         self.assertEqual(result['cyberchef'], 1)
         self.assertNotIn('Source', result['pcapLabels'], 'no blank Source row for a pcap file')
 
-class TestSharkCratesUI(unittest.TestCase):
-    """The SURI-CRATES | SHAR-CRATES toggle on a PCAP analysis: which
-    database every data request reads, the toggle's states, switching, and
-    what's different about the SHAR-CRATES view."""
+class TestTsharkUI(unittest.TestCase):
+    """What tshark adds to a PCAP analysis: the tshark line and its states,
+    the cards it adds (and their dot and order), and its rows."""
 
-    def test_every_data_request_carries_the_view(self):
-        """REGRESSION GUARD: a data request without viewParam() reads
-        Suricata's events.db even in the SHAR-CRATES view - one forgotten
-        call site would mix the two views' data on one page."""
-        calls = re.findall(r"fetch\((`|')(/api/(?:events|count|stats|sankey-data|aggregation-data|aggregation-totals)\?md5=[^\n]*)", JS_CONTENT)
-        self.assertGreaterEqual(len(calls), 15)
-        for _, call in calls:
-            self.assertIn('viewParam()', call, call)
-        self.assertEqual(len(re.findall(r"fetch\(`\$\{(?:endpoint|countEndpoint)\}\?md5=\$\{encodeURIComponent\(currentMd5\)\}\$\{viewParam\(\)\}", JS_CONTENT)), 2)
-
-    def test_view_param(self):
-        from tests.jsdom_helper import js_statements
-        result = js_statements("""
-            var before = viewParam();
-            currentView = 'shark';
-            window.__jsdom_result = {before: before, shark: viewParam()};
-        """)
-        self.assertEqual(result, {'before': '', 'shark': '&view=shark'})
+    def test_no_data_request_names_a_view(self):
+        """REGRESSION GUARD: there's one view - every request reads the
+        analysis's events.db, tshark's rows included."""
+        self.assertNotIn('viewParam', JS_CONTENT)
+        self.assertNotIn('view=shark', JS_CONTENT)
+        self.assertNotIn('currentView', JS_CONTENT)
 
     def test_status_text_spells_out_each_state_with_a_link_when_it_needs_a_click(self):
         from tests.jsdom_helper import js_statements
         result = js_statements("""
-            document.getElementById('viewBarContainer').innerHTML = viewBarHtml();
+            document.getElementById('tsharkLineContainer').innerHTML = tsharkLineHtml();
             function shown(status, types) {
                 tsharkTypes = new Set(types || []);
                 sharkStatus = status;
-                updateViewToggle();
-                var el = document.getElementById('viewBarStatus');
+                updateTsharkLine();
+                var el = document.getElementById('tsharkLineStatus');
                 var link = el.querySelector('a');
                 return {text: el.textContent, link: link ? link.dataset.action : null,
-                        barHidden: el.closest('.view-bar').hidden};
+                        barHidden: el.closest('.tshark-line').hidden};
             }
             window.__jsdom_result = {
                 added: shown({status: 'ready', merged: true, seconds: 24}, ['s7comm', 'conn_rsh']),
@@ -21490,7 +21475,7 @@ class TestSharkCratesUI(unittest.TestCase):
         line offers to show them meanwhile."""
         from tests.jsdom_helper import js_statements
         result = js_statements("""
-            document.getElementById('viewBarContainer').innerHTML = viewBarHtml();
+            document.getElementById('tsharkLineContainer').innerHTML = tsharkLineHtml();
             var refreshed = 0;
             refreshAnalysisData = async function() { refreshed++; tsharkTypes = new Set(['s7comm']); };
             currentMd5 = 'a'.repeat(32);
@@ -21499,8 +21484,8 @@ class TestSharkCratesUI(unittest.TestCase):
             card.focus();
             sharkStatus = {status: 'ready', merged: true};
             refreshForTsharkRows(currentMd5);
-            var held = {refreshed: refreshed, text: document.getElementById('viewBarStatus').textContent,
-                        link: document.querySelector('#viewBarStatus a').dataset.action};
+            var held = {refreshed: refreshed, text: document.getElementById('tsharkLineStatus').textContent,
+                        link: document.querySelector('#tsharkLineStatus a').dataset.action};
             refreshForTsharkRows(currentMd5, true);
             await new Promise(r => setTimeout(r, 0));
             // (read through sharkStatusHtml: the test page's own start-up
@@ -21513,12 +21498,12 @@ class TestSharkCratesUI(unittest.TestCase):
         self.assertEqual((result['refreshed'], result['pending']), (1, False))
         self.assertEqual(result['text'], "tshark added 1 protocol Suricata doesn't parse")
 
-    def test_view_bar_sits_between_the_header_and_search_and_is_cleared_with_the_page(self):
+    def test_tshark_line_sits_between_the_header_and_search_and_is_cleared_with_the_page(self):
         html = HTML_CONTENT
-        self.assertLess(html.index('id="mainHeader"'), html.index('id="viewBarContainer"'))
-        self.assertLess(html.index('id="viewBarContainer"'), html.index('id="searchBarContainer"'))
+        self.assertLess(html.index('id="mainHeader"'), html.index('id="tsharkLineContainer"'))
+        self.assertLess(html.index('id="tsharkLineContainer"'), html.index('id="searchBarContainer"'))
         clear = JS_CONTENT[JS_CONTENT.index('function clearAnalysisContainers()'):]
-        self.assertIn("document.getElementById('viewBarContainer').innerHTML = '';", clear[:clear.index('\n        }\n')])
+        self.assertIn("document.getElementById('tsharkLineContainer').innerHTML = '';", clear[:clear.index('\n        }\n')])
 
     def test_a_status_reply_for_an_analysis_the_user_left_is_dropped(self):
         from tests.jsdom_helper import js_statements
@@ -21531,66 +21516,29 @@ class TestSharkCratesUI(unittest.TestCase):
         """)
         self.assertIsNone(result)
 
-    def test_shark_crates_flows_show_their_protocol_instead_of_suricata_state(self):
+    def test_row_notes_work_on_tshark_rows(self):
+        """tshark's rows live in events.db with Suricata's, so a note on one
+        is kept against that row like any other."""
         from tests.jsdom_helper import js_statements
         result = js_statements("""
-            var suri = getColumnsForType('flow');
-            currentView = 'shark';
-            var shark = getColumnsForType('flow');
-            var e = {id: 1, event_type: 'flow', proto: 'TCP', app_proto: 's7comm', src_ip: '10.0.0.1', dest_ip: '10.0.0.2',
-                     flow: {pkts_toserver: 2, pkts_toclient: 3, bytes_toserver: 100, bytes_toclient: 200, age: 1},
-                     shark: {protocols: {s7comm: 4, cotp: 1}}};
-            var tr = document.createElement('tbody');
-            tr.innerHTML = buildRowForEvent(e);
-            window.__jsdom_result = {
-                suri: suri, shark: shark,
-                cells: [...tr.querySelector('tr').children].map(td => td.textContent),
-                appProto: extractValue(e, 'App Proto'),
-                details: renderFlowDetails(e),
-            };
-        """)
-        self.assertIn('State', result['suri'])
-        self.assertNotIn('State', result['shark'])
-        self.assertNotIn('Alerted', result['shark'])
-        self.assertEqual(result['shark'][6], 'App Proto')
-        self.assertEqual(len(result['cells']), len(result['shark']) + 1, 'one cell per column, plus the row-note cell')
-        self.assertEqual(result['cells'][6], 's7comm')
-        self.assertEqual(result['appProto'], 's7comm')
-        self.assertIn('s7comm (4 packets), cotp (1 packet)', result['details'])
-        self.assertNotIn('Alerted', result['details'])
-
-    def test_row_notes_are_off_in_the_shark_crates_view(self):
-        """Row notes are stored against events.db's row ids - one added to
-        a SHAR-CRATES row would land on whichever Suricata row has the same
-        number."""
-        from tests.jsdom_helper import js_statements
-        result = js_statements("""
-            var suri = rowNoteDetailHtml('events', 5, '');
-            currentView = 'shark';
             var opened = false;
             showNotesModal = function() { opened = true; };
             openRowNoteEditor('events', '5', '');
-            window.__jsdom_result = {suri: suri, shark: rowNoteDetailHtml('events', 5, ''), opened: opened,
-                                     toast: (document.querySelector('.socrates-toast') || {}).textContent || ''};
+            window.__jsdom_result = {detail: rowNoteDetailHtml('events', 5, ''), opened: opened};
         """)
-        self.assertIn('Add Note', result['suri'])
-        self.assertEqual(result['shark'], '')
-        self.assertFalse(result['opened'])
-        self.assertIn('switch back', result['toast'])
+        self.assertIn('Add Note', result['detail'])
+        self.assertTrue(result['opened'])
 
-    def test_toggle_only_on_pcap_analyses_and_every_analysis_opens_on_suri_crates(self):
+    def test_tshark_line_only_on_pcap_analyses(self):
         load = JS_CONTENT[JS_CONTENT.index('async function loadAnalysis(md5)'):]
         load = load[:load.index('\n        }\n')]
-        self.assertIn("document.getElementById('viewBarContainer').innerHTML = isPcap ? viewBarHtml() : '';", load)
-        self.assertLess(load.index("currentView = 'suricata';"), load.index("fetch('/api/stats?md5="))
-        welcome = JS_CONTENT[JS_CONTENT.index('async function showWelcome()'):]
-        self.assertIn("currentView = 'suricata';", welcome[:welcome.index('\n        }\n')])
+        self.assertIn("document.getElementById('tsharkLineContainer').innerHTML = isPcap ? tsharkLineHtml() : '';", load)
 
     def test_the_pivot_menu_has_no_other_view(self):
-        """REGRESSION GUARD: there is one view now - no "View in SHAR-CRATES"."""
+        """REGRESSION GUARD: there is one view now - no "View in tshark"."""
         from tests.jsdom_helper import js_statements
         result = js_statements("""
-            document.getElementById('viewBarContainer').innerHTML = viewBarHtml();
+            document.getElementById('tsharkLineContainer').innerHTML = tsharkLineHtml();
             sharkStatus = {status: 'ready', merged: true, flows: 1, app_protos: {}};
             showPivotMenu({clientX: 1, clientY: 1}, null, 'Dest IP', '10.0.0.2', false, null, '1:abc=');
             window.__jsdom_result = [...document.querySelectorAll('.pivot-menu .pivot-menu-item')].map(b => b.textContent.trim());
@@ -21598,23 +21546,21 @@ class TestSharkCratesUI(unittest.TestCase):
         self.assertIn('Correlate', result)
         self.assertFalse([i for i in result if i.startswith('View in')])
 
-    def test_connection_tabs_label_sort_and_use_shark_flow_columns(self):
+    def test_connection_tabs_label_sort_and_use_tsharks_flow_columns(self):
         from tests.jsdom_helper import js_statements
         result = js_statements("""
-            currentView = 'shark';
             window.__jsdom_result = {
                 labels: [eventTypeLabel('conn_ftp-data'), eventTypeLabel('conn_openvpn'), eventTypeLabel('dns')],
                 order: sortEventTypes(['conn_s7comm', 'tls', 'conn_ftp', 'alert', 'dns']),
                 columns: getColumnsForType('conn_s7comm'),
                 flowColumns: getColumnsForType('flow'),
-                connOf: [connectionTypeOf({event_type: 'flow', app_proto: 's7comm'}), connectionTypeOf({event_type: 'dns', app_proto: 'dns'})],
             };
         """)
         self.assertEqual(result['labels'], ['FTP Data', 'OPENVPN', 'DNS Queries'], "a known type's label, else its name in capitals")
         self.assertEqual(result['order'], ['alert', 'dns', 'tls', 'conn_ftp', 'conn_s7comm'], 'after every record type')
-        self.assertEqual(result['columns'], result['flowColumns'])
         self.assertIn('App Proto', result['columns'])
-        self.assertEqual(result['connOf'], ['conn_s7comm', None])
+        self.assertNotIn('State', result['columns'])
+        self.assertIn('State', result['flowColumns'], "Suricata's own flows keep theirs")
 
     def test_the_dot_marks_the_types_tshark_added(self):
         """The server says which types tshark added (stats' tshark_types);
@@ -21633,21 +21579,21 @@ class TestSharkCratesUI(unittest.TestCase):
     def test_the_status_counts_seconds_while_tshark_runs_and_gives_the_total_once_ready(self):
         from tests.jsdom_helper import js_statements
         result = js_statements("""
-            document.getElementById('viewBarContainer').innerHTML = viewBarHtml();
+            document.getElementById('tsharkLineContainer').innerHTML = tsharkLineHtml();
             var realNow = Date.now(), now = realNow;
             Date.now = function() { return now; };
             sharkStatus = {status: 'running', elapsed: 12};
-            updateViewToggle();
-            var timer = document.getElementById('viewBarTimer');
-            var first = document.getElementById('viewBarStatus').textContent;
+            updateTsharkLine();
+            var timer = document.getElementById('tsharkLineTimer');
+            var first = document.getElementById('tsharkLineStatus').textContent;
             now += 3400; tickSharkClock();
             var later = timer.textContent;
             var ticking = sharkClockTimer !== null;
             tsharkTypes = new Set(['s7comm', 'nbns']);
             sharkStatus = {status: 'ready', merged: true, seconds: 48};
-            updateViewToggle();
+            updateTsharkLine();
             window.__jsdom_result = {first: first, later: later, ticking: ticking, hidden: timer.getAttribute('aria-hidden'),
-                stoppedAfter: sharkClockTimer === null, ready: document.getElementById('viewBarStatus').textContent};
+                stoppedAfter: sharkClockTimer === null, ready: document.getElementById('tsharkLineStatus').textContent};
         """)
         self.assertEqual(result['first'], 'Adding tshark protocols\u2026 12s')
         self.assertEqual(result['later'], '15s')
@@ -21661,18 +21607,18 @@ class TestSharkCratesUI(unittest.TestCase):
         tshark line's key, and readable text only for screen readers."""
         from tests.jsdom_helper import js_statements
         result = js_statements("""
-            document.getElementById('viewBarContainer').innerHTML = viewBarHtml();
+            document.getElementById('tsharkLineContainer').innerHTML = tsharkLineHtml();
             eventTypes = ['flow', 's7comm'];
             eventStats = {flow: 1, s7comm: 1};
             tsharkTypes = new Set(['s7comm']);
             buildStats(null);
             var badge = document.querySelector('.stat-badge');
-            var shown = !document.getElementById('viewBarKey').hidden;
+            var shown = !document.getElementById('tsharkLineKey').hidden;
             eventTypes = ['flow', 'dns']; eventStats = {flow: 1, dns: 1}; tsharkTypes = new Set();
             buildStats(null);
             window.__jsdom_result = {text: badge.textContent, visibleText: [...badge.childNodes].filter(n => n.nodeType === 3).length,
-                srOnly: !!badge.querySelector('.sr-only'), keyShown: shown, keyHiddenWithout: document.getElementById('viewBarKey').hidden,
-                keyText: document.getElementById('viewBarKey').textContent, title: badge.title};
+                srOnly: !!badge.querySelector('.sr-only'), keyShown: shown, keyHiddenWithout: document.getElementById('tsharkLineKey').hidden,
+                keyText: document.getElementById('tsharkLineKey').textContent, title: badge.title};
         """)
         self.assertEqual(result['text'], 'from tshark')
         self.assertTrue(result['srOnly'])
@@ -21738,11 +21684,11 @@ class TestSharkCratesUI(unittest.TestCase):
     def test_switched_off_there_is_no_tshark_line(self):
         from tests.jsdom_helper import js_statements
         result = js_statements("""
-            document.getElementById('viewBarContainer').innerHTML = viewBarHtml();
+            document.getElementById('tsharkLineContainer').innerHTML = tsharkLineHtml();
             sharkStatus = {status: 'disabled'};
-            updateViewToggle();
-            window.__jsdom_result = {tabs: document.querySelectorAll('.view-toggle-btn').length,
-                                     hidden: document.querySelector('.view-bar').hidden};
+            updateTsharkLine();
+            window.__jsdom_result = {tabs: document.querySelectorAll('[data-action="switch-view"]').length,
+                                     hidden: document.querySelector('.tshark-line').hidden};
         """)
         self.assertEqual(result, {'tabs': 0, 'hidden': True})
 
@@ -21766,12 +21712,12 @@ class TestSharkCratesUI(unittest.TestCase):
         self.assertEqual(result['posts'], [['/api/shark-settings', {'enabled': False}]])
         self.assertEqual(result['saved'], 'false')
 
-    def test_suricata_view_has_no_badges(self):
+    def test_no_dot_without_tshark_types(self):
         from tests.jsdom_helper import js_statements
         result = js_statements("""
-            currentView = 'suricata';
             eventTypes = ['flow', 'dns', 'anomaly', 'fileinfo', 'stats', 'protocol_decode'];
             eventStats = Object.fromEntries(eventTypes.map(t => [t, 1]));
+            tsharkTypes = new Set();
             buildStats(null);
             window.__jsdom_result = document.querySelectorAll('.stat-badge').length;
         """)
@@ -21793,24 +21739,24 @@ class TestSharkCratesUI(unittest.TestCase):
         self.assertEqual([t for t, _ in result], ['alert', 'dns', 'flow', 'nbns', 's7comm', 'conn_prp', 'conn_rsh', 'all'])
         self.assertEqual(dict(result)['all'], '19', 'alert, dns, flow, nbns and s7comm - not the connections')
 
-    def test_column_filters_count_connection_tabs_from_their_flows(self):
+    def test_column_filters_count_connection_rows_like_any_type(self):
         from tests.jsdom_helper import js_statements
         result = js_statements("""
-            currentView = 'shark';
             eventTypes = ['flow', 'conn_s7comm'];
             currentFilters = {'Dest Port': {include: ['102'], exclude: []}};
             allEvents = [
-                {event_type: 'flow', app_proto: 's7comm', dest_port: 102},
-                {event_type: 'flow', app_proto: 's7comm', dest_port: 102},
-                {event_type: 'flow', app_proto: 'dns', dest_port: 53},
+                {event_type: 'flow', dest_port: 102},
+                {event_type: 'conn_s7comm', app_proto: 's7comm', dest_port: 102},
+                {event_type: 'conn_s7comm', app_proto: 's7comm', dest_port: 102},
+                {event_type: 'flow', dest_port: 53},
             ];
             ensureCappedBatch = async function() {};
             eventMatchesFilters = function(e) { return e.dest_port === 102; };
             window.__jsdom_result = await computeFilteredStats();
         """)
-        self.assertEqual(result, {'flow': 2, 'conn_s7comm': 2})
+        self.assertEqual(result, {'flow': 1, 'conn_s7comm': 2})
 
-    SHAR_ONLY_RECORDS = {
+    TSHARK_RECORDS = {
         'llmnr': {'event_type': 'llmnr', 'llmnr': {'type': 'response', 'queries': [{'rrname': 'wpad', 'rrtype': 'A'}],
                                                    'answers': [{'rrname': 'wpad', 'rrtype': 'A', 'rdata': '10.1.0.70'}]}},
         'nbns': {'event_type': 'nbns', 'nbns': {'type': 'request', 'opcode': 'registration', 'name': 'DESKTOP-TEST01',
@@ -21821,19 +21767,19 @@ class TestSharkCratesUI(unittest.TestCase):
         'ssdp': {'event_type': 'ssdp', 'ssdp': {'type': 'request', 'method': 'M-SEARCH', 'search_target': 'upnp:rootdevice',
                                                 'location': 'http://10.1.0.60/d.xml', 'server': 'TestGateway/1.0'}},
     }
-    SHAR_ONLY_EXPECTED = {
+    TSHARK_EXPECTED = {
         'llmnr': ['wpad', 'A'],
         'nbns': ['registration', 'DESKTOP-TEST01', 'Server service', '10.1.0.10'],
         's7comm': ['job', 'Read Var', 'Data blocks', 'Error on supplies'],
         'ssdp': ['M-SEARCH', 'upnp:rootdevice', 'http://10.1.0.60/d.xml', 'TestGateway/1.0'],
     }
 
-    def test_shark_only_record_types_render_their_columns(self):
+    def test_tshark_record_types_render_their_columns(self):
         """LLMNR, NBNS, S7comm and SSDP: a row cell per column (plus the
         row-note cell) holding extractValue's value, and a detail panel."""
         from tests.jsdom_helper import js_statements
         result = js_statements(f"""
-            var records = {json.dumps(self.SHAR_ONLY_RECORDS)};
+            var records = {json.dumps(self.TSHARK_RECORDS)};
             var out = {{}};
             Object.keys(records).forEach(function(t) {{
                 var e = Object.assign({{id: 1, timestamp: '2026-01-01T00:00:00', proto: 'UDP', src_ip: '10.1.0.10',
@@ -21847,7 +21793,7 @@ class TestSharkCratesUI(unittest.TestCase):
             }});
             window.__jsdom_result = out;
         """)
-        for t, expected in self.SHAR_ONLY_EXPECTED.items():
+        for t, expected in self.TSHARK_EXPECTED.items():
             with self.subTest(event_type=t):
                 r = result[t]
                 self.assertEqual(r['values'], expected)
@@ -21855,27 +21801,25 @@ class TestSharkCratesUI(unittest.TestCase):
                 self.assertEqual(r['cells'][6:6 + len(expected)], expected)
                 self.assertIn(f'{r["label"]} Details', r['detail'])
 
-    def test_dns_details_show_transmissions_and_responses(self):
-        """SHAR-CRATES folds a query's resends and repeated answers into one
-        record; its details give both counts (and Suricata's records, which
-        have neither, show neither)."""
+    def test_llmnr_details_show_transmissions_and_responses(self):
+        """tshark folds an LLMNR query's resends and repeated answers into
+        one record; its details give both counts, when there are any."""
         from tests.jsdom_helper import js_statements
         result = js_statements("""
-            var base = {id: 1, timestamp: '2026-01-01T00:00:00', event_type: 'dns', proto: 'UDP',
-                        src_ip: '10.1.0.10', dest_ip: '10.1.0.53', src_port: 53012, dest_port: 53};
-            var shark = Object.assign({}, base, {dns: {type: 'response', id: 1, transmissions: 2, responses: 3,
-                                                       queries: [{rrname: 'echo.example.com', rrtype: 'A'}]}});
-            var suri = Object.assign({}, base, {dns: {type: 'response', id: 1,
-                                                      queries: [{rrname: 'echo.example.com', rrtype: 'A'}]}});
+            var base = {id: 1, timestamp: '2026-01-01T00:00:00', event_type: 'llmnr', proto: 'UDP',
+                        src_ip: '10.1.0.10', dest_ip: '224.0.0.252', src_port: 53012, dest_port: 5355};
+            var many = Object.assign({}, base, {llmnr: {type: 'response', id: 1, transmissions: 2, responses: 3,
+                                                        queries: [{rrname: 'wpad', rrtype: 'A'}]}});
+            var once = Object.assign({}, base, {llmnr: {type: 'response', id: 1, queries: [{rrname: 'wpad', rrtype: 'A'}]}});
             var text = function(e) { var d = document.createElement('div'); d.innerHTML = formatEvent(e); return d.textContent; };
-            window.__jsdom_result = {shark: text(shark), suri: text(suri)};
+            window.__jsdom_result = {many: text(many), once: text(once)};
         """)
-        self.assertIn('Transmissions2', result['shark'])
-        self.assertIn('Responses3', result['shark'])
-        self.assertNotIn('Transmissions', result['suri'])
-        self.assertNotIn('Responses', result['suri'])
+        self.assertIn('Transmissions2', result['many'])
+        self.assertIn('Responses3', result['many'])
+        self.assertNotIn('Transmissions', result['once'])
+        self.assertNotIn('Responses', result['once'])
 
-    def test_shark_only_columns_are_all_aggregatable_server_side(self):
+    def test_tshark_columns_are_all_aggregatable_server_side(self):
         """Every column past the six shared ones has a JSON path in db.py's
         AGGREGATION_JSON_PATHS - the server can't aggregate one it lacks."""
         import db
@@ -21887,8 +21831,8 @@ class TestSharkCratesUI(unittest.TestCase):
 
     def test_refresh_falls_back_to_the_first_tab_when_the_open_one_is_gone(self):
         """REGRESSION: with the open tab's type missing from the new data
-        (Network Alerts open, then switching to SHAR-CRATES, which has no
-        alerts), every section was hidden and nothing loaded."""
+        (Network Alerts open, then a search that matched no alerts), every
+        section was hidden and nothing loaded."""
         body = JS_CONTENT[JS_CONTENT.index('async function refreshAnalysisData()'):]
         body = body[:body.index('updateFilterBarVisibility();\n            // See seedVerticalNavSelectionIfStale')]
         self.assertIn("const sectionEl = activeType && activeType !== eventTypes[0]\n                    ? document.getElementById('section-' + activeType) : null;", body)

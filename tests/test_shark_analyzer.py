@@ -1,6 +1,7 @@
-"""Tests for shark_analyzer.py - SHAR-CRATES, the tshark view of a PCAP:
-grouping tshark's per-packet fields into Suricata-shaped flow records,
-the background queue, and the API that serves shark.db. Tests that need
+"""Tests for shark_analyzer.py - tshark's part of a PCAP analysis:
+grouping tshark's per-packet fields into Suricata-shaped flows and
+records, the merge into events.db, the background queue and the status
+API. Tests that need
 real tshark output skip when tshark isn't installed."""
 
 import json
@@ -21,7 +22,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 import config
 import db
 import shark_analyzer
-import shark_protocols
 import socrates as server
 import storage
 from db import init_empty_db, query_events_sqlite
@@ -235,7 +235,7 @@ class TestFieldParsing(unittest.TestCase):
         fields = [cmd[i + 1] for i, a in enumerate(cmd) if a == '-e']
         self.assertEqual(fields[:len(shark_analyzer._FIELDS)], list(shark_analyzer._FIELDS))
         self.assertIn('dns.response_to', fields)
-        self.assertIn('tls.handshake.ja4', fields)
+        self.assertIn('tls.handshake.type', fields, 'flow orientation reads it, though no records here do')
 
 
 def _load_eve(name):
@@ -245,12 +245,12 @@ def _load_eve(name):
 
 
 @unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
-class TestProtocolRecordsAgainstSuricata(unittest.TestCase):
-    """SHAR-CRATES's records for tests/protocol_fixtures.py's capture,
-    compared with what Suricata 8.0.6 logged for the same packets
-    (tests/data/protocol_fixture.eve.json - regenerate it with Suricata
-    if the fixture ever changes). Every flow, DNS, HTTP, TLS and Modbus
-    record must agree on every shared field."""
+class TestFlowsAgainstSuricata(unittest.TestCase):
+    """tests/protocol_fixtures.py's capture (DNS, HTTP, TLS, Modbus, FTP):
+    tshark's flows compared with what Suricata 8.0.6 logged for the same
+    packets (tests/data/protocol_fixture.eve.json - regenerate it with
+    Suricata if the fixture ever changes). Suricata's own records for
+    these protocols are the analysis's; tshark adds none of them."""
 
     @classmethod
     def setUpClass(cls):
@@ -266,91 +266,19 @@ class TestProtocolRecordsAgainstSuricata(unittest.TestCase):
     def tearDownClass(cls):
         shutil.rmtree(cls.tmpdir, ignore_errors=True)
 
-    def _of(self, event_type):
-        return [r for r in self.records if r['event_type'] == event_type]
-
-    def test_every_record_matches_suricata(self):
-        """Everything but FTP's two known differences (next test)."""
-        for event_type in ('dns', 'http', 'tls', 'modbus'):
-            with self.subTest(event_type=event_type):
-                self.assertEqual(self.report[event_type]['differences'], [])
-                self.assertEqual(self.report[event_type]['matched'], self.report[event_type]['suricata'])
-        self.assertEqual({t: r['matched'] for t, r in self.report.items()},
-                         {'flow': 13, 'dns': 8, 'http': 3, 'tls': 1, 'modbus': 3, 'ftp': 7, 'ftp_data': 2,
-                          'quic': 0, 'smb': 0, 'mdns': 0})
-
-    def test_ftp_differs_from_suricata_only_in_two_known_ways(self):
-        """Documented in docs/usage/exploring-results.md. (1) A multi-line
-        reply: SHAR-CRATES has every reply code but only the first line's
-        text - tshark doesn't expose the rest as fields. (2) A command
-        Suricata doesn't recognize (OPTS): it logs the reply on its own;
-        SHAR-CRATES pairs it with its command."""
-        ftp = self.report['ftp']['differences']
-        greeting = [d for d in ftp if d['key'][1] == (None, None) and 'fields' in d]
-        self.assertEqual(len(greeting), 1)
-        self.assertEqual(greeting[0]['fields'], {'reply': (['220-Welcome to the test FTP server', '220-Second greeting line', 'Ready.'],
-                                                           ['Welcome to the test FTP server'])})
-        self.assertIn('OPTS', [d['key'][1][0] for d in ftp if d.get('only') == 'shark'])
-        self.assertTrue(any(d.get('only') == 'suricata' and d['record']['completion_code'] == ['504'] for d in ftp))
-        self.assertEqual(len(ftp), 3, 'the greeting, and OPTS on each side')
-        self.assertEqual(self.report['ftp_data']['differences'], [], 'passive and active data connections both match')
+    def test_every_flow_matches_suricata(self):
         self.assertEqual(self.report['flow']['differences'], [])
+        self.assertEqual(self.report['flow']['matched'], 13)
 
-    def test_ftp_records(self):
-        ftp = [r['ftp'] for r in self._of('ftp')]
-        self.assertEqual(ftp[0], {'completion_code': ['220'], 'reply': ['Welcome to the test FTP server'], 'reply_received': 'yes'})
-        retr = next(f for f in ftp if f.get('command') == 'RETR')
-        self.assertEqual(retr['completion_code'], ['150', '226'], 'every reply to the command')
-        pasv = next(f for f in ftp if f.get('command') == 'PASV')
-        self.assertEqual((pasv['dynamic_port'], pasv['mode']), (50001, 'passive'))
-        port = next(f for f in ftp if f.get('command') == 'PORT')
-        self.assertEqual((port['dynamic_port'], port['mode']), (40965, 'active'))
-        self.assertEqual(sorted((r['ftp_data']['command'], r['ftp_data']['filename']) for r in self._of('ftp_data')),
-                         [('RETR', 'report.pdf'), ('STOR', 'upload.txt')])
-
-    def test_dns_pairs_queries_with_responses_and_keeps_the_unanswered(self):
-        by_name = {r['dns']['queries'][0]['rrname']: r for r in self._of('dns')}
-        self.assertEqual(by_name['lost.example.com']['dns']['type'], 'request')
-        self.assertNotIn('rcode', by_name['lost.example.com']['dns'])
-        self.assertEqual(by_name['missing.example.com']['dns']['rcode'], 'NXDOMAIN')
-        self.assertEqual([a['rdata'] for a in by_name['cdn.example.net']['dns']['answers']],
-                         ['edge.example.net', '198.51.100.7'])
-        self.assertEqual(by_name['txt.example.com']['dns']['answers'][0]['rdata'], 'v=spf1 a\tb\\c')
-        www = by_name['www.example.com']
-        self.assertEqual((www['src_ip'], www['src_port'], www['dest_port']), ('10.1.0.10', 53001, 53))
-        self.assertEqual(www['timestamp'], '2023-11-14T22:13:20.000000+0000', "the query's time")
-
-    def test_http_pairs_each_request_on_a_keep_alive_connection(self):
-        self.assertEqual([(r['http']['http_method'], r['http']['url'], r['http']['status']) for r in self._of('http')],
-                         [('GET', '/index.html', 200), ('GET', '/missing', 404), ('POST', '/upload', 201)])
-
-    def test_tls_session(self):
-        [tls] = self._of('tls')
-        self.assertEqual(tls['tls']['ja4'], 't13d0407h2_358020e8f41d_078775ef5e04')
-        self.assertEqual(tls['tls']['version'], 'TLS 1.3')
-
-    def test_modbus_exception_response(self):
-        third = [r for r in self._of('modbus') if r['modbus']['id'] == 3][0]['modbus']
-        self.assertEqual(third['request']['read'], {'address': 0, 'quantity': 8})
-        self.assertEqual(third['response']['function_raw'], 0x81)
-        self.assertEqual(third['response']['exception'], {'raw': 2, 'code': 'IllegalDataAddr'})
-
-    def test_records_land_in_shark_db_and_its_summary(self):
-        from db import create_shark_db, get_event_types_sqlite, get_shark_summary_sqlite
-        db_path = os.path.join(self.tmpdir, 'shark.db')
-        create_shark_db(db_path, self.records)
-        self.assertEqual(get_event_types_sqlite(db_path),
-                         {'flow': 13, 'dns': 8, 'http': 3, 'tls': 1, 'modbus': 3, 'ftp': 9, 'ftp_data': 2})
-        self.assertEqual(get_shark_summary_sqlite(db_path)['app_protos'],
-                         {'dns': 7, 'ftp-data': 2, 'ftp': 1, 'http': 1, 'modbus': 1, 'tls': 1})
-
+    def test_no_records_for_protocols_suricata_parses(self):
+        self.assertEqual({r['event_type'] for r in self.records}, {'flow'})
 
 @unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
 class TestExtraCaptureAgainstSuricata(unittest.TestCase):
-    """tests/protocol_fixtures.write_extra_pcap: the protocols only SHAR-CRATES
-    records (NBNS, LLMNR, SSDP, S7comm), and the cases real captures turned
-    up - each checked against what Suricata 8.0.6 logged for the same
-    packets (tests/data/extra_fixture.eve.json) where Suricata parses it."""
+    """tests/protocol_fixtures.write_extra_pcap: the protocols tshark adds
+    (NBNS, LLMNR, SSDP, S7comm), and the flow cases real captures turned
+    up - checked against what Suricata 8.0.6 logged for the same packets
+    (tests/data/extra_fixture.eve.json)."""
 
     @classmethod
     def setUpClass(cls):
@@ -368,17 +296,6 @@ class TestExtraCaptureAgainstSuricata(unittest.TestCase):
 
     def _of(self, event_type):
         return [r[event_type] for r in self.records if r['event_type'] == event_type]
-
-    def test_dns_http_ftp_and_mdns_match_suricata(self):
-        for event_type in ('http', 'ftp', 'mdns'):
-            with self.subTest(event_type=event_type):
-                self.assertEqual(self.report[event_type]['differences'], [])
-                self.assertEqual(self.report[event_type]['matched'], self.report[event_type]['suricata'])
-        dns = self.report['dns']
-        self.assertEqual(dns['matched'], dns['suricata'])
-        self.assertEqual([(d.get('only'), d['record']['queries']) for d in dns['differences']],
-                         [('shark', [('time.example.com', 'A')])] * 2,
-                         'the only difference: the DNS Suricata never parsed on the flow caught mid-conversation')
 
     def test_flows_match_suricata_except_for_protocols_it_cannot_name(self):
         """Every flow's counts and times match - including the one an ICMP
@@ -399,15 +316,11 @@ class TestExtraCaptureAgainstSuricata(unittest.TestCase):
 
     def test_a_flow_caught_mid_conversation_is_addressed_from_whoever_asked(self):
         """REGRESSION (4SICS GeekLounge): the capture opened on a DNS server's
-        answer, so the server was taken for the client and all 43,000 of
-        the flow's queries were addressed from the server to the asker."""
+        answer, so the server was taken for the client of the flow."""
         flow = self._flow(949)
         self.assertEqual((flow['src_ip'], flow['src_port'], flow['dest_ip'], flow['dest_port']),
                          ('10.1.0.10', 949, '10.1.0.53', 53))
         self.assertEqual((flow['flow']['pkts_toserver'], flow['flow']['pkts_toclient']), (1, 2))
-        records = [r for r in self.records if r['event_type'] == 'dns' and r['dns']['queries'][0]['rrname'] == 'time.example.com']
-        self.assertEqual([(r['src_ip'], r['dest_ip'], r['dns']['rcode']) for r in records],
-                         [('10.1.0.10', '10.1.0.53', 'REFUSED')] * 2)
 
     def test_an_answer_on_a_flow_of_its_own_is_addressed_from_the_asker(self):
         """A multicast or broadcast question's unicast answer is a flow of
@@ -429,33 +342,16 @@ class TestExtraCaptureAgainstSuricata(unittest.TestCase):
         [flow] = [r for r in self.records if r['event_type'] == 'flow' and r.get('src_port') == 53011]
         self.assertEqual((flow['flow']['pkts_toserver'], flow['flow']['pkts_toclient']), (2, 3))
 
-    def test_dns_retransmissions_and_repeated_responses_are_one_transaction(self):
-        """REGRESSION: each resent query, and each repeat of a response
-        (tshark links only the first to its query), was its own record."""
-        slow, echo = [d for d in self._of('dns') if d['queries'][0]['rrname'] in ('slow.example.com', 'echo.example.com')]
-        self.assertEqual((slow['queries'][0]['rrname'], slow['type'], slow['transmissions']), ('slow.example.com', 'response', 2))
-        self.assertEqual((echo['queries'][0]['rrname'], echo['type'], echo['responses']), ('echo.example.com', 'response', 3),
-                         'the answer sent three times: one record that says so - repeated answers can be spoofing')
-        self.assertNotIn('transmissions', echo)
-        self.assertNotIn('responses', slow)
-
-    def test_mdns_and_llmnr_are_not_dns(self):
-        """REGRESSION: tshark decodes both with its DNS dissector, so their
-        packets carry dns.* fields - they were recorded as DNS."""
-        self.assertFalse([d for d in self._of('dns') if d['queries'][0]['rrname'].endswith('.local') or d['queries'][0]['rrname'] == 'wpad'])
-        query, answer = self._of('mdns')
-        self.assertEqual(answer['answers'], [{'rrname': '_ipp._tcp.local', 'ptr': 'printer._ipp._tcp.local'}],
-                         "Suricata's mDNS answer layout")
-        self.assertEqual(query['queries'], [{'rrname': '_ipp._tcp.local', 'rrtype': 'ptr'}])
+    def test_llmnr_and_only_the_protocols_suricata_lacks(self):
+        """tshark decodes LLMNR (and mDNS) with its DNS dissector, and SSDP
+        with its HTTP one: only LLMNR, NBNS, SSDP and S7comm become records."""
+        self.assertEqual({r['event_type'] for r in self.records} - {'flow'}, {'llmnr', 'nbns', 'ssdp', 's7comm'})
         [llmnr] = self._of('llmnr')
         self.assertEqual((llmnr['type'], llmnr['answers'][0]['rdata']), ('response', '10.1.0.70'),
                          "a multicast query and its unicast answer, paired")
+        self.assertEqual(llmnr['queries'], [{'rrname': 'wpad', 'rrtype': 'A'}])
 
-    def test_ssdp_is_not_http(self):
-        """REGRESSION: SSDP's packets carry http.* fields."""
-        [http] = self._of('http')
-        self.assertEqual(http['hostname'], 'www.example.com', 'without its port, as Suricata logs it')
-        self.assertEqual(http['http_content_type'], 'text/plain', 'without its parameters')
+    def test_ssdp(self):
         search, answer, notify = self._of('ssdp')
         self.assertEqual((search['method'], search['search_target']),
                          ('M-SEARCH', 'urn:schemas-upnp-org:device:InternetGatewayDevice:1'))
@@ -479,126 +375,60 @@ class TestExtraCaptureAgainstSuricata(unittest.TestCase):
         self.assertEqual(write['response']['error_class'], 'Error on supplies')
         self.assertEqual((userdata['type'], userdata['function_group'], userdata['subfunction']), ('userdata', 'CPU functions', 1))
 
-    def test_ftp_reply_after_a_final_reply_is_its_own_record(self):
-        ftp = self._of('ftp')
-        password = next(f for f in ftp if f.get('command') == 'PASS')
-        self.assertEqual(password['completion_code'], ['530'])
-        self.assertEqual(ftp[-1], {'completion_code': ['221'], 'reply': ['Goodbye.'], 'reply_received': 'yes'})
+class _NbnsFromJson:
+    """A structured protocol for testing the structured pass, which no
+    protocol uses yet: NBNS names, read from each packet's JSON tree."""
+    app_protos = ('nbns',)
+    tshark_protocols = ('nbns',)
+    layers = ('nbns',)
+    display_filter = 'nbns'
+
+    def __init__(self):
+        self.seen = []
+
+    def feed_json(self, pkt, layers):
+        from shark_protocols import _flatten, _pdus
+        for pdu in _pdus(layers.get('nbns')):
+            self.seen.append((pkt.flow.cport, _flatten(pdu).get('nbns.name', [''])[0]))
+
+    def finish(self):
+        return []
 
 
 @unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
-class TestSmbAgainstSuricata(unittest.TestCase):
-    """tests/protocol_fixtures.write_smb_pcap - an SMB2 session (NTLM login,
-    a pipe and a file share, opens, a two-read transfer, a failed open, the
-    share's root, an IOCTL, a compound open + close, a DCERPC bind over a
-    pipe) and an SMB1 negotiate answered in SMB2 - checked against what
-    Suricata 8.0.6 logged for it (tests/data/smb_fixture.eve.json). SMB is
-    read from the structured pass (shark_analyzer._structured_pass)."""
+class TestStructuredPass(unittest.TestCase):
+    """shark_analyzer._structured_pass: a second tshark run writing JSON
+    trees, over just the flows of the protocols that need it."""
 
-    @classmethod
-    def setUpClass(cls):
-        from scripts.compare_shark_suricata import compare
-        from tests.protocol_fixtures import write_smb_pcap
-        cls.tmpdir = tempfile.mkdtemp()
-        cls.pcap = os.path.join(cls.tmpdir, 'smb.pcap')
-        write_smb_pcap(cls.pcap)
-        cls.records = shark_analyzer.run_tshark(cls.pcap)
-        cls.report = compare(_load_eve('smb_fixture.eve.json'), cls.records)
-        cls.smb = [r['smb'] for r in cls.records if r['event_type'] == 'smb']
-
-    @classmethod
-    def tearDownClass(cls):
-        shutil.rmtree(cls.tmpdir, ignore_errors=True)
-
-    def test_every_smb_record_matches_suricata(self):
-        for event_type in ('smb', 'flow'):
-            with self.subTest(event_type=event_type):
-                self.assertEqual(self.report[event_type]['differences'], [])
-                self.assertEqual(self.report[event_type]['matched'], 17 if event_type == 'smb' else 2)
-
-    def _one(self, command, **match):
-        found = [r for r in self.smb if r['command'] == command and all(r.get(k) == v for k, v in match.items())]
-        self.assertEqual(len(found), 1, (command, match, found))
-        return found[0]
-
-    def test_a_files_reads_are_one_transfer_naming_the_file_and_share(self):
-        read = self._one('SMB2_COMMAND_READ')
-        self.assertEqual((read['filename'], read['share'], read['fuid']),
-                         ('Reports\\Q3.xlsx', '\\\\FILESRV\\Finance', '00000015-0000-0000-0021-000000000000'))
-
-    def test_opens(self):
-        opened = self._one('SMB2_COMMAND_CREATE', filename='Reports\\Q3.xlsx')
-        self.assertEqual({k: opened[k] for k in ('disposition', 'access', 'created', 'modified', 'size', 'status')},
-                         {'disposition': 'FILE_OPEN', 'access': 'normal', 'created': 1700000000, 'modified': 1700000002,
-                          'size': 288, 'status': 'STATUS_SUCCESS'})
-        failed = self._one('SMB2_COMMAND_CREATE', filename='Missing.docx')
-        self.assertEqual((failed['status'], failed['status_code'], failed['created'], failed['fuid']),
-                         ('STATUS_OBJECT_NAME_NOT_FOUND', '0xc0000034', 0, ''), "as Suricata writes a failed open")
-        self.assertEqual(self._one('SMB2_COMMAND_CREATE', filename='temp.txt')['access'], 'delete on close',
-                         'the first command of a compound request')
-        self._one('SMB2_COMMAND_CREATE', filename='<share_root>')
-
-    def test_session_trees_and_carried_dialect(self):
-        login = self._one('SMB2_COMMAND_SESSION_SETUP')
-        self.assertEqual(login['ntlmssp'], {'domain': 'EXAMPLE', 'user': 'alice', 'host': 'WORKSTATION7',
-                                            'version': '10.0 build 19041 rev 15'})
-        self.assertEqual(self._one('SMB2_COMMAND_TREE_CONNECT', tree_id=1)['named_pipe'], '\\\\FILESRV\\IPC$')
-        self.assertEqual(self._one('SMB2_COMMAND_TREE_CONNECT', tree_id=2)['share_type'], 'FILE')
-        self.assertEqual(self._one('SMB2_COMMAND_IOCTL')['function'], 'FSCTL_QUERY_NETWORK_INTERFACE_INFO')
-        self.assertEqual({r['dialect'] for r in self.smb if r['command'].startswith('SMB2')}, {'3.02'},
-                         "every command carries the session's negotiated dialect")
-
-    def test_a_pipe_write_is_its_dcerpc_call_and_its_read_no_record(self):
-        self._one('SMB2_COMMAND_WRITE', tree_id=1)
-        self.assertEqual([r for r in self.smb if r['command'] == 'SMB2_COMMAND_READ' and r['tree_id'] == 1], [])
-
-    def test_smb1_negotiate_answered_in_smb2(self):
-        negotiate = self._one('SMB1_COMMAND_NEGOTIATE_PROTOCOL')
-        self.assertEqual((negotiate['dialect'], negotiate['client_dialects'], negotiate['tree_id']),
-                         ('2.??', ['NT LM 0.12', 'SMB 2.002', 'SMB 2.???'], 0))
-
-    def test_the_structured_pass_reads_only_the_smb_flows(self):
-        """editcap copies just their packets when they're a small part of
-        the capture - here, padded with a long run of DNS."""
-        from tests.protocol_fixtures import smb_packets, dns_packets
+    def test_reads_only_the_flows_that_need_it_from_a_copy_of_their_packets(self):
+        from tests.protocol_fixtures import extra_packets, dns_packets
         from tests.pcap_fixtures import write_pcap
-        padded = os.path.join(self.tmpdir, 'padded.pcap')
-        write_pcap(padded, dns_packets() * 40 + smb_packets())
-        calls = []
-        real_run = subprocess.run
+        with tempfile.TemporaryDirectory() as tmp:
+            pcap = os.path.join(tmp, 'padded.pcap')
+            write_pcap(pcap, dns_packets() * 40 + extra_packets())     # mostly DNS, then the NBNS
+            proto = _NbnsFromJson()
+            calls = []
+            real_run = subprocess.run
 
-        def spy(cmd, *args, **kwargs):
-            calls.append(cmd)
-            return real_run(cmd, *args, **kwargs)
-        with mock.patch.object(shark_analyzer.subprocess, 'run', side_effect=spy):
-            records = shark_analyzer.run_tshark(padded)
+            def spy(cmd, *args, **kwargs):
+                calls.append(cmd)
+                return real_run(cmd, *args, **kwargs)
+            with mock.patch.object(shark_analyzer, 'STRUCTURED_PROTOCOLS', (lambda: proto,)), \
+                    mock.patch.object(shark_analyzer.subprocess, 'run', side_effect=spy):
+                shark_analyzer.run_tshark(pcap)
         [editcap] = [c for c in calls if c[0] == 'editcap']
-        self.assertEqual(len([r for r in records if r['event_type'] == 'smb']), 17)
         self.assertLess(len(editcap) - 3, 5, 'a few frame ranges, not the whole capture')
+        self.assertEqual(sorted({(port, name.split('<')[0]) for port, name in proto.seen}),
+                         [(137, 'DESKTOP-TEST01'), (137, 'FILESERVER')], 'each packet matched to its first-pass flow')
 
-    def test_no_smb_no_second_pass(self):
+    def test_no_flows_that_need_it_no_second_pass(self):
         from tests.protocol_fixtures import write_protocol_pcap
-        pcap = os.path.join(self.tmpdir, 'protocols.pcap')
-        write_protocol_pcap(pcap)
-        with mock.patch.object(shark_analyzer, '_structured_command', side_effect=AssertionError('ran')):
-            shark_analyzer.run_tshark(pcap)
-
-
-class TestSmbDetails(unittest.TestCase):
-    def test_guids_in_suricatas_layout(self):
-        """Pairs seen in the corpus: tshark's text -> what Suricata wrote."""
-        from shark_protocols import _suricata_guid
-        self.assertEqual(_suricata_guid('567c8e7a-724a-4810-9230-279a5318fe06'), '567c8e7a-724a-4810-3092-9a2706fe1853')
-        self.assertEqual(_suricata_guid('00000015-0021-0000-1500-000021000000'), '00000015-0021-0000-0015-000000000021')
-        self.assertEqual(_suricata_guid('02ff882b-f205-f841-8895-78ebbdc3acdc', smb1=True),
-                         '2b88ff02-05f2-41f8-9588-eb78dcacc3bd')
-        self.assertEqual(_suricata_guid('not-a-guid'), 'not-a-guid')
-
-    def test_dialects_and_times(self):
-        from shark_protocols import _epoch, _smb2_dialect
-        self.assertEqual([_smb2_dialect(v) for v in ('0x0202', '0x0210', '0x0311', '0x02ff')], ['2.02', '2.10', '3.11', '2.??'])
-        self.assertEqual(_epoch('Feb  4, 2021 13:59:17.430926700 UTC'), 1612447157)
-        self.assertIsNone(_epoch('No time specified'))
+        with tempfile.TemporaryDirectory() as tmp:
+            pcap = os.path.join(tmp, 'protocols.pcap')
+            write_protocol_pcap(pcap)
+            with mock.patch.object(shark_analyzer, 'STRUCTURED_PROTOCOLS', (_NbnsFromJson,)), \
+                    mock.patch.object(shark_analyzer, '_structured_command', side_effect=AssertionError('ran')):
+                shark_analyzer.run_tshark(pcap)
 
     def test_frame_ranges(self):
         flows = [mock.Mock(first_frame=a, last_frame=b) for a, b in ((10, 20), (15, 30), (40, 41), (100, 200), (0, 0))]
@@ -606,13 +436,9 @@ class TestSmbDetails(unittest.TestCase):
         self.assertEqual(shark_analyzer._frame_ranges(flows, max_ranges=2), [(10, 41), (100, 200)], 'closing the smallest gap')
 
     def test_json_packets_one_at_a_time(self):
-        lines = ['[\n', '  {\n', '    "_source": {"layers": {"smb2": {"smb2.cmd": "5"}}}\n', '  },\n',
-                 '  {\n', '    "_source": {"layers": {"smb2": {"smb2.cmd": "6"}}}\n', '  }\n', ']\n']
-        self.assertEqual([p['smb2']['smb2.cmd'] for p in shark_analyzer._json_packets(lines)], ['5', '6'])
-
-    def test_smb_flows_get_records_not_a_connection_tab(self):
-        self.assertIn('smb', shark_protocols.RECORDED_APP_PROTOS)
-
+        lines = ['[\n', '  {\n', '    "_source": {"layers": {"nbns": {"nbns.id": "5"}}}\n', '  },\n',
+                 '  {\n', '    "_source": {"layers": {"nbns": {"nbns.id": "6"}}}\n', '  }\n', ']\n']
+        self.assertEqual([p['nbns']['nbns.id'] for p in shark_analyzer._json_packets(lines)], ['5', '6'])
 
 class TestFlowOrientation(unittest.TestCase):
     def _flow(self):
@@ -661,7 +487,7 @@ class TestFlowOrientation(unittest.TestCase):
                  ({'ftp__request__command': 'USER'}, False), ({'s7comm__header__rosctr': '3'}, True),
                  ({'s7comm__header__rosctr': '1'}, False), ({'s7comm__header__rosctr': '7'}, None),
                  ({'tls__handshake__type': '2'}, True), ({'tls__handshake__type': '1\x1f16'}, False),   # the first of a packet's handshakes
-                 ({'tls__handshake__type': '11'}, None), ({'mbtcp__trans_id': '1'}, None), ({}, None)]
+                 ({'tls__handshake__type': '11'}, None), ({'nbns__name': 'X'}, None), ({}, None)]
         for values, expected in cases:
             with self.subTest(values=values):
                 self.assertIs(shark_analyzer._is_reply(cols(**values)), expected)
@@ -674,125 +500,11 @@ class TestFlowOrientation(unittest.TestCase):
 
 class TestProtocolDetails(unittest.TestCase):
     def test_each_field_is_asked_of_tshark_once(self):
-        """REGRESSION: SSDP reads HTTP's fields, and tshark fills only one
-        column of a field asked for twice - HTTP's came back empty."""
+        """REGRESSION: tshark fills only one column of a field asked for
+        twice - SSDP reads http.* fields that flow orientation reads too."""
         self.assertEqual(len(shark_analyzer._ALL_FIELDS), len(set(shark_analyzer._ALL_FIELDS)))
-        from shark_protocols import HTTP, SSDP
-        self.assertTrue(set(HTTP.fields) & set(SSDP.fields), 'the case this guards')
-
-    def test_host_without_port(self):
-        from shark_protocols import _host_without_port as h
-        self.assertEqual([h(x) for x in ('a.example', 'a.example:8080', '[2001:db8::1]:80', '2001:db8::1', '10.0.0.1:81')],
-                         ['a.example', 'a.example', '2001:db8::1', '2001:db8::1', '10.0.0.1'])
-
-    def test_tls_versions_use_suricatas_names(self):
-        from shark_protocols import _tls_version
-        self.assertEqual([_tls_version(v) for v in ('0x0300', '0x0301', '0x0303', '0x0304')],
-                         ['SSLv3', 'TLSv1', 'TLS 1.2', 'TLS 1.3'])
-
-    def _fields(self, cls, **values):
-        return {f: values.get(f.replace('.', '_'), []) for f in cls.fields}
-
-    def test_quic_handshakes_are_quic_records(self):
-        """REGRESSION: QUIC's TLS handshake was recorded as TLS."""
-        from shark_protocols import TLS, Packet
-        tls = TLS()
-        flow = mock.Mock(key=('udp', 1))
-        tls.feed(Packet(1, 1.0, flow, 50000, 443, 'quic'), self._fields(
-            TLS, quic_version=['0x00000001'], tls_handshake_type=['1'], tls_handshake_extensions_server_name=['q.example'],
-            tls_handshake_ja4=['q13d0311h3_55b375c5d22e_f2a83c8e78ae']))
-        flow2 = mock.Mock(key=('udp', 2))
-        tls.feed(Packet(2, 2.0, flow2, 50001, 443, 'quic'), self._fields(TLS, quic_version=['0x6b3343cf']))
-        (_, _, kind, body), (_, _, _, other) = tls.finish()
-        self.assertEqual((kind, body['version'], body['sni']), ('quic', '1', 'q.example'))
-        self.assertEqual(other['version'], '6b3343cf', 'any other version in hex, as Suricata writes it')
-
-    def test_modbus_function_with_no_data_access(self):
-        from shark_protocols import Modbus, Packet
-        m = Modbus()
-        m.feed(Packet(1, 1.0, mock.Mock(key=('tcp', 1)), 40000, 502), self._fields(
-            Modbus, mbtcp_trans_id=['1'], mbtcp_prot_id=['0'], mbtcp_unit_id=['1'], modbus_func_code=['43']))
-        [(_, _, _, body)] = m.finish()
-        self.assertEqual((body['request']['function_code'], body['request']['access_type']), ('MEI', 'NONE'))
-
-    def test_empty_mdns_message_is_skipped(self):
-        from shark_protocols import DNS, Packet
-        d = DNS()
-        d.feed(Packet(1, 1.0, mock.Mock(key=('udp', 1)), 5353, 5353, 'mdns'), self._fields(DNS, dns_id=['0x0000']))
-        self.assertEqual(d.finish(), [])
-
-
-@unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
-class TestConnectionTypes(unittest.TestCase):
-    """conn_<app proto>: a tab per protocol with no records of its own, as
-    a view on the flow rows (db.CONNECTION_TYPE_PREFIX). In
-    tests/pcap_fixtures.write_http_pcap's capture, the Telnet session gets
-    one; the three HTTP flows don't - HTTP has records."""
-
-    @classmethod
-    def setUpClass(cls):
-        from tests.pcap_fixtures import write_http_pcap
-        cls.dir = tempfile.mkdtemp()
-        pcap = os.path.join(cls.dir, 'http.pcap')
-        write_http_pcap(pcap)
-        shark_analyzer.analyze(cls.dir, pcap)
-        cls.db = shark_analyzer.shark_db_path(cls.dir)
-
-    @classmethod
-    def tearDownClass(cls):
-        shutil.rmtree(cls.dir, ignore_errors=True)
-
-    def test_counts_one_type_per_unrecorded_protocol(self):
-        import db
-        from shark_protocols import RECORDED_APP_PROTOS
-        self.assertIn('http', RECORDED_APP_PROTOS)
-        self.assertIn('ftp-data', RECORDED_APP_PROTOS, 'FTP records cover its data connections too')
-        self.assertEqual(db.get_connection_type_counts_sqlite(self.db, None, RECORDED_APP_PROTOS), {'conn_telnet': 1})
-        self.assertEqual(db.get_connection_type_counts_sqlite(self.db, ['10.0.0.1'], RECORDED_APP_PROTOS), {},
-                         'a search narrows them like any count')
-
-    def test_every_query_reads_a_connection_type_as_its_flows(self):
-        import db
-        [flow] = db.query_events_sqlite(self.db, 'conn_telnet')
-        self.assertEqual((flow['event_type'], flow['app_proto'], flow['dest_port']), ('flow', 'telnet', 23))
-        self.assertEqual(db.get_event_count_sqlite(self.db, 'conn_telnet'), 1)
-        agg = db.get_aggregation_data_sqlite(self.db, 'conn_telnet')
-        self.assertEqual(agg['App Proto'], [{'value': 'telnet', 'count': 1}], "flow's columns")
-        self.assertEqual(db.get_aggregation_totals_sqlite(self.db, 'conn_telnet')['Dest Port'], 1)
-        self.assertEqual(len(db.query_events_sqlite(self.db, 'conn_telnet', order_by='Bytes →', sort_dir='desc')), 1)
-        self.assertTrue(db.get_sankey_data_sqlite(self.db, 'conn_telnet')['links'])
-        self.assertEqual(db.query_events_sqlite(self.db, 'conn_nope'), [])
-
-    def test_connection_types_are_never_cached(self):
-        """Their names are whatever the client sends."""
-        from analysis_cache import cacheable_aggregation_key
-        self.assertFalse(cacheable_aggregation_key('conn_telnet'))
-        self.assertFalse(cacheable_aggregation_key('conn_telnet', 'Dest Port'))
-
-
-@unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
-class TestKnownDifferencesFromSuricata(unittest.TestCase):
-    """tests/pcap_fixtures.write_http_pcap's IPv6, VLAN and retransmission
-    flows all match Suricata's (tests/data/http_fixture.eve.json). The one
-    expected difference: Suricata counts a response body's bytes itself
-    when there's no Content-Length header; SHAR-CRATES reports the header
-    (counting the body would mean tshark printing every body in full)."""
-
-    def test_only_body_length_without_a_content_length_header_differs(self):
-        from scripts.compare_shark_suricata import compare
-        from tests.pcap_fixtures import write_http_pcap
-        tmpdir = tempfile.mkdtemp()
-        try:
-            pcap = os.path.join(tmpdir, 'http.pcap')
-            write_http_pcap(pcap)
-            report = compare(_load_eve('http_fixture.eve.json'), shark_analyzer.run_tshark(pcap))
-        finally:
-            shutil.rmtree(tmpdir, ignore_errors=True)
-        self.assertEqual(report['flow']['differences'], [])
-        self.assertEqual(report['flow']['matched'], 4, 'IPv6, VLAN and retransmitted flows included')
-        self.assertEqual(len(report['http']['differences']), 3)
-        for d in report['http']['differences']:
-            self.assertEqual(d['fields'], {'length': (519, None)})
+        from shark_protocols import SSDP
+        self.assertTrue(set(SSDP.fields) & set(shark_analyzer._ORIENTATION_FIELDS), 'the case this guards')
 
 
 @unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
@@ -818,7 +530,7 @@ class TestAnalyze(unittest.TestCase):
 
     def test_shark_db_is_stamped_and_an_older_format_is_rebuilt(self):
         """REGRESSION: shark.db existing meant 'ready' forever, so an
-        analysis built before a SHAR-CRATES change never got it - its
+        analysis built before a tshark change never got it - its
         flows-only shark.db hid the protocol records added since."""
         import sqlite3
         shark_analyzer.analyze(self.dir, self.pcap)
@@ -1203,52 +915,17 @@ class TestSharkAPI(unittest.TestCase):
             if body['status'] not in ('queued', 'running'):
                 return body
             time.sleep(0.1)
-        self.fail('SHAR-CRATES never finished')
+        self.fail('tshark never finished')
 
-    def test_first_status_request_queues_it_and_it_becomes_ready_with_a_summary(self):
+    def test_first_status_request_queues_it_and_it_becomes_ready_and_merged(self):
         status, body = self._get(f'/api/shark-status?md5={self.md5}')
         self.assertEqual(status, 200)
         self.assertIn(body['status'], ('queued', 'running', 'ready'))
         body = self._wait_ready()
         self.assertIsInstance(body.pop('seconds'), int)
-        self.assertEqual(body, {'status': 'ready', 'flows': 3, 'app_protos': {'ftp': 1, 'ftp-data': 1, 'http': 1},
-                                'merged': True})
+        self.assertEqual(body, {'status': 'ready', 'merged': True})
         _, stats = self._get(f'/api/stats?md5={self.md5}')
         self.assertEqual(stats['tshark_types'], [], 'nothing here Suricata lacks - but the stats say so')
-
-    def test_view_shark_reads_shark_db_and_the_default_reads_events_db(self):
-        self._get(f'/api/shark-status?md5={self.md5}')
-        self._wait_ready()
-        _, flows = self._get(f'/api/events?md5={self.md5}&view=shark&type=flow')
-        self.assertEqual(len(flows), 3)
-        _, stats = self._get(f'/api/stats?md5={self.md5}&view=shark')
-        self.assertEqual(stats['counts'], {'flow': 3, 'http': 1, 'ftp': 7, 'ftp_data': 1})
-        _, count = self._get(f'/api/count?md5={self.md5}&view=shark&type=flow')
-        self.assertEqual(count, {'count': 3})
-        _, suricata = self._get(f'/api/events?md5={self.md5}&type=flow')
-        self.assertEqual(suricata, [], 'without view=shark, events.db (empty here) is read')
-        status, _ = self._get(f'/api/events?md5={self.md5}&view=wireshark')
-        self.assertEqual(status, 400)
-
-    def test_shark_stats_add_a_tab_per_unrecorded_protocol(self):
-        from tests.pcap_fixtures import write_http_pcap
-        write_http_pcap(os.path.join(self.dir, 'sample.pcap'))   # its Telnet session has no records
-        self._get(f'/api/shark-status?md5={self.md5}')
-        self._wait_ready()
-        _, shark = self._get(f'/api/stats?md5={self.md5}&view=shark')
-        self.assertEqual(shark['counts'], {'flow': 4, 'http': 3, 'conn_telnet': 1})
-        _, suricata = self._get(f'/api/stats?md5={self.md5}')
-        self.assertEqual(suricata['counts'], {}, 'SURI-CRATES never gets them')
-
-    def test_view_shark_aggregation_cache_is_kept_apart_from_suricatas(self):
-        self._get(f'/api/shark-status?md5={self.md5}')
-        self._wait_ready()
-        _, shark = self._get(f'/api/aggregation-totals?md5={self.md5}&view=shark&type=flow')
-        _, suricata = self._get(f'/api/aggregation-totals?md5={self.md5}&type=flow')
-        self.assertNotEqual(shark, suricata)
-        self.assertIn((self.md5, 'shark', 'flow'), server.AGGREGATION_TOTALS_CACHE)
-        server.evict_analysis_cache(self.md5)
-        self.assertNotIn((self.md5, 'shark', 'flow'), server.AGGREGATION_TOTALS_CACHE)
 
     def test_waits_for_suricata(self):
         with open(os.path.join(self.dir, '.phase'), 'w') as f:

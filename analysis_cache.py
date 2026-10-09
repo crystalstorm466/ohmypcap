@@ -41,9 +41,9 @@ def cache_put(cache, key, value):
 def cacheable_aggregation_key(event_type, column=None):
     """Only cache keys built from recognized event types/columns - arbitrary
     client strings must not become permanent cache entries (memory DoS)."""
-    # A SHAR-CRATES connection type (conn_<protocol>) isn't in
+    # A tshark connection type (conn_<protocol>) isn't in
     # AGGREGATION_JSON_PATHS, so it's never cached - its name is whatever
-    # the client sends.
+    # the client sends (merge() evicts this analysis's caches anyway).
     if event_type is not None and event_type not in AGGREGATION_JSON_PATHS:
         return False
     if column is None:

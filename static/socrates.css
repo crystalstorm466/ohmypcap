@@ -1303,23 +1303,15 @@
         .app-header-filename-input:focus { outline: none; border-color: var(--interactive-highlight, var(--accent)); }
         .app-header-right { display: flex; align-items: center; gap: 15px; flex-wrap: wrap; justify-content: flex-end; }
         .app-header-meta { display: flex; align-items: center; gap: 15px; margin-left: 15px; }
-        /* View bar (PCAP analyses): SURI-CRATES and SHAR-CRATES as two tabs between the header and the search box, SHAR-CRATES' status beside them */
-        .view-bar { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; border-bottom: 1px solid var(--border-color); margin-bottom: 15px; }
-        .view-toggle { display: inline-flex; flex-shrink: 0; }
-        .view-toggle-btn { background: none; border: none; border-bottom: 2px solid transparent; margin-bottom: -1px; color: var(--text-muted); padding: 8px 14px; font-size: 0.8rem; font-weight: 600; letter-spacing: 1px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; font-family: inherit; }
-        .view-toggle-btn:hover { color: var(--text-primary); }
-        .view-toggle-btn.active { color: var(--text-primary); border-bottom-color: var(--interactive-highlight, var(--accent)); }
-        .view-toggle-btn:focus-visible { outline: 2px solid var(--interactive-highlight, var(--accent)); outline-offset: -2px; }
-        .view-bar-status { color: var(--text-muted); font-size: 0.8rem; padding: 8px 0; }
-        .view-bar-status a { color: var(--accent); font-weight: 600; }
-        .view-bar-timer { font-variant-numeric: tabular-nums; }
-        .view-bar-key { color: var(--text-muted); font-size: 0.8rem; padding: 8px 0; margin-left: auto; white-space: nowrap; }
-        .view-bar-key[hidden] { display: none; }
-        .view-bar-key .stat-badge-dot { margin-right: 6px; vertical-align: 1px; }
-        /* SHAR-CRATES' state on its tab: a spinning ring while tshark works, a dot when it needs a click (too large to run unasked, or failed) */
-        .view-toggle-status { display: none; width: 8px; height: 8px; border-radius: 50%; box-sizing: border-box; }
-        .view-toggle-busy .view-toggle-status { display: inline-block; border: 2px solid var(--text-muted); border-top-color: transparent; animation: spin 1s linear infinite; }
-        .view-toggle-attention .view-toggle-status { display: inline-block; background: var(--accent); }
+        /* The tshark line (PCAP analyses), between the header and the search box: what tshark is adding, and the key to the cards' tshark dot */
+        .tshark-line { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; border-bottom: 1px solid var(--border-color); margin-bottom: 15px; }
+        .tshark-line[hidden] { display: none; }
+        .tshark-line-status { color: var(--text-muted); font-size: 0.8rem; padding: 8px 0; }
+        .tshark-line-status a { color: var(--accent); font-weight: 600; }
+        .tshark-line-timer { font-variant-numeric: tabular-nums; }
+        .tshark-line-key { color: var(--text-muted); font-size: 0.8rem; padding: 8px 0; margin-left: auto; white-space: nowrap; }
+        .tshark-line-key[hidden] { display: none; }
+        .tshark-line-key .stat-badge-dot { margin-right: 6px; vertical-align: 1px; }
         /* Centers in the full header bar (.app-header is position: fixed,
            so it's the containing block here), independent of how wide the
            left-side icon/filename group happens to be - same reasoning as
@@ -1414,8 +1406,8 @@
         /* Never breaks inside a word - a word too long for its card is
            scaled down to fit instead (socrates.js fitStatLabels) */
         .stat-label { color: var(--text-muted); font-size: 0.85rem; text-transform: uppercase; letter-spacing: 1px; word-break: keep-all; overflow-wrap: normal; line-height: 1.2; }
-        /* SHAR-CRATES: a tab for a protocol Suricata doesn't parse - a dot in
-           the card's corner (the view bar's .view-bar-key says what it
+        /* tshark: a tab for a protocol Suricata doesn't parse - a dot in
+           the card's corner (the tshark line's .tshark-line-key says what it
            means), so the card keeps its two lines */
         .stat-badge, .stat-badge-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
         .stat-badge { position: absolute; top: 10px; right: 10px; }

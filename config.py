@@ -38,7 +38,7 @@ SURICATA_UPDATE_TIMEOUT = 60
 SURICATA_SOURCE_RECONCILE_TIMEOUT = 30      # per enable-source/disable-source subprocess call
 SURICATA_RUN_TIMEOUT = 300                 # 5 minutes max for a single PCAP
 SIGMA_RUN_TIMEOUT = 300                    # 5 minutes max for Zircolite log analysis
-SHARK_RUN_TIMEOUT = 1800                   # 30 minutes max for one SHAR-CRATES (tshark) run - it runs in the background at low priority, after Suricata
+SHARK_RUN_TIMEOUT = 1800                   # 30 minutes max for one tshark run - it runs in the background at low priority, after Suricata
 
 # Sigma / Zircolite
 ZIRCOLITE_VERSION = '3.7.1'
@@ -100,7 +100,7 @@ MAX_EMAIL_MESSAGES = 50                    # forwarded messages parsed per uploa
 MAX_EMAIL_SIZE = 100 * 1024 * 1024         # bigger .eml files are analyzed as plain files - parsing holds the message and its decoded attachments in memory
 MAX_EMAIL_BODY_CHARS = 65536               # characters of body text kept in the email event
 
-# SHAR-CRATES (shark_analyzer.py) - tshark's memory grows with a capture's
+# tshark (shark_analyzer.py) - tshark's memory grows with a capture's
 # packet count, not its size (~930 bytes per packet measured: 2.1 GB for
 # the 2.27 million packets of a 209 MB capture). A run whose processes
 # together pass SHARK_MAX_MEMORY_BYTES is stopped, and only captures up to

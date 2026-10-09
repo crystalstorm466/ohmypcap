@@ -25,7 +25,7 @@ from db import (
     query_sigma_alerts_sqlite, get_sigma_stats_sqlite,
     get_sigma_alert_count_sqlite, get_event_date_range_sqlite,
     get_sankey_data_sqlite, get_aggregation_data_sqlite, get_aggregation_totals_sqlite,
-    get_shark_summary_sqlite, get_connection_type_counts_sqlite, tshark_types,
+    tshark_types,
     AGGREGATION_TOP_N, AGGREGATION_PAGE_SIZE_OPTIONS,
     set_row_note, has_row_notes,
     set_acknowledged, set_acknowledged_bulk,
@@ -66,7 +66,6 @@ from ohmydebn_colors import (
 )
 from email_analyzer import analyze_message, remove_filestore
 import shark_analyzer
-from shark_protocols import RECORDED_APP_PROTOS
 from playbook_lookup import get_playbook
 from samples import SAMPLES
 from ai_summary_lookup import get_ai_summary
@@ -479,25 +478,6 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return None, 'Invalid path'
         return dir_path, None
 
-    def _view_db_file(self, dir_path, params):
-        """The database a read-only data request reads: events.db
-        (SURI-CRATES, the default) or, with view=shark, the SHAR-CRATES
-        shark.db - same schema, so every query function serves either.
-        Returns (db_file, error_message)."""
-        view = params.get('view', [''])[0]
-        if view in ('', 'suricata'):
-            return os.path.join(dir_path, 'events.db'), None
-        if view == 'shark':
-            return shark_analyzer.shark_db_path(dir_path), None
-        return None, 'Invalid view'
-
-    def _view_cache_key(self, params, md5, *rest):
-        """An analysis-cache key that keeps the two views apart. md5 stays
-        first either way, so evict_analysis_cache(md5) clears both."""
-        if params.get('view', [''])[0] == 'shark':
-            return (md5, 'shark') + rest
-        return (md5,) + rest
-
     def _resolve_existing_analysis_dir(self, md5):
         """Like _resolve_md5_dir, but also requires the directory to
         actually exist on disk - the "resolve this md5 to an existing
@@ -845,10 +825,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         # other tab relies on.
         acknowledged_only = params.get('acknowledged', [''])[0] == 'only'
 
-        db_file, view_error = self._view_db_file(dir_path, params)
-        if view_error:
-            self._send_error(400, view_error)
-            return
+        db_file = os.path.join(dir_path, 'events.db')
         if os.path.exists(db_file):
             try:
                 json_str, _ids = query_events_sqlite_json(db_file, event_type, offset, limit, q, order_by, sort_dir, acknowledged_only)
@@ -864,10 +841,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if error:
             self._send_error(400, error)
             return
-        db_file, view_error = self._view_db_file(dir_path, params)
-        if view_error:
-            self._send_error(400, view_error)
-            return
+        db_file = os.path.join(dir_path, 'events.db')
         q = self._parse_search_terms(params)
 
         counts = {}
@@ -875,12 +849,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if os.path.exists(db_file):
             try:
                 counts = get_event_types_sqlite(db_file, q)
-                if params.get('view', [''])[0] == 'shark':
-                    # A tab per protocol that has no records of its own -
-                    # see db.CONNECTION_TYPE_PREFIX.
-                    counts.update(get_connection_type_counts_sqlite(db_file, q, RECORDED_APP_PROTOS))
                 date_range = get_event_date_range_sqlite(db_file, q)
-                tshark = tshark_types(db_file) if params.get('view', [''])[0] != 'shark' else []
+                tshark = tshark_types(db_file)
             except Exception:
                 self._send_error(500, 'Database error')
                 return
@@ -900,10 +870,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         q = self._parse_search_terms(params)
         acknowledged_only = params.get('acknowledged', [''])[0] == 'only'
 
-        db_file, view_error = self._view_db_file(dir_path, params)
-        if view_error:
-            self._send_error(400, view_error)
-            return
+        db_file = os.path.join(dir_path, 'events.db')
 
         if os.path.exists(db_file):
             try:
@@ -924,17 +891,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         event_type = params.get('type', [''])[0] or None
         q = self._parse_search_terms(params)
 
-        db_file, view_error = self._view_db_file(dir_path, params)
-        if view_error:
-            self._send_error(400, view_error)
-            return
+        db_file = os.path.join(dir_path, 'events.db')
 
         if not os.path.exists(db_file):
             self._send_json({'nodes': [], 'links': []})
             return
         try:
             if q is None and cacheable_aggregation_key(event_type):
-                cache_key = self._view_cache_key(params, md5, event_type)
+                cache_key = (md5, event_type)
                 with CACHE_LOCK:
                     cached = SANKEY_CACHE.get(cache_key)
                 if cached is not None:
@@ -981,16 +945,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             page_size = AGGREGATION_TOP_N
         offset = (page - 1) * page_size
 
-        db_file, view_error = self._view_db_file(dir_path, params)
-        if view_error:
-            self._send_error(400, view_error)
-            return
+        db_file = os.path.join(dir_path, 'events.db')
         if not os.path.exists(db_file):
             self._send_json({})
             return
         try:
             if q is None and cacheable_aggregation_key(event_type, column):
-                cache_key = self._view_cache_key(params, md5, event_type, column, page, page_size)
+                cache_key = (md5, event_type, column, page, page_size)
                 with CACHE_LOCK:
                     cached = AGGREGATION_CACHE.get(cache_key)
                 if cached is not None:
@@ -1020,16 +981,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         event_type = params.get('type', [''])[0] or None
         q = self._parse_search_terms(params)
 
-        db_file, view_error = self._view_db_file(dir_path, params)
-        if view_error:
-            self._send_error(400, view_error)
-            return
+        db_file = os.path.join(dir_path, 'events.db')
         if not os.path.exists(db_file):
             self._send_json({})
             return
         try:
             if q is None and cacheable_aggregation_key(event_type):
-                cache_key = self._view_cache_key(params, md5, event_type)
+                cache_key = (md5, event_type)
                 with CACHE_LOCK:
                     cached = AGGREGATION_TOTALS_CACHE.get(cache_key)
                 if cached is not None:
@@ -2620,16 +2578,17 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self._send_json(response)
 
     def _shark_status(self, dir_path, start=False):
-        """SHAR-CRATES status for a PCAP analysis (see
-        shark_analyzer.status), with the flow summary once it's ready.
+        """Where tshark stands for a PCAP analysis (see shark_analyzer.status),
+        with 'merged' once it's ready: whether its rows have joined
+        Suricata's in events.db (if not, the merge is started).
 
         A capture small enough for the background that has never been
-        queued - analyzed before SHAR-CRATES existed, or whose queued run
-        was lost to a server restart - is queued here, on the first status
-        request. start=True (the user asked) queues it whatever its size.
-        'waiting' means Suricata hasn't finished; 'unavailable' that this
-        isn't a PCAP analysis; 'disabled' that SHAR-CRATES is switched off
-        in Settings."""
+        queued - analyzed before tshark ran alongside Suricata, or whose
+        queued run was lost to a server restart - is queued here, on the
+        first status request. start=True (the user asked) queues it
+        whatever its size. 'waiting' means Suricata hasn't finished;
+        'unavailable' that this isn't a PCAP analysis; 'disabled' that
+        tshark is switched off in Settings."""
         pcap_file = find_pcap_file(dir_path)
         if not pcap_file:
             return {'status': 'unavailable'}
@@ -2645,10 +2604,6 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             shark_analyzer.enqueue(dir_path, pcap_path)
             status = shark_analyzer.status(dir_path, pcap_path)
         if status['status'] == 'ready':
-            try:
-                status.update(get_shark_summary_sqlite(shark_analyzer.shark_db_path(dir_path)))
-            except Exception:
-                return {'status': 'error', 'message': 'Database error'}
             status['merged'] = shark_analyzer.merged(dir_path)
             if not status['merged']:
                 # Built before tshark's rows joined Suricata's in events.db
@@ -2667,9 +2622,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self._send_json({'enabled': shark_analyzer.enabled(DATA_DIR)})
 
     def handle_post_shark_settings(self):
-        """Turn SHAR-CRATES on or off for every analysis. Off stops new runs
-        (a running one finishes) and hides SHAR-CRATES; existing shark.db
-        files stay, so turning it back on shows them again."""
+        """Turn tshark on or off for every analysis. Off stops new runs (a
+        running one finishes); analyses keep the protocols already added."""
         data = self._read_json_body(config.MAX_REQUEST_BODY_SIZE)
         if data is None:
             return
@@ -2684,8 +2638,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self._send_json({'enabled': data['enabled']})
 
     def handle_post_shark_start(self):
-        """Build SHAR-CRATES for an analysis on request - for a capture over
-        the background size limit, or to retry after an error."""
+        """Run tshark for an analysis on request - for a capture over the
+        background packet limit, or to retry after an error."""
         data = self._read_json_body(config.MAX_REQUEST_BODY_SIZE)
         if data is None:
             return

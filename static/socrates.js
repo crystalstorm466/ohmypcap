@@ -77,19 +77,15 @@
             return days !== null ? days * 24 : serverHours;
         }
 
-        // SHAR-CRATES connection types (see db.py's CONNECTION_TYPE_PREFIX):
-        // 'conn_<app proto>' is the flows tshark found carrying a protocol
-        // that has no records of its own - a tab per protocol, with flow's
-        // columns, whose rows are flow events.
+        // tshark's connection types (see db.py's CONNECTION_TYPE_PREFIX):
+        // 'conn_<app proto>' rows are the connections tshark found carrying
+        // a protocol neither Suricata nor shark_protocols has records for -
+        // a tab per protocol, with tshark's flow columns.
         const CONNECTION_TYPE_PREFIX = 'conn_';
         // A tshark flow's columns: no State or Alerted (Suricata's own flow
         // tracking and detection) - its protocol is the point.
         const TSHARK_FLOW_COLUMNS = ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'App Proto', 'Pkts →', 'Pkts ←', 'Bytes →', 'Bytes ←'];
         function isConnectionType(type) { return typeof type === 'string' && type.startsWith(CONNECTION_TYPE_PREFIX); }
-        // The connection type a SHAR-CRATES flow row is counted under.
-        function connectionTypeOf(e) {
-            return currentView === 'shark' && e.event_type === 'flow' && e.app_proto ? CONNECTION_TYPE_PREFIX + e.app_proto : null;
-        }
         function eventTypeLabel(type) {
             if (isConnectionType(type)) {
                 const proto = type.slice(CONNECTION_TYPE_PREFIX.length);
@@ -145,7 +141,7 @@
             // affecting the pcap-mode ordering above.
             // email/link only occur in email mode, where the message
             // itself leads, then its links.
-            // SHAR-CRATES' connection tabs follow every record type.
+            // tshark's connection tabs follow every record type.
             const order = { email: -2, link: -1, alert: 0, filealerts: 1, protocol_decode: 2, anomaly: 3, sigmaalert: 4, log: 5 };
             return [...types].sort((a, b) => {
                 const ai = order[a] ?? (isConnectionType(a) ? 100 : 99);
@@ -2147,7 +2143,7 @@
                 anomaly: '#ff9800',
                 dns: '#66bb6a',
                 dnp3: '#26c6da',
-                // SHAR-CRATES-only types
+                // Records tshark adds (protocols Suricata doesn't parse)
                 llmnr: '#9ccc65',
                 nbns: '#8d6e63',
                 s7comm: '#00897b',
@@ -3708,14 +3704,10 @@
             if (e.dns?.answers) {
                 html += htmlRowText('Answers', e.dns.answers.map(a => a.rdata).join(', '), 'mono');
             }
-            // SHAR-CRATES folds a query's resends and repeated answers into
-            // one record and counts them (shark_protocols.DNS).
-            if (e.dns?.transmissions) html += htmlRowText('Transmissions', e.dns.transmissions);
-            if (e.dns?.responses) html += htmlRowText('Responses', e.dns.responses);
             return html;
         }
 
-        // SHAR-CRATES' LLMNR records (shark_protocols.DNS): DNS's own message
+        // tshark's LLMNR records (shark_protocols.LLMNR): DNS's own message
         // format, so DNS's layout, under e.llmnr.
         function renderLlmnrDetails(e) {
             let html = htmlSection('LLMNR Details', COLORS.EVENT.llmnr);
@@ -3731,7 +3723,7 @@
             return html;
         }
 
-        // SHAR-CRATES' NBNS records (shark_protocols.NBNS).
+        // tshark's NBNS records (shark_protocols.NBNS).
         function renderNbnsDetails(e) {
             const n = e.nbns || {};
             let html = htmlSection('NBNS Details', COLORS.EVENT.nbns);
@@ -3747,7 +3739,7 @@
             return html;
         }
 
-        // SHAR-CRATES' S7comm records (shark_protocols.S7comm): a job and its
+        // tshark's S7comm records (shark_protocols.S7comm): a job and its
         // acknowledgement, or a userdata message.
         function renderS7commDetails(e) {
             const s7 = e.s7comm || {};
@@ -3768,7 +3760,7 @@
             return html;
         }
 
-        // SHAR-CRATES' SSDP records (shark_protocols.SSDP).
+        // tshark's SSDP records (shark_protocols.SSDP).
         function renderSsdpDetails(e) {
             const sp = e.ssdp || {};
             let html = htmlSection('SSDP Details', COLORS.EVENT.ssdp);
@@ -3826,7 +3818,7 @@
             return html;
         }
 
-        // A SHAR-CRATES flow (shark_analyzer.py): no Suricata state or
+        // A tshark flow (shark_analyzer.py): no Suricata state or
         // alerts, but every protocol tshark found in the flow, with how many
         // packets carried each.
         function renderSharkFlowDetails(e) {
@@ -4223,7 +4215,7 @@
             document.getElementById('sections').innerHTML = '';
             document.getElementById('filterBarContainer').innerHTML = '';
             document.getElementById('filterBarContainer').style.display = 'none';
-            document.getElementById('viewBarContainer').innerHTML = '';
+            document.getElementById('tsharkLineContainer').innerHTML = '';
             document.querySelectorAll('.file-info-card').forEach(c => c.remove());
             const fileInfoContainer = document.getElementById('fileInfoContainer');
             if (fileInfoContainer) {
@@ -4370,7 +4362,7 @@
                 uploadInput.max = maxUploadMB;
                 uploadHint.textContent = `Default: ${CONFIG.DEFAULT_UPLOAD_SIZE_MB.toLocaleString()} MB. Server maximum: ${maxUploadMB.toLocaleString()} MB.`;
             }).catch(() => {});
-            // SHAR-CRATES' switch is the server's, not this browser's: shown
+            // The tshark switch is the server's, not this browser's: shown
             // as the server has it, and only saved if it changes.
             const sharkInput = document.getElementById('sharkEnabledInput');
             document.getElementById('sharkSettingError').style.display = 'none';
@@ -4587,7 +4579,7 @@
                 return 'error';
             }
             input.dataset.saved = String(input.checked);
-            if (currentMd5 && document.getElementById('viewBarStatus')) await refreshSharkStatus(currentMd5);
+            if (currentMd5 && document.getElementById('tsharkLineStatus')) await refreshSharkStatus(currentMd5);
             return 'saved';
         }
 
@@ -4607,7 +4599,6 @@
             document.title = 'SO-CRATES';
             closeAllModals();
             stopSharkPolling();
-            currentView = 'suricata';
             if (window.location.search.includes('file=') || window.location.search.includes('pcap=')) {
                 history.replaceState({}, '', window.location.pathname);
             }
@@ -7088,11 +7079,6 @@
                 case 'tls':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'SNI / Host', 'Version', 'Subject', 'Issuer'];
                 case 'flow':
-                    // SHAR-CRATES' flows have no State or Alerted (Suricata's
-                    // own flow tracking and detection) - and their protocol
-                    // is the point: it's what shows traffic Suricata doesn't
-                    // parse at all.
-                    if (currentView === 'shark') return TSHARK_FLOW_COLUMNS;
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Pkts →', 'Pkts ←', 'Bytes →', 'Bytes ←', 'State', 'Alerted'];
                 case 'fileinfo':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Filename'];
@@ -7244,10 +7230,6 @@
         // rowNoteIconHtml above); editing an existing one works from
         // either place.
         function rowNoteDetailHtml(table, id, note) {
-            // Row notes are stored against events.db's row ids - a
-            // SHAR-CRATES row's id belongs to shark.db, so a note there would
-            // land on whichever Suricata row has the same number.
-            if (currentView === 'shark') return '';
             return htmlSection('Notes', 'var(--accent)') + `<span class="detail-label">Note</span>${rowNoteDetailValueHtml(table, id, note)}`;
         }
 
@@ -7422,7 +7404,7 @@
                     // Same columns as getColumnsForType('flow') - see there.
                     // A flow from tshark (e.shark: a connection row) has
                     // its protocol where Suricata's has state and alerts.
-                    const tsharkFlow = currentView === 'shark' || !!e.shark;
+                    const tsharkFlow = !!e.shark;
                     colSpan = tsharkFlow ? 11 : 12;
                     row = tsharkFlow
                         ? rowPrefixCells(e) + `<td class="mono">${escapeHtml(e.app_proto || '')}</td>` + countCells + '</tr>'
@@ -9227,7 +9209,7 @@
                 // wrong dataset and then sticking with the wrong count
                 // once dnsHeuristicsCountStale flipped back to false.
                 const qParam = buildSearchQuery();
-                const resp = await fetch(`/api/events?md5=${encodeURIComponent(md5)}${viewParam()}&type=dns&limit=${getUserQueryLimit()}${qParam}&t=${Date.now()}`);
+                const resp = await fetch(`/api/events?md5=${encodeURIComponent(md5)}&type=dns&limit=${getUserQueryLimit()}${qParam}&t=${Date.now()}`);
                 const events = await resp.json();
                 if (currentMd5 !== md5) {
                     // The user switched analyses while this fetch was in
@@ -9264,7 +9246,7 @@
             const md5 = currentMd5;
             try {
                 const [alertResp, sigmaResp] = await Promise.all([
-                    fetch(`/api/count?md5=${encodeURIComponent(md5)}${viewParam()}&type=alert&acknowledged=only&t=${Date.now()}`),
+                    fetch(`/api/count?md5=${encodeURIComponent(md5)}&type=alert&acknowledged=only&t=${Date.now()}`),
                     fetch(`/api/sigma-count?md5=${encodeURIComponent(md5)}&acknowledged=only&t=${Date.now()}`)
                 ]);
                 const alertCount = (await alertResp.json()).count || 0;
@@ -9339,8 +9321,6 @@
                 if (eventMatchesFilters(e)) {
                     const type = e.event_type || 'unknown';
                     stats[type] = (stats[type] || 0) + 1;
-                    const conn = connectionTypeOf(e);
-                    if (conn && eventTypes.includes(conn)) stats[conn] = (stats[conn] || 0) + 1;
                 }
             }
             return stats;
@@ -9486,7 +9466,7 @@
             }).join('');
             // The key to the cards' corner dot, beside the view tabs - only
             // when some card carries one.
-            const badgeKey = document.getElementById('viewBarKey');
+            const badgeKey = document.getElementById('tsharkLineKey');
             if (badgeKey) badgeKey.hidden = !stats.some(s => s.count > 0 && s.notInSuricata);
             const numberEls = grid.querySelectorAll('.stat-number');
             stats.filter(s => s.count > 0).forEach((s, i) => animateStatNumber(numberEls[i], s.count));
@@ -9614,7 +9594,7 @@
             const qParam = buildSearchQuery();
             const limit = getUserQueryLimit();
             const [alertResp, sigmaResp] = await Promise.all([
-                fetch(`/api/events?md5=${encodeURIComponent(currentMd5)}${viewParam()}&type=alert&acknowledged=only&limit=${limit}${qParam}&t=${Date.now()}`),
+                fetch(`/api/events?md5=${encodeURIComponent(currentMd5)}&type=alert&acknowledged=only&limit=${limit}${qParam}&t=${Date.now()}`),
                 fetch(`/api/sigma-alerts?md5=${encodeURIComponent(currentMd5)}&acknowledged=only&limit=${limit}${qParam}&t=${Date.now()}`)
             ]);
             acknowledgedAlertsCache = {
@@ -10154,14 +10134,6 @@
         function bumpFetchGeneration() { return ++fetchGeneration; }
         function isStaleFetch(gen) { return gen !== fetchGeneration; }
 
-        // SHAR-CRATES: which of a PCAP analysis's two views is showing -
-        // 'suricata' (SURI-CRATES, events.db, the default) or 'shark'
-        // (SHAR-CRATES, the tshark view in shark.db). Every data request
-        // carries it through viewParam(), so the whole analysis page reads
-        // whichever database is selected; the server ignores it for
-        // anything but a PCAP.
-        var currentView = 'suricata';
-        function viewParam() { return currentView === 'shark' ? '&view=shark' : ''; }
 
         // Sankey gets its own, separate generation counter rather than
         // sharing fetchGeneration above. REGRESSION (recurring): every
@@ -10197,8 +10169,8 @@
                 ? `&order_by=${encodeURIComponent(getColumnsForType(eventType)[currentSort.colIndex])}&sort_dir=${currentSort.asc ? 'asc' : 'desc'}`
                 : '';
             const [rowsResp, countResp] = await Promise.all([
-                fetch(`/api/events?md5=${encodeURIComponent(currentMd5)}${viewParam()}${typeParam}&offset=${offset}&limit=${CONFIG.TABLE_PAGE_SIZE}${qParam}${sortParam}&t=${Date.now()}`),
-                fetch(`/api/count?md5=${encodeURIComponent(currentMd5)}${viewParam()}${typeParam}${qParam}&t=${Date.now()}`)
+                fetch(`/api/events?md5=${encodeURIComponent(currentMd5)}${typeParam}&offset=${offset}&limit=${CONFIG.TABLE_PAGE_SIZE}${qParam}${sortParam}&t=${Date.now()}`),
+                fetch(`/api/count?md5=${encodeURIComponent(currentMd5)}${typeParam}${qParam}&t=${Date.now()}`)
             ]);
             const items = await rowsResp.json();
             const { count } = await countResp.json();
@@ -10224,7 +10196,7 @@
         async function fetchSankeyData(eventType) {
             const qParam = buildSearchQuery();
             const typeParam = (eventType && eventType !== 'all') ? `&type=${eventType}` : '';
-            const resp = await fetch(`/api/sankey-data?md5=${encodeURIComponent(currentMd5)}${viewParam()}${typeParam}${qParam}&t=${Date.now()}`);
+            const resp = await fetch(`/api/sankey-data?md5=${encodeURIComponent(currentMd5)}${typeParam}${qParam}&t=${Date.now()}`);
             return await resp.json();
         }
 
@@ -10306,7 +10278,7 @@
             const typeParam = (eventType && eventType !== 'all') ? `&type=${eventType}` : '';
             const columnParam = column ? `&column=${encodeURIComponent(column)}` : '';
             const pageParam = page ? `&page=${page}` : '';
-            const resp = await fetch(`/api/aggregation-data?md5=${encodeURIComponent(currentMd5)}${viewParam()}${typeParam}${columnParam}${pageParam}&page_size=${AGG_PAGE_SIZE}${qParam}&t=${Date.now()}`);
+            const resp = await fetch(`/api/aggregation-data?md5=${encodeURIComponent(currentMd5)}${typeParam}${columnParam}${pageParam}&page_size=${AGG_PAGE_SIZE}${qParam}&t=${Date.now()}`);
             return await resp.json();
         }
 
@@ -10319,7 +10291,7 @@
         async function fetchAggregationTotals(eventType) {
             const qParam = buildSearchQuery();
             const typeParam = (eventType && eventType !== 'all') ? `&type=${eventType}` : '';
-            const resp = await fetch(`/api/aggregation-totals?md5=${encodeURIComponent(currentMd5)}${viewParam()}${typeParam}${qParam}&t=${Date.now()}`);
+            const resp = await fetch(`/api/aggregation-totals?md5=${encodeURIComponent(currentMd5)}${typeParam}${qParam}&t=${Date.now()}`);
             return await resp.json();
         }
 
@@ -10353,8 +10325,8 @@
             if (eventType === 'all') {
                 if (allEvents.length > 0) return;
                 const [resp, countResp] = await Promise.all([
-                    fetch(`/api/events?md5=${encodeURIComponent(currentMd5)}${viewParam()}&limit=${getUserQueryLimit()}${qParam}&t=${Date.now()}`),
-                    fetch(`/api/count?md5=${encodeURIComponent(currentMd5)}${viewParam()}${qParam}&t=${Date.now()}`)
+                    fetch(`/api/events?md5=${encodeURIComponent(currentMd5)}&limit=${getUserQueryLimit()}${qParam}&t=${Date.now()}`),
+                    fetch(`/api/count?md5=${encodeURIComponent(currentMd5)}${qParam}&t=${Date.now()}`)
                 ]);
                 allEvents = await resp.json();
                 const { count } = await countResp.json();
@@ -10367,8 +10339,8 @@
             const countEndpoint = eventType === 'sigmaalert' ? '/api/sigma-count' : '/api/count';
             const typeParam = eventType === 'sigmaalert' ? '' : `&type=${eventType}`;
             const [resp, countResp] = await Promise.all([
-                fetch(`${endpoint}?md5=${encodeURIComponent(currentMd5)}${viewParam()}${typeParam}&limit=${limit}${qParam}&t=${Date.now()}`),
-                fetch(`${countEndpoint}?md5=${encodeURIComponent(currentMd5)}${viewParam()}${typeParam}${qParam}&t=${Date.now()}`)
+                fetch(`${endpoint}?md5=${encodeURIComponent(currentMd5)}${typeParam}&limit=${limit}${qParam}&t=${Date.now()}`),
+                fetch(`${countEndpoint}?md5=${encodeURIComponent(currentMd5)}${typeParam}${qParam}&t=${Date.now()}`)
             ]);
             tabDataCache[eventType] = await resp.json();
             const { count } = await countResp.json();
@@ -10385,8 +10357,8 @@
         async function fetchBinaryEvents(qParam) {
             const q = qParam || '';
             const [fileAlertsResp, fileInfoResp] = await Promise.all([
-                fetch(`/api/events?md5=${encodeURIComponent(currentMd5)}${viewParam()}&type=filealerts&limit=${getUserQueryLimit()}${q}&t=${Date.now()}`),
-                fetch(`/api/events?md5=${encodeURIComponent(currentMd5)}${viewParam()}&type=fileinfo&limit=1${q}&t=${Date.now()}`)
+                fetch(`/api/events?md5=${encodeURIComponent(currentMd5)}&type=filealerts&limit=${getUserQueryLimit()}${q}&t=${Date.now()}`),
+                fetch(`/api/events?md5=${encodeURIComponent(currentMd5)}&type=fileinfo&limit=1${q}&t=${Date.now()}`)
             ]);
             const [fileAlerts, fileInfo] = await Promise.all([fileAlertsResp.json(), fileInfoResp.json()]);
             return [...fileInfo, ...fileAlerts];
@@ -11437,7 +11409,7 @@
         // scalable fetch).
         async function _fetchLogAnalysisCounts(qParam) {
             const [logResp, sigmaResp] = await Promise.all([
-                fetch(`/api/count?md5=${encodeURIComponent(currentMd5)}${viewParam()}&type=log${qParam || ''}&t=${Date.now()}`),
+                fetch(`/api/count?md5=${encodeURIComponent(currentMd5)}&type=log${qParam || ''}&t=${Date.now()}`),
                 fetch(`/api/sigma-count?md5=${encodeURIComponent(currentMd5)}${qParam || ''}&t=${Date.now()}`)
             ]);
             const { count: logCount } = await logResp.json();
@@ -11525,8 +11497,8 @@
                 const qParam = buildSearchQuery();
 
                 const [statsResp, baseStatsResp] = await Promise.all([
-                    fetch('/api/stats?md5=' + encodeURIComponent(currentMd5) + viewParam() + qParam + '&t=' + Date.now()),
-                    fetch('/api/stats?md5=' + encodeURIComponent(currentMd5) + viewParam() + '&t=' + Date.now())
+                    fetch('/api/stats?md5=' + encodeURIComponent(currentMd5) + qParam + '&t=' + Date.now()),
+                    fetch('/api/stats?md5=' + encodeURIComponent(currentMd5) + '&t=' + Date.now())
                 ]);
                 const statsCounts = (await statsResp.json()).counts;
                 const baseStatsData = await baseStatsResp.json();
@@ -11625,8 +11597,7 @@
                 buildSections();
 
                 // Restore active section after rebuild - unless that tab is
-                // gone from the new data (switching to the SHAR-CRATES view,
-                // which has no alerts, or a search that matched none of its
+                // gone from the new data (a search that matched none of its
                 // type), in which case the first tab opens as on a fresh
                 // load rather than every section staying hidden.
                 const sectionEl = activeType && activeType !== eventTypes[0]
@@ -11777,10 +11748,10 @@
 
         // The tshark line, between the header and the search box, and the
         // key to the cards' dot.
-        function viewBarHtml() {
-            return `<div class="view-bar">`
-                + `<span id="viewBarStatus" class="view-bar-status" aria-live="polite"></span>`
-                + `<span id="viewBarKey" class="view-bar-key" hidden><span class="stat-badge-dot" aria-hidden="true"></span>from tshark</span>`
+        function tsharkLineHtml() {
+            return `<div class="tshark-line">`
+                + `<span id="tsharkLineStatus" class="tshark-line-status" aria-live="polite"></span>`
+                + `<span id="tsharkLineKey" class="tshark-line-key" hidden><span class="stat-badge-dot" aria-hidden="true"></span>from tshark</span>`
                 + `</div>`;
         }
 
@@ -11805,23 +11776,23 @@
             // The ticking count is hidden from screen readers: the status is
             // a live region, and a number changing every second would be
             // read out every second.
-            if (st === 'running') return `Adding tshark protocols… <span id="viewBarTimer" class="view-bar-timer" aria-hidden="true">${Math.max(0, status.elapsed || 0)}s</span>`;
+            if (st === 'running') return `Adding tshark protocols… <span id="tsharkLineTimer" class="tshark-line-timer" aria-hidden="true">${Math.max(0, status.elapsed || 0)}s</span>`;
             if (st === 'too_large') return 'This capture has more packets than tshark analyzes automatically – <a href="#" data-action="start-shark">Add tshark protocols</a>';
             if (st === 'error') return `Couldn't add tshark protocols: ${escapeHtml(status.message || 'tshark analysis failed')} – <a href="#" data-action="start-shark">Try again</a>`;
             return '';    // waiting (Suricata isn't done), disabled, unavailable
         }
 
-        function updateViewToggle() {
-            const statusEl = document.getElementById('viewBarStatus');
+        function updateTsharkLine() {
+            const statusEl = document.getElementById('tsharkLineStatus');
             if (!statusEl) return;
             statusEl.innerHTML = sharkStatusHtml(sharkStatus);
-            const bar = statusEl.closest('.view-bar');
-            if (bar) bar.hidden = !statusEl.textContent && document.getElementById('viewBarKey').hidden;
+            const bar = statusEl.closest('.tshark-line');
+            if (bar) bar.hidden = !statusEl.textContent && document.getElementById('tsharkLineKey').hidden;
             syncSharkClock();
         }
 
         function tickSharkClock() {
-            const el = document.getElementById('viewBarTimer');
+            const el = document.getElementById('tsharkLineTimer');
             if (el && sharkRunStartedAt !== null) el.textContent = `${Math.max(0, Math.floor((Date.now() - sharkRunStartedAt) / 1000))}s`;
         }
 
@@ -11864,7 +11835,7 @@
             }
             if (md5 !== currentMd5) return;
             sharkStatus = status;
-            updateViewToggle();
+            updateTsharkLine();
             if (sharkIsBusy(status)) {
                 sharkPollTimer = setTimeout(() => refreshSharkStatus(md5), SHARK_POLL_MS);
             } else if (wasBusy && status.status === 'ready') {
@@ -11885,7 +11856,7 @@
             if (!now && grid && (grid.matches(':hover') || grid.contains(document.activeElement))) {
                 if (tsharkRowsPending === 'held') return;
                 tsharkRowsPending = 'held';
-                updateViewToggle();
+                updateTsharkLine();
                 const later = () => {
                     grid.removeEventListener('mouseleave', later);
                     grid.removeEventListener('focusout', later);
@@ -11896,10 +11867,10 @@
                 return;
             }
             tsharkRowsPending = 'loading';
-            updateViewToggle();
+            updateTsharkLine();
             refreshAnalysisData().finally(() => {
                 tsharkRowsPending = false;
-                if (md5 === currentMd5) updateViewToggle();
+                if (md5 === currentMd5) updateTsharkLine();
             });
         }
 
@@ -11971,10 +11942,6 @@
         // rowNoteIconHtml/rowNoteDetailValueHtml). Parsed back to a real
         // number here before it's ever used as row-note state.
         function openRowNoteEditor(table, rowIdStr, note) {
-            if (currentView === 'shark') {
-                showToast('Row notes are kept with SURI-CRATES - switch back to add one');
-                return;
-            }
             showNotesModal(table, parseInt(rowIdStr, 10), note);
         }
 
@@ -12081,7 +12048,6 @@
                 if (result.success) {
                     currentMd5 = md5;
                     // tshark's status is fetched below once we know it's a PCAP.
-                    currentView = 'suricata';
                     sharkStatus = null;
                     tsharkRowsPending = false;
                     tsharkTypes = new Set();
@@ -12121,7 +12087,7 @@
                     
                     showLoading('Loading events...');
                     
-                    const statsResp = await fetch('/api/stats?md5=' + encodeURIComponent(md5) + viewParam() + '&t=' + Date.now());
+                    const statsResp = await fetch('/api/stats?md5=' + encodeURIComponent(md5) + '&t=' + Date.now());
                     const statsData = await statsResp.json();
                     if (isStaleFetch(gen)) return;
                     eventStats = statsData.counts;
@@ -12165,10 +12131,10 @@
                         ${reanalyzeIconHtml()}
                         ${deleteIconHtml()}
                     `;
-                    document.getElementById('viewBarContainer').innerHTML = isPcap ? viewBarHtml() : '';
+                    document.getElementById('tsharkLineContainer').innerHTML = isPcap ? tsharkLineHtml() : '';
                     document.getElementById('appHeaderMd5').onclick = () => copyMd5ToClipboard(currentMd5);
                     if (isPcap) {
-                        updateViewToggle();
+                        updateTsharkLine();
                         refreshSharkStatus(md5);
                     }
                     document.getElementById('appHeaderRight').innerHTML = renderGearMenu();
