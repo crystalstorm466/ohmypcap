@@ -32,6 +32,7 @@ Files in the analysis directory:
 """
 
 import ipaddress
+import json
 import os
 import re
 import shutil
@@ -48,7 +49,7 @@ import sqlite3
 
 import config
 from db import create_shark_db
-from shark_protocols import PROTOCOLS, Packet
+from shark_protocols import PROTOCOLS, STRUCTURED_PROTOCOLS, Packet
 
 SHARK_DB = 'shark.db'
 SHARK_ERROR = '.shark_error'
@@ -57,7 +58,7 @@ SHARK_ARTIFACTS = (SHARK_DB, SHARK_DB + '-wal', SHARK_DB + '-shm', SHARK_DB + '.
 # change here or in shark_protocols changes what a run produces: a
 # shark.db stamped with an older version is rebuilt the next time its
 # status is asked for, so existing analyses pick up the change.
-SHARK_FORMAT_VERSION = 6
+SHARK_FORMAT_VERSION = 7
 
 # The fields every packet is read for, one per column of tshark's
 # tab-separated output, in this order - then each of shark_protocols'
@@ -215,7 +216,7 @@ def _is_reply(cols):
 class _Flow:
     __slots__ = ('key', 'proto', 'ip_v', 'client', 'server', 'cport', 'sport', 'first', 'last',
                  'pkts_ts', 'pkts_tc', 'bytes_ts', 'bytes_tc', 'protocols', 'app_proto', 'community_id',
-                 'stream', 'client_set_by_syn', 'client_set_by_message')
+                 'stream', 'client_set_by_syn', 'client_set_by_message', 'first_frame', 'last_frame')
 
     def __init__(self, key, proto, ip_v, src, dst, sport, dport, when, stream):
         self.key, self.proto, self.ip_v, self.stream = key, proto, ip_v, stream
@@ -226,6 +227,7 @@ class _Flow:
         self.app_proto = ''
         self.community_id = ''
         self.client_set_by_syn = self.client_set_by_message = False
+        self.first_frame = self.last_frame = 0     # its first and last packet's frame numbers
 
     def _swap(self):
         self.client, self.server = self.server, self.client
@@ -337,11 +339,14 @@ def build_records(lines):
     return list(iter_records(lines))
 
 
-def iter_records(lines):
+def iter_records(lines, pcap_path=None, deadline=None):
     """build_records' records, one at a time: a flow's is built as it's
     handed out and the flow then let go, so a capture's flows - most of
-    its records - never exist twice over, or all at once as records."""
+    its records - never exist twice over, or all at once as records.
+    Given the capture's path, the structured protocols' records too
+    (_structured_pass) - for which tshark reads it again."""
     flows = {}
+    last_frame = 0
     protocols = [(proto(), [_COLUMN[field] for field in proto.fields]) for proto in PROTOCOLS]
     for line in lines:
         cols = line.rstrip('\n').split('\t')
@@ -396,6 +401,9 @@ def iter_records(lines):
             flow.add(src, sport, length, when, '', '', False, from_client=outer_src == flow.client)
             continue
         flow.add(src, sport, length, when, app, f[_F_CID], syn_only)
+        frame = _int(f[_F_FRAME])
+        flow.first_frame = flow.first_frame or frame
+        flow.last_frame = last_frame = frame
         if not (flow.client_set_by_syn or flow.client_set_by_message):
             # A SYN-ACK is a reply too: a stream that opens on one (a
             # server re-sending it after the connection was reset) has
@@ -419,15 +427,160 @@ def iter_records(lines):
                 packet = Packet(_int(f[_F_FRAME]), when, flow, sport, dport, app, src, dst)
             handler.feed(packet, {name: [_unescape(x) for x in value.split(_AGGREGATOR)] if value else []
                                   for name, value in zip(handler.fields, values)})
+    structured = [proto() for proto in STRUCTURED_PROTOCOLS] if pcap_path else []
+    if structured:
+        _structured_pass(pcap_path, flows, structured, last_frame, deadline)
     ordered = sorted(flows.values(), key=lambda fl: fl.first)
     flows.clear()
     for i, flow in enumerate(ordered):
         ordered[i] = None    # the transaction records below hold the flows they need
         yield flow.event()
     del ordered
-    for handler, _ in protocols:
+    for handler in [handler for handler, _ in protocols] + structured:
         for flow, when, event_type, body in handler.finish():
             yield flow.record(when, event_type, body)
+
+
+# The layers every structured-pass packet is read for, to find its flow
+_STRUCTURED_BASE = ('eth', 'ethertype', 'vlan', 'ip', 'ipv6', 'tcp', 'udp')
+_STRUCTURED_MAX_RANGES = 500
+
+
+def _frame_ranges(flows, max_ranges=_STRUCTURED_MAX_RANGES):
+    """The frame number ranges covering these flows - each flow whole,
+    since TCP reassembly needs every segment - merged, and merged again
+    across the smallest gaps until there are at most max_ranges."""
+    ranges = sorted((fl.first_frame, fl.last_frame) for fl in flows if fl.first_frame)
+    merged = []
+    for start, end in ranges:
+        if merged and start <= merged[-1][1] + 1:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    while len(merged) > max_ranges:
+        gaps = sorted(range(len(merged) - 1), key=lambda i: merged[i + 1][0] - merged[i][1])[:len(merged) - max_ranges]
+        for i in sorted(gaps, reverse=True):
+            merged[i][1] = merged[i + 1][1]
+            del merged[i + 1]
+    return [tuple(r) for r in merged]
+
+
+def _structured_command(source, handlers):
+    protocols = ','.join(dict.fromkeys(_STRUCTURED_BASE + tuple(p for h in handlers for p in h.tshark_protocols)))
+    layers = ' '.join(dict.fromkeys(('frame',) + _STRUCTURED_BASE[3:] + tuple(l for h in handlers for l in h.layers)))
+    return ['tshark', '-n', '-r', source, '--disable-all-protocols', '--enable-protocol', protocols,
+            '-Y', ' || '.join(f'({h.display_filter})' for h in handlers),
+            '-T', 'json', '--no-duplicate-keys', '-J', layers]
+
+
+def _json_packets(stream):
+    """tshark -T json's packets, one at a time: each is an object opening
+    and closing at two spaces' indent, so the whole array never has to be
+    held to parse it."""
+    buf = []
+    for line in stream:
+        if line.startswith('  {'):
+            buf = [line]
+        elif buf:
+            if line.startswith('  }'):
+                buf.append('}')
+                try:
+                    yield json.loads(''.join(buf))['_source']['layers']
+                except (ValueError, KeyError):
+                    pass
+                buf = []
+            else:
+                buf.append(line)
+
+
+def _last_layer(layers, name):
+    layer = layers.get(name)
+    return layer[-1] if isinstance(layer, list) and layer else layer
+
+
+def _structured_flow(layers, index):
+    """The first pass's flow a structured-pass packet belongs to: by its
+    addresses and ports (the innermost, as the first pass reads them),
+    then the flow of those that was open at the time."""
+    ip, ipv6 = _last_layer(layers, 'ip'), _last_layer(layers, 'ipv6')
+    if ip:
+        src, dst = ip.get('ip.src'), ip.get('ip.dst')
+    elif ipv6:
+        src, dst = ipv6_exploded(ipv6.get('ipv6.src', '')), ipv6_exploded(ipv6.get('ipv6.dst', ''))
+    else:
+        return None
+    for proto in ('tcp', 'udp'):
+        layer = _last_layer(layers, proto)
+        if layer:
+            sport, dport = _int(layer.get(f'{proto}.srcport')), _int(layer.get(f'{proto}.dstport'))
+            break
+    else:
+        return None
+    candidates = index.get((proto.upper(), frozenset(((src, sport), (dst, dport)))))
+    if not candidates:
+        return None
+    try:
+        when = float(_last_layer(layers, 'frame').get('frame.time_epoch'))
+    except (TypeError, ValueError, AttributeError):
+        return candidates[0]
+    open_then = [fl for fl in candidates if fl.first - 1 <= when <= fl.last + 1]
+    return open_then[0] if open_then else min(candidates, key=lambda fl: abs(fl.first - when))
+
+
+def _structured_pass(pcap_path, flows, handlers, total_frames, deadline=None):
+    """Feed the structured protocols (shark_protocols.STRUCTURED_PROTOCOLS)
+    from a second tshark run that writes their packets as JSON trees. It
+    runs only if the first pass found any of their flows, and - unless
+    those flows span most of the capture - only over a copy of their
+    packets (editcap, which copies without decoding), since tshark has to
+    read every packet of whatever it's given."""
+    relevant = [fl for fl in flows.values()
+                if fl.proto in ('TCP', 'UDP') and any(p in fl.protocols for h in handlers for p in h.app_protos)]
+    active = [h for h in handlers if any(p in fl.protocols for fl in relevant for p in h.app_protos)]
+    if not active:
+        return
+    index = {}
+    for fl in sorted(relevant, key=lambda fl: fl.first):
+        index.setdefault((fl.proto, frozenset(((fl.client, fl.cport), (fl.server, fl.sport)))), []).append(fl)
+    ranges = _frame_ranges(relevant)
+    remaining = None if deadline is None else max(1.0, deadline - time.monotonic())
+    with tempfile.TemporaryDirectory(prefix='shark-') as tmp:
+        source = pcap_path
+        if sum(end - start + 1 for start, end in ranges) < 0.7 * max(total_frames, 1) and shutil.which('editcap'):
+            source = os.path.join(tmp, 'subset.pcapng')
+            subprocess.run(['editcap', '-r', pcap_path, source] + [f'{a}-{b}' for a, b in ranges],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=remaining)
+        # TZ=UTC: tshark writes absolute times (SMB's file times) in local time
+        with tempfile.TemporaryFile(mode='w+', errors='replace') as stderr_file, \
+                subprocess.Popen(_structured_command(source, active), stdout=subprocess.PIPE, stderr=stderr_file,
+                                 text=True, errors='replace', env=dict(os.environ, TZ='UTC'),
+                                 preexec_fn=_low_priority) as proc:
+            killer = threading.Timer(remaining, proc.kill) if remaining else None
+            if killer:
+                killer.start()
+            try:
+                for layers in _json_packets(proc.stdout):
+                    flow = _structured_flow(layers, index)
+                    if flow is None:
+                        continue
+                    frame = _last_layer(layers, 'frame') or {}
+                    try:
+                        when = float(frame.get('frame.time_epoch'))
+                    except (TypeError, ValueError):
+                        continue
+                    packet = Packet(_int(frame.get('frame.number')), when, flow, flow.cport, flow.sport)
+                    for handler in active:
+                        if any(name in layers for name in handler.layers):
+                            handler.feed_json(packet, layers)
+                proc.wait()
+            finally:
+                if killer:
+                    killer.cancel()
+            if proc.returncode != 0:
+                stderr_file.seek(0)
+                lines = stderr_file.read(64 * 1024).strip().splitlines()
+                raise RuntimeError('tshark (structured pass) ' + (lines[-1] if lines else
+                                   ('timed out' if proc.returncode < 0 else f'exit code {proc.returncode}')))
 
 
 def build_flows(lines):
@@ -471,7 +624,7 @@ def run_tshark(pcap_path, timeout=None, on_start=None, consume=list):
         killer = threading.Timer(timeout, _kill)
         killer.start()
         try:
-            events = consume(iter_records(proc.stdout))
+            events = consume(iter_records(proc.stdout, pcap_path, time.monotonic() + timeout))
             proc.wait()
         finally:
             killer.cancel()

@@ -660,9 +660,366 @@ class S7comm:
         return self.records
 
 
-# Every protocol SHAR-CRATES builds records for, in the order their fields
-# follow the base fields in tshark's output.
+# ---------------------------------------------------------------- structured protocols
+#
+# Protocols whose messages nest - several SMB2 commands in one packet, a
+# Kerberos ticket inside an SMB session setup - can't be read from flat
+# per-packet fields: a field present in only some of a packet's commands
+# can't be told apart. These are read instead from a second tshark pass
+# that writes each packet as a JSON tree (shark_analyzer's structured
+# pass), run only over the flows that carry them. Each class lists the
+# tshark dissectors it needs (tshark_protocols), the layers to keep
+# (layers) and the packets to keep (display_filter); feed_json() gets each
+# packet's layers.
+
+
+def _flatten(tree, out=None):
+    """A JSON subtree's fields: name -> every value under it, in order."""
+    out = {} if out is None else out
+    if isinstance(tree, dict):
+        for name, value in tree.items():
+            if isinstance(value, (dict, list)):
+                if isinstance(value, list) and value and not isinstance(value[0], (dict, list)):
+                    out.setdefault(name, []).extend(value)
+                else:
+                    _flatten(value, out)
+            else:
+                out.setdefault(name, []).append(value)
+    elif isinstance(tree, list):
+        for item in tree:
+            _flatten(item, out)
+    return out
+
+
+def _pdus(layer):
+    """A layer's messages - one, or a list of them (--no-duplicate-keys
+    turns a packet's repeated layer into a list)."""
+    if layer is None:
+        return []
+    return layer if isinstance(layer, list) else [layer]
+
+
+def _suricata_guid(text, smb1=False):
+    """A GUID the way Suricata writes one: tshark's 8-4-4-4-12 text is
+    the standard mixed-endian layout, but Suricata reads the last eight
+    bytes as two little-endian 16-bit words and a 32-bit one - and, for
+    SMB1, the first eight as they come on the wire."""
+    hexdigits = text.replace('-', '')
+    if len(hexdigits) != 32:
+        return text
+    try:
+        raw = bytes.fromhex(hexdigits)
+    except ValueError:
+        return text
+    b = raw[:4][::-1] + raw[4:6][::-1] + raw[6:8][::-1] + raw[8:]   # back to the wire bytes
+    le = lambda chunk: int.from_bytes(chunk, 'little')
+    head = f'{b[0:4].hex()}-{b[4:6].hex()}-{b[6:8].hex()}' if smb1 else f'{le(b[0:4]):08x}-{le(b[4:6]):04x}-{le(b[6:8]):04x}'
+    return f'{head}-{le(b[8:10]):04x}-{le(b[10:12]):04x}{le(b[12:16]):08x}'
+
+
+_MONTHS = {m: i for i, m in enumerate(('Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug',
+                                       'Sep', 'Oct', 'Nov', 'Dec'), 1)}
+
+
+def _epoch(text):
+    """tshark's absolute time ('Feb  4, 2021 13:59:17.430926700 UTC' - the
+    structured pass runs with TZ=UTC) as whole seconds since 1970."""
+    import calendar
+    try:
+        month, day, year, clock = text.replace(',', '').split()[:4]
+        hours, minutes, seconds = clock.split(':')
+        return calendar.timegm((int(year), _MONTHS[month], int(day), int(hours), int(minutes),
+                                int(float(seconds)), 0, 0, 0))
+    except (ValueError, KeyError):
+        return None
+
+
+def _smb_status(value):
+    from shark_names import NT_STATUS
+    code = _int(value)
+    if code is None:
+        return None, None
+    return NT_STATUS.get(code, f'0x{code:x}'), f'0x{code:x}'
+
+
+# Suricata's names for SMB2 commands (rust/src/smb/smb2.rs)
+_SMB2_COMMANDS = ('NEGOTIATE_PROTOCOL', 'SESSION_SETUP', 'SESSION_LOGOFF', 'TREE_CONNECT', 'TREE_DISCONNECT',
+                  'CREATE', 'CLOSE', 'FLUSH', 'READ', 'WRITE', 'LOCK', 'IOCTL', 'CANCEL', 'KEEPALIVE', 'FIND',
+                  'CHANGE_NOTIFY', 'GET_INFO', 'SET_INFO', 'OPLOCK_BREAK')
+# ... and SMB1's (rust/src/smb/smb1.rs)
+_SMB1_COMMANDS = {
+    0x00: 'CREATE_DIRECTORY', 0x01: 'DELETE_DIRECTORY', 0x02: 'OPEN', 0x03: 'CREATE', 0x04: 'CLOSE',
+    0x05: 'FLUSH', 0x06: 'DELETE', 0x07: 'RENAME', 0x08: 'QUERY_INFORMATION', 0x09: 'SET_INFORMATION',
+    0x0a: 'READ', 0x0b: 'WRITE', 0x0c: 'LOCK_BYTE_RANGE', 0x0d: 'UNLOCK_BYTE_RANGE', 0x0e: 'CREATE_TEMPORARY',
+    0x0f: 'CREATE_NEW', 0x10: 'CHECK_DIRECTORY', 0x11: 'PROCESS_EXIT', 0x12: 'SEEK', 0x13: 'LOCK_AND_READ',
+    0x14: 'WRITE_AND_UNLOCK', 0x1a: 'READ_RAW', 0x1b: 'READ_MPX', 0x1c: 'READ_MPX_SECONDARY',
+    0x1d: 'WRITE_RAW', 0x1e: 'WRITE_MPX', 0x1f: 'WRITE_MPX_SECONDARY', 0x20: 'WRITE_COMPLETE',
+    0x21: 'QUERY_SERVER', 0x22: 'SET_INFORMATION2', 0x23: 'QUERY_INFORMATION2', 0x24: 'LOCKING_ANDX',
+    0x25: 'TRANS', 0x26: 'TRANS_SECONDARY', 0x27: 'IOCTL', 0x28: 'IOCTL_SECONDARY', 0x29: 'COPY',
+    0x2a: 'MOVE', 0x2b: 'ECHO', 0x2c: 'WRITE_AND_CLOSE', 0x2d: 'OPEN_ANDX', 0x2e: 'READ_ANDX',
+    0x2f: 'WRITE_ANDX', 0x30: 'NEW_FILE_SIZE', 0x31: 'CLOSE_AND_TREE_DISC', 0x32: 'TRANS2',
+    0x33: 'TRANS2_SECONDARY', 0x34: 'FIND_CLOSE2', 0x35: 'FIND_NOTIFY_CLOSE', 0x70: 'TREE_CONNECT',
+    0x71: 'TREE_DISCONNECT', 0x72: 'NEGOTIATE_PROTOCOL', 0x73: 'SESSION_SETUP_ANDX', 0x74: 'LOGOFF_ANDX',
+    0x75: 'TREE_CONNECT_ANDX', 0x7e: 'SECURITY_PACKAGE_ANDX', 0x80: 'QUERY_INFORMATION_DISK',
+    0x81: 'SEARCH', 0x82: 'FIND', 0x83: 'FIND_UNIQUE', 0x84: 'FIND_CLOSE', 0xa0: 'NT_TRANS',
+    0xa1: 'NT_TRANS_SECONDARY', 0xa2: 'NT_CREATE_ANDX', 0xa4: 'NT_CANCEL', 0xa5: 'NT_RENAME',
+    0xc0: 'OPEN_PRINT_FILE', 0xc1: 'WRITE_PRINT_FILE', 0xc2: 'CLOSE_PRINT_FILE', 0xc3: 'GET_PRINT_QUEUE',
+}
+_SMB_DISPOSITIONS = ('FILE_SUPERSEDE', 'FILE_OPEN', 'FILE_CREATE', 'FILE_OPEN_IF', 'FILE_OVERWRITE',
+                     'FILE_OVERWRITE_IF')
+_SMB_SHARE_TYPES = {1: 'FILE', 2: 'PIPE', 3: 'PRINT'}
+_STATUS_PENDING = 0x103
+
+
+def _smb2_dialect(value):
+    """0x0311 -> '3.11', SMB2's wildcard 0x02ff -> '2.??', as Suricata writes them."""
+    code = _int(value)
+    if code is None:
+        return None
+    if code == 0x02ff:
+        return '2.??'
+    return f'{code >> 8}.{code & 0xff:02x}'
+
+
+class _SmbFlow:
+    """What SMB keeps per connection: the dialect negotiated, each open
+    file's name by its file ID, each tree's share, and requests waiting
+    for their response."""
+    __slots__ = ('dialect', 'files', 'trees', 'waiting', 'transfers')
+
+    def __init__(self):
+        self.dialect = None
+        self.transfers = set()   # (command, file ID) already recorded
+        self.files = {}      # file ID -> filename
+        self.trees = {}      # tree ID -> (share path, share type)
+        self.waiting = {}    # ('smb2', message ID) or ('smb1', mid, pid) -> body
+
+
+class SMB:
+    """SMB2 and SMB1 commands, one record per request with its response,
+    in Suricata's smb layout (its DCERPC-over-SMB detail aside, which
+    comes with DCERPC's own records). The negotiated dialect, a file's name
+    on a READ or WRITE, and a tree's share are carried over from earlier
+    commands on the connection, as Suricata does."""
+    app_protos = ('smb',)
+    tshark_protocols = ('nbss', 'netbios', 'smb', 'smb2', 'gss-api', 'spnego', 'spnego-krb5', 'kerberos', 'ber', 'ntlmssp',
+                        'dcerpc')
+    layers = ('smb', 'smb2', 'dcerpc')
+    display_filter = 'smb || smb2'
+
+    def __init__(self):
+        self.records = []
+        self.flows = {}
+
+    def feed_json(self, pkt, layers):
+        state = self.flows.get(pkt.flow.key)
+        if state is None:
+            state = self.flows[pkt.flow.key] = _SmbFlow()
+        # DCERPC over a named pipe is a layer of its own, beside SMB's
+        dcerpc = _flatten(layers.get('dcerpc')) if layers.get('dcerpc') else {}
+        for pdu in _pdus(layers.get('smb')):
+            self._smb1(pkt, state, _flatten(pdu))
+        for pdu in _pdus(layers.get('smb2')):
+            self._smb2(pkt, state, _flatten(pdu), dcerpc)
+
+    def _new(self, pkt, state, body):
+        self.records.append((pkt.flow, pkt.when, 'smb', body))
+        return body
+
+    @staticmethod
+    def _status(body, value):
+        status, code = _smb_status(value)
+        if status is not None:
+            body['status'], body['status_code'] = status, code
+
+    # SMB2
+    def _smb2(self, pkt, state, f, dcerpc):
+        cmd = _int(_first(f.get('smb2.cmd', [])))
+        if cmd is None:
+            return
+        response = _first(f.get('smb2.flags.response', [])) in ('1', 'True')
+        msg_id = _int(_first(f.get('smb2.msg_id', [])))
+        key = ('smb2', msg_id)
+        value = lambda name: _first(f.get(name, []))
+        if not response:
+            body = {'dialect': state.dialect or 'unknown',
+                    'command': 'SMB2_COMMAND_' + (_SMB2_COMMANDS[cmd] if cmd < len(_SMB2_COMMANDS) else f'UNKNOWN_{cmd:02X}'),
+                    'session_id': _int(value('smb2.sesid'), 0), 'tree_id': _int(value('smb2.tid'), 0)}
+            if cmd == 0:
+                body['client_dialects'] = [_smb2_dialect(d) for d in f.get('smb2.dialect', [])]
+                if value('smb2.client_guid'):
+                    body['client_guid'] = _suricata_guid(value('smb2.client_guid'))
+            elif cmd == 1:
+                self._auth(body, f)
+            elif cmd == 3:
+                body['_path'] = value('smb2.tree')
+            elif cmd == 5:
+                name = value('smb2.filename') or '<share_root>'
+                directory = value('smb.nt.create_options.directory') in ('1', 'True') and name != '<share_root>'
+                body['directory' if directory else 'filename'] = name
+                disposition = _int(value('smb2.create.disposition'))
+                if disposition is not None and disposition < len(_SMB_DISPOSITIONS):
+                    body['disposition'] = _SMB_DISPOSITIONS[disposition]
+                body['access'] = 'delete on close' if value('smb.nt.create_options.delete_on_close') in ('1', 'True') \
+                    else 'normal'
+                # 0 and '' until a successful response says otherwise, as Suricata writes them
+                body.update(created=0, accessed=0, modified=0, changed=0, size=0, fuid='')
+                body['_name'] = name
+            elif cmd in (8, 9):
+                # Suricata records a READ or WRITE as a file transfer - one
+                # record for all of a file's reads (or writes) - or, on a
+                # named pipe, a WRITE as the DCERPC call it carries (whose
+                # answer comes back in a READ)
+                fid = value('smb2.fid')
+                tree = state.trees.get(body['tree_id'])
+                if tree and tree[1] == 'PIPE':
+                    # one record per DCERPC call: a WRITE that starts one
+                    if cmd == 8 or not dcerpc.get('dcerpc.pkt_type') or \
+                            _first(dcerpc.get('dcerpc.cn_flags.first_frag', [])) not in ('1', 'True'):
+                        return
+                elif fid not in state.files or not tree or (cmd, fid) in state.transfers:
+                    return     # a file whose opening wasn't seen, or already recorded
+                else:
+                    state.transfers.add((cmd, fid))
+                    body.update(filename=state.files[fid], share=tree[0], fuid=_suricata_guid(fid))
+            elif cmd in (16, 17):
+                return         # no record for GET_INFO or SET_INFO
+            elif cmd == 11:
+                from shark_names import FSCTL
+                function = _int(value('smb2.ioctl.function'))
+                if function is not None:
+                    body['function'] = FSCTL.get(function, f'0x{function:x}')
+            body = self._new(pkt, state, body)
+            if cmd != 12:      # a CANCEL is never answered
+                state.waiting[key] = body
+            return
+        body = state.waiting.get(key)
+        status = _int(value('smb2.nt_status'))
+        if status == _STATUS_PENDING and value('smb2.flags.async') in ('1', 'True'):
+            return             # an interim response: the final one follows
+        if body is None:
+            if cmd == 0 and ('smb1', 0, None) in state.waiting:
+                body = state.waiting.pop(('smb1', 0, None))   # SMB1 negotiate answered in SMB2
+                body['session_id'] = _int(value('smb2.sesid'), 0)
+                body['tree_id'] = _int(value('smb2.tid'), 0)
+            else:
+                return
+        else:
+            del state.waiting[key]
+        self._status(body, value('smb2.nt_status'))
+        if cmd == 0:
+            dialect = _smb2_dialect(value('smb2.dialect'))
+            if dialect:
+                state.dialect = body['dialect'] = dialect
+            if value('smb2.server_guid'):
+                body['server_guid'] = _suricata_guid(value('smb2.server_guid'))
+            for size in ('max_read_size', 'max_write_size'):
+                if value(f'smb2.{size}'):
+                    body[size] = _int(value(f'smb2.{size}'))
+        elif cmd == 1:
+            body['session_id'] = _int(value('smb2.sesid'), body['session_id'])
+        elif cmd == 3:
+            body['tree_id'] = _int(value('smb2.tid'), body['tree_id'])
+            share_type = _SMB_SHARE_TYPES.get(_int(value('smb2.share_type')))
+            path = body.pop('_path', '')
+            if share_type:
+                body['named_pipe' if share_type == 'PIPE' else 'share'] = path
+                body['share_type'] = share_type
+                state.trees[body['tree_id']] = (path, share_type)
+        elif cmd == 5:
+            name = body.pop('_name', '')
+            fid = value('smb2.fid')
+            if fid and status == 0:
+                state.files[fid] = name
+                body['fuid'] = _suricata_guid(fid)
+            for key_name, field in (('created', 'smb2.create.time'), ('accessed', 'smb2.last_access.time'),
+                                    ('modified', 'smb2.last_write.time'), ('changed', 'smb2.last_change.time')):
+                when = _epoch(value(field)) if value(field) else None
+                if when is not None:
+                    body[key_name] = when
+            if value('smb2.eof'):
+                body['size'] = _int(value('smb2.eof'))
+        body.pop('_path', None)
+        body.pop('_name', None)
+
+    @staticmethod
+    def _auth(body, f):
+        """Who a session setup authenticates: the Kerberos ticket's realm
+        and service, or NTLM's domain, user and host."""
+        value = lambda name: _first(f.get(name, []))
+        if value('kerberos.realm') and f.get('kerberos.SNameString'):
+            body['kerberos'] = {'realm': value('kerberos.realm'), 'snames': f['kerberos.SNameString']}
+        if value('ntlmssp.auth.username') or value('ntlmssp.auth.hostname'):
+            # tshark writes an empty name (an anonymous login's) as NULL
+            name = lambda field: '' if value(field) == 'NULL' else value(field)
+            ntlm = {'domain': name('ntlmssp.auth.domain'), 'user': name('ntlmssp.auth.username'),
+                    'host': name('ntlmssp.auth.hostname')}
+            if value('ntlmssp.version.major'):
+                ntlm['version'] = (f"{value('ntlmssp.version.major')}.{value('ntlmssp.version.minor')} "
+                                   f"build {value('ntlmssp.version.build_number')} "
+                                   f"rev {value('ntlmssp.version.ntlm_current_revision')}")
+            body['ntlmssp'] = ntlm
+
+    # SMB1
+    def _smb1(self, pkt, state, f):
+        cmd = _int(_first(f.get('smb.cmd', [])))
+        if cmd is None:
+            return
+        value = lambda name: _first(f.get(name, []))
+        if cmd in (0x2e, 0x2f, 0x25, 0x32):
+            return     # READ_ANDX, WRITE_ANDX, TRANS, TRANS2: no record of their own in Suricata
+        response = value('smb.flags.response') in ('1', 'True')
+        key = ('smb1', _int(value('smb.mid'), 0), None if cmd == 0x72 else _int(value('smb.pid'), 0))
+        if not response:
+            body = {'dialect': state.dialect or ('NT LM 0.12' if cmd != 0x72 else 'unknown'),
+                    'command': 'SMB1_COMMAND_' + _SMB1_COMMANDS.get(cmd, f'UNKNOWN_{cmd:02X}'),
+                    'session_id': _int(value('smb.uid'), 0), 'tree_id': _int(value('smb.tid'), 0)}
+            if cmd == 0x72:
+                body['client_dialects'] = f.get('smb.dialect.name', [])
+            elif cmd == 0x73:
+                body['request'] = {'native_os': value('smb.native_os'), 'native_lm': value('smb.native_lanman')}
+                self._auth(body, f)
+            elif cmd == 0x75:
+                # Suricata's SMB1 share path starts one backslash in
+                path = value('smb.path')
+                body['_path'] = path[1:] if path.startswith('\\\\') else path
+                body['service'] = {'request': value('smb.service')}
+            state.waiting[key] = self._new(pkt, state, body)
+            return
+        body = state.waiting.pop(key, None)
+        if body is None:
+            return
+        self._status(body, value('smb.nt_status'))
+        if cmd == 0x72:
+            index = _int(value('smb.dialect.index'))
+            if index is not None and index < len(body.get('client_dialects', [])):
+                state.dialect = body['dialect'] = body['client_dialects'][index]
+            if value('smb.server_guid'):
+                body['server_guid'] = _suricata_guid(value('smb.server_guid'), smb1=True)
+        elif cmd == 0x73:
+            body['session_id'] = _int(value('smb.uid'), body['session_id'])
+            body['response'] = {'native_os': value('smb.native_os'), 'native_lm': value('smb.native_lanman')}
+        elif cmd == 0x75:
+            body['tree_id'] = _int(value('smb.tid'), body['tree_id'])
+            service = value('smb.service')
+            body['service']['response'] = service
+            path = body.pop('_path', '')
+            body['named_pipe' if service == 'IPC' else 'share'] = path
+            state.trees[body['tree_id']] = (path, 'PIPE' if service == 'IPC' else 'FILE')
+        body.pop('_path', None)
+
+    def finish(self):
+        for _, _, _, body in self.records:
+            body.pop('_path', None)
+            body.pop('_name', None)
+        return self.records
+
+
+# Every protocol SHAR-CRATES builds records for from tshark's fields, in
+# the order their fields follow the base fields in tshark's output.
 PROTOCOLS = (DNS, HTTP, TLS, Modbus, FTP, NBNS, SSDP, S7comm)
+# ... and from the structured pass.
+STRUCTURED_PROTOCOLS = (SMB,)
 # Flow application protocols with transaction records here - every other
 # one gets a connection tab (db.CONNECTION_TYPE_PREFIX) instead.
-RECORDED_APP_PROTOS = frozenset(p for proto in PROTOCOLS for p in proto.app_protos)
+RECORDED_APP_PROTOS = frozenset(p for proto in PROTOCOLS + STRUCTURED_PROTOCOLS for p in proto.app_protos)

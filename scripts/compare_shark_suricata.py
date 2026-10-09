@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compare SHAR-CRATES's records for a PCAP with Suricata's (eve.json).
 
-For every record type both views build - flow, dns, http, tls, modbus -
+For every record type both views build (TYPES, below),
 records are matched by Community ID plus that type's transaction key, and
 every field the two share is compared. Prints counts per type and each
 difference, and exits 1 if there are any.
@@ -98,6 +98,12 @@ def _ftp_data_fields(e):
     return {k: e['ftp_data'].get(k) for k in ('command', 'filename')}
 
 
+def _smb_fields(e):
+    # Suricata's transaction counter (id) is its own; its DCERPC-over-SMB
+    # detail comes with SHAR-CRATES' DCERPC records
+    return {k: v for k, v in e['smb'].items() if k not in ('id', 'dcerpc')}
+
+
 # type -> (key within a flow, fields compared). Records with the same key on
 # one flow (a second TYPE command) are matched in order.
 TYPES = {
@@ -111,6 +117,8 @@ TYPES = {
     'ftp_data': (lambda e: e['ftp_data'].get('filename'), _ftp_data_fields),
     'quic': (lambda e: (), lambda e: {k: (e['quic'].get(k) or {}).get('hash') if k in ('ja3', 'ja3s') else e['quic'].get(k)
                                       for k in ('version', 'sni', 'ja3', 'ja3s', 'ja4')}),
+    'smb': (lambda e: (e['smb'].get('command'), e['smb'].get('session_id'), e['smb'].get('tree_id'),
+                       e['smb'].get('filename') or e['smb'].get('directory')), _smb_fields),
     'mdns': (lambda e: (e['mdns'].get('type'), tuple(q['rrname'] for q in e['mdns'].get('queries', []))),
              lambda e: {'queries': [(q['rrname'], q['rrtype']) for q in e['mdns'].get('queries', [])],
                         'answers': sorted(tuple(sorted(a.items())) for a in e['mdns'].get('answers', [])),

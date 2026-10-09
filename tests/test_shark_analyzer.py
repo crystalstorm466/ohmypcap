@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'
 
 import config
 import shark_analyzer
+import shark_protocols
 import socrates as server
 import storage
 from db import init_empty_db, query_events_sqlite
@@ -275,7 +276,7 @@ class TestProtocolRecordsAgainstSuricata(unittest.TestCase):
                 self.assertEqual(self.report[event_type]['matched'], self.report[event_type]['suricata'])
         self.assertEqual({t: r['matched'] for t, r in self.report.items()},
                          {'flow': 13, 'dns': 8, 'http': 3, 'tls': 1, 'modbus': 3, 'ftp': 7, 'ftp_data': 2,
-                          'quic': 0, 'mdns': 0})
+                          'quic': 0, 'smb': 0, 'mdns': 0})
 
     def test_ftp_differs_from_suricata_only_in_two_known_ways(self):
         """Documented in docs/usage/exploring-results.md. (1) A multi-line
@@ -482,6 +483,134 @@ class TestExtraCaptureAgainstSuricata(unittest.TestCase):
         password = next(f for f in ftp if f.get('command') == 'PASS')
         self.assertEqual(password['completion_code'], ['530'])
         self.assertEqual(ftp[-1], {'completion_code': ['221'], 'reply': ['Goodbye.'], 'reply_received': 'yes'})
+
+
+@unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
+class TestSmbAgainstSuricata(unittest.TestCase):
+    """tests/protocol_fixtures.write_smb_pcap - an SMB2 session (NTLM login,
+    a pipe and a file share, opens, a two-read transfer, a failed open, the
+    share's root, an IOCTL, a compound open + close, a DCERPC bind over a
+    pipe) and an SMB1 negotiate answered in SMB2 - checked against what
+    Suricata 8.0.6 logged for it (tests/data/smb_fixture.eve.json). SMB is
+    read from the structured pass (shark_analyzer._structured_pass)."""
+
+    @classmethod
+    def setUpClass(cls):
+        from scripts.compare_shark_suricata import compare
+        from tests.protocol_fixtures import write_smb_pcap
+        cls.tmpdir = tempfile.mkdtemp()
+        cls.pcap = os.path.join(cls.tmpdir, 'smb.pcap')
+        write_smb_pcap(cls.pcap)
+        cls.records = shark_analyzer.run_tshark(cls.pcap)
+        cls.report = compare(_load_eve('smb_fixture.eve.json'), cls.records)
+        cls.smb = [r['smb'] for r in cls.records if r['event_type'] == 'smb']
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    def test_every_smb_record_matches_suricata(self):
+        for event_type in ('smb', 'flow'):
+            with self.subTest(event_type=event_type):
+                self.assertEqual(self.report[event_type]['differences'], [])
+                self.assertEqual(self.report[event_type]['matched'], 17 if event_type == 'smb' else 2)
+
+    def _one(self, command, **match):
+        found = [r for r in self.smb if r['command'] == command and all(r.get(k) == v for k, v in match.items())]
+        self.assertEqual(len(found), 1, (command, match, found))
+        return found[0]
+
+    def test_a_files_reads_are_one_transfer_naming_the_file_and_share(self):
+        read = self._one('SMB2_COMMAND_READ')
+        self.assertEqual((read['filename'], read['share'], read['fuid']),
+                         ('Reports\\Q3.xlsx', '\\\\FILESRV\\Finance', '00000015-0000-0000-0021-000000000000'))
+
+    def test_opens(self):
+        opened = self._one('SMB2_COMMAND_CREATE', filename='Reports\\Q3.xlsx')
+        self.assertEqual({k: opened[k] for k in ('disposition', 'access', 'created', 'modified', 'size', 'status')},
+                         {'disposition': 'FILE_OPEN', 'access': 'normal', 'created': 1700000000, 'modified': 1700000002,
+                          'size': 288, 'status': 'STATUS_SUCCESS'})
+        failed = self._one('SMB2_COMMAND_CREATE', filename='Missing.docx')
+        self.assertEqual((failed['status'], failed['status_code'], failed['created'], failed['fuid']),
+                         ('STATUS_OBJECT_NAME_NOT_FOUND', '0xc0000034', 0, ''), "as Suricata writes a failed open")
+        self.assertEqual(self._one('SMB2_COMMAND_CREATE', filename='temp.txt')['access'], 'delete on close',
+                         'the first command of a compound request')
+        self._one('SMB2_COMMAND_CREATE', filename='<share_root>')
+
+    def test_session_trees_and_carried_dialect(self):
+        login = self._one('SMB2_COMMAND_SESSION_SETUP')
+        self.assertEqual(login['ntlmssp'], {'domain': 'EXAMPLE', 'user': 'alice', 'host': 'WORKSTATION7',
+                                            'version': '10.0 build 19041 rev 15'})
+        self.assertEqual(self._one('SMB2_COMMAND_TREE_CONNECT', tree_id=1)['named_pipe'], '\\\\FILESRV\\IPC$')
+        self.assertEqual(self._one('SMB2_COMMAND_TREE_CONNECT', tree_id=2)['share_type'], 'FILE')
+        self.assertEqual(self._one('SMB2_COMMAND_IOCTL')['function'], 'FSCTL_QUERY_NETWORK_INTERFACE_INFO')
+        self.assertEqual({r['dialect'] for r in self.smb if r['command'].startswith('SMB2')}, {'3.02'},
+                         "every command carries the session's negotiated dialect")
+
+    def test_a_pipe_write_is_its_dcerpc_call_and_its_read_no_record(self):
+        self._one('SMB2_COMMAND_WRITE', tree_id=1)
+        self.assertEqual([r for r in self.smb if r['command'] == 'SMB2_COMMAND_READ' and r['tree_id'] == 1], [])
+
+    def test_smb1_negotiate_answered_in_smb2(self):
+        negotiate = self._one('SMB1_COMMAND_NEGOTIATE_PROTOCOL')
+        self.assertEqual((negotiate['dialect'], negotiate['client_dialects'], negotiate['tree_id']),
+                         ('2.??', ['NT LM 0.12', 'SMB 2.002', 'SMB 2.???'], 0))
+
+    def test_the_structured_pass_reads_only_the_smb_flows(self):
+        """editcap copies just their packets when they're a small part of
+        the capture - here, padded with a long run of DNS."""
+        from tests.protocol_fixtures import smb_packets, dns_packets
+        from tests.pcap_fixtures import write_pcap
+        padded = os.path.join(self.tmpdir, 'padded.pcap')
+        write_pcap(padded, dns_packets() * 40 + smb_packets())
+        calls = []
+        real_run = subprocess.run
+
+        def spy(cmd, *args, **kwargs):
+            calls.append(cmd)
+            return real_run(cmd, *args, **kwargs)
+        with mock.patch.object(shark_analyzer.subprocess, 'run', side_effect=spy):
+            records = shark_analyzer.run_tshark(padded)
+        [editcap] = [c for c in calls if c[0] == 'editcap']
+        self.assertEqual(len([r for r in records if r['event_type'] == 'smb']), 17)
+        self.assertLess(len(editcap) - 3, 5, 'a few frame ranges, not the whole capture')
+
+    def test_no_smb_no_second_pass(self):
+        from tests.protocol_fixtures import write_protocol_pcap
+        pcap = os.path.join(self.tmpdir, 'protocols.pcap')
+        write_protocol_pcap(pcap)
+        with mock.patch.object(shark_analyzer, '_structured_command', side_effect=AssertionError('ran')):
+            shark_analyzer.run_tshark(pcap)
+
+
+class TestSmbDetails(unittest.TestCase):
+    def test_guids_in_suricatas_layout(self):
+        """Pairs seen in the corpus: tshark's text -> what Suricata wrote."""
+        from shark_protocols import _suricata_guid
+        self.assertEqual(_suricata_guid('567c8e7a-724a-4810-9230-279a5318fe06'), '567c8e7a-724a-4810-3092-9a2706fe1853')
+        self.assertEqual(_suricata_guid('00000015-0021-0000-1500-000021000000'), '00000015-0021-0000-0015-000000000021')
+        self.assertEqual(_suricata_guid('02ff882b-f205-f841-8895-78ebbdc3acdc', smb1=True),
+                         '2b88ff02-05f2-41f8-9588-eb78dcacc3bd')
+        self.assertEqual(_suricata_guid('not-a-guid'), 'not-a-guid')
+
+    def test_dialects_and_times(self):
+        from shark_protocols import _epoch, _smb2_dialect
+        self.assertEqual([_smb2_dialect(v) for v in ('0x0202', '0x0210', '0x0311', '0x02ff')], ['2.02', '2.10', '3.11', '2.??'])
+        self.assertEqual(_epoch('Feb  4, 2021 13:59:17.430926700 UTC'), 1612447157)
+        self.assertIsNone(_epoch('No time specified'))
+
+    def test_frame_ranges(self):
+        flows = [mock.Mock(first_frame=a, last_frame=b) for a, b in ((10, 20), (15, 30), (40, 41), (100, 200), (0, 0))]
+        self.assertEqual(shark_analyzer._frame_ranges(flows), [(10, 30), (40, 41), (100, 200)])
+        self.assertEqual(shark_analyzer._frame_ranges(flows, max_ranges=2), [(10, 41), (100, 200)], 'closing the smallest gap')
+
+    def test_json_packets_one_at_a_time(self):
+        lines = ['[\n', '  {\n', '    "_source": {"layers": {"smb2": {"smb2.cmd": "5"}}}\n', '  },\n',
+                 '  {\n', '    "_source": {"layers": {"smb2": {"smb2.cmd": "6"}}}\n', '  }\n', ']\n']
+        self.assertEqual([p['smb2']['smb2.cmd'] for p in shark_analyzer._json_packets(lines)], ['5', '6'])
+
+    def test_smb_flows_get_records_not_a_connection_tab(self):
+        self.assertIn('smb', shark_protocols.RECORDED_APP_PROTOS)
 
 
 class TestFlowOrientation(unittest.TestCase):
@@ -780,7 +909,8 @@ class TestQueue(unittest.TestCase):
     def test_a_built_shark_db_records_how_long_its_run_took(self):
         from tests.protocol_fixtures import write_protocol_pcap
         write_protocol_pcap(self.pcaps[0])
-        with mock.patch.object(shark_analyzer.time, 'monotonic', side_effect=[100.0, 117.4] + [200.0] * 50):
+        # the build's start, tshark's deadline, then the build's end
+        with mock.patch.object(shark_analyzer.time, 'monotonic', side_effect=[100.0, 100.0] + [117.4] * 50):
             self.assertTrue(shark_analyzer.build(self.dirs[0], self.pcaps[0]))
         self.assertEqual(shark_analyzer.status(self.dirs[0]), {'status': 'ready', 'seconds': 17})
 

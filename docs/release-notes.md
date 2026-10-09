@@ -17,7 +17,7 @@ tables, Sankey diagram, search and pivot menu work on both:
   protocol Suricata doesn't parse - records or connections
 - **A running count of seconds** while tshark works, and how long it took
   once it's done
-- **DNS, mDNS, HTTP, TLS, QUIC, Modbus and FTP** - one record per
+- **DNS, mDNS, HTTP, TLS, QUIC, Modbus, FTP and SMB** - one record per
   transaction, checked against Suricata's on dozens of real captures: they
   agree on nearly every field they share (see [SURI-CRATES and
   SHAR-CRATES](usage/exploring-results.md#suri-crates-and-shar-crates) for

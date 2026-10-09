@@ -383,3 +383,200 @@ def extra_packets():
 
 def write_extra_pcap(path):
     write_pcap(path, extra_packets())
+
+
+# ---------------------------------------------------------------- SMB
+#
+# An SMB2 (3.02) session over TCP 445, each message framed in NetBIOS
+# session headers: negotiate, an NTLM login (wrapped in SPNEGO, as Windows
+# sends it), the IPC$ pipe share and a file share, a file opened and read
+# twice (one transfer), a failed open, the share's root opened, an IOCTL,
+# a compound open + close in one packet, and a DCERPC bind over a named
+# pipe. Plus, on its own connection, an SMB1 negotiate answered in SMB2.
+
+SMB_SERVER = '10.1.0.45'
+SMB_SESSION = 0x0000400000000011
+_FILETIME_EPOCH = 11644473600
+
+
+def _filetime(unix):
+    return (unix + _FILETIME_EPOCH) * 10_000_000
+
+
+def _nbss(payload):
+    return b'\x00' + len(payload).to_bytes(3, 'big') + payload
+
+
+def _smb2_header(cmd, msg_id, response=False, status=0, tree=0, session=0, next_command=0, related=False):
+    flags = (0x1 if response else 0) | (0x4 if related else 0)
+    return (b'\xfeSMB' + struct.pack('<HHIHHIIQIIQ', 64, 1, status, cmd, 1, flags, next_command, msg_id, 0xfeff, tree,
+                                      session) + b'\x00' * 16)
+
+
+def _smb2(cmd, msg_id, body, **kwargs):
+    return _smb2_header(cmd, msg_id, **kwargs) + body
+
+
+def _utf16(text):
+    return text.encode('utf-16-le')
+
+
+def _der(tag, content):
+    n = len(content)
+    length = bytes([n]) if n < 0x80 else (b'\x81' + bytes([n]) if n < 0x100 else b'\x82' + n.to_bytes(2, 'big'))
+    return bytes([tag]) + length + content
+
+
+def _ntlm_authenticate(domain, user, host):
+    """An NTLMSSP AUTHENTICATE message (NTLMv1-sized responses), with its version."""
+    fields = [b'\x00' * 24, b'\x11' * 24, _utf16(domain), _utf16(user), _utf16(host), b'\x22' * 16]
+    offset = 88      # the fixed part, the version and the MIC
+    header, payload = b'', b''
+    for data in fields:
+        header += struct.pack('<HHI', len(data), len(data), offset + len(payload))
+        payload += data
+    flags = 0x00000001 | 0x00000200 | 0x02000000 | 0x00080000   # Unicode, NTLM, version, extended security
+    version = struct.pack('<BBH', 10, 0, 19041) + b'\x00\x00\x00' + bytes([15])
+    return b'NTLMSSP\x00' + struct.pack('<I', 3) + header + struct.pack('<I', flags) + version + b'\x00' * 16 + payload
+
+
+def _spnego_response_token(token):
+    # negTokenResp { responseToken [2] OCTET STRING }
+    return _der(0xa1, _der(0x30, _der(0xa2, _der(0x04, token))))
+
+
+def _smb2_create_request(name, directory=False, delete_on_close=False):
+    options = (0x1 if directory else 0x40) | (0x1000 if delete_on_close else 0)
+    raw = _utf16(name) or b'\x00'
+    return struct.pack('<HBBIQQIIIIIHHII', 57, 0, 0, 2, 0, 0, 0x00120089, 0, 7, 1, options, 120, len(_utf16(name)), 0, 0) + raw
+
+
+def _smb2_create_response(fid, created, size):
+    t = _filetime(created)
+    return (struct.pack('<HBBIQQQQQQII', 89, 0, 0, 1, t, t + 10_000_000, t + 20_000_000, t + 30_000_000, 4096, size, 0x20, 0)
+            + fid + struct.pack('<II', 0, 0))
+
+
+def _smb2_error(status_cmd):
+    return struct.pack('<HBBI', 9, 0, 0, 0) + b'\x00'
+
+
+def _smb2_read_request(fid, length, offset):
+    return struct.pack('<HBBIQ', 49, 0x50, 0, length, offset) + fid + struct.pack('<IIIHH', 1, 0, 0, 0, 0) + b'\x00'
+
+
+def _smb2_read_response(data):
+    return struct.pack('<HBBIII', 17, 80, 0, len(data), 0, 0) + data
+
+
+def _smb2_write_request(fid, data):
+    return struct.pack('<HHIQ', 49, 112, len(data), 0) + fid + struct.pack('<IIHHI', 0, 0, 0, 0, 0) + data
+
+
+def _smb2_write_response(count):
+    return struct.pack('<HHIIHH', 17, 0, count, 0, 0, 0)
+
+
+def _smb2_close_request(fid):
+    return struct.pack('<HHI', 24, 0, 0) + fid
+
+
+def _smb2_close_response():
+    return struct.pack('<HHIQQQQQQI', 60, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+
+
+_NDR = bytes.fromhex('045d888aeb1cc9119fe808002b104860') + struct.pack('<HH', 2, 0)
+_SRVSVC = bytes.fromhex('c84f324b7016d30112785a47bf6ee188') + struct.pack('<HH', 3, 0)
+
+
+def _dcerpc_bind(call_id):
+    body = struct.pack('<HHIB3x', 4280, 4280, 0, 1) + struct.pack('<HBx', 0, 1) + _SRVSVC + _NDR
+    return struct.pack('<BBBB4sHHI', 5, 0, 11, 0x03, b'\x10\x00\x00\x00', 16 + len(body), 0, call_id) + body
+
+
+def _dcerpc_bind_ack(call_id):
+    port = b'\\PIPE\\srvsvc\x00'
+    secondary = struct.pack('<H', len(port)) + port
+    secondary += b'\x00' * (-(len(secondary) + 24) % 4)
+    body = struct.pack('<HHI', 4280, 4280, 0x1234) + secondary + struct.pack('<B3x', 1) + struct.pack('<HH', 0, 0) + _NDR
+    return struct.pack('<BBBB4sHHI', 5, 0, 12, 0x03, b'\x10\x00\x00\x00', 16 + len(body), 0, call_id) + body
+
+
+def smb_packets():
+    sid = SMB_SESSION
+    file_fid = bytes.fromhex('15000000000000002100000000000000')
+    root_fid = bytes.fromhex('16000000000000002200000000000000')
+    temp_fid = bytes.fromhex('17000000000000002300000000000000')
+    pipe_fid = bytes.fromhex('18000000000000002400000000000000')
+    server_guid = bytes.fromhex('7a8e7c564a72104830929a2706fe1853')
+    client_guid = bytes.fromhex('ada9c5712669eb119040120079a2c241')
+    negotiate = struct.pack('<HHHHI', 36, 4, 1, 0, 0x7f) + client_guid + struct.pack('<Q', 0) + \
+        struct.pack('<4H', 0x0202, 0x0210, 0x0300, 0x0302)
+    # the server offers NTLMSSP in a SPNEGO negTokenInit, as Windows does -
+    # tshark reads the session setup's token by the mechanism offered here
+    offer = _der(0x60, _der(0x06, bytes.fromhex('2b0601050502')) + _der(0xa0, _der(0x30, _der(0xa0, _der(0x30, _der(
+        0x06, bytes.fromhex('2b06010401823702020a')))))))
+    negotiated = struct.pack('<HHHH', 65, 1, 0x0302, 0) + server_guid + struct.pack('<IIIIQQHHI', 0x7, 8388608, 8388608,
+                                                                                     8388608, 0, 0, 128, len(offer), 0) + offer
+    blob = _spnego_response_token(_ntlm_authenticate('EXAMPLE', 'alice', 'WORKSTATION7'))
+    session_setup = struct.pack('<HBBIIHHQ', 25, 0, 1, 1, 0, 88, len(blob), 0) + blob
+    ipc, share = _utf16('\\\\FILESRV\\IPC$'), _utf16('\\\\FILESRV\\Finance')
+    tree = lambda path: struct.pack('<HHHH', 9, 0, 72, len(path)) + path
+    tree_ok = lambda share_type: struct.pack('<HBBIII', 16, share_type, 0, 0, 0, 0x1f01ff)
+    ioctl = struct.pack('<HHI', 57, 0, 0x001401fc) + b'\xff' * 16 + struct.pack('<IIIIIIII', 0, 0, 0, 0, 0, 65536, 1, 0)
+    ioctl_ok = struct.pack('<HHI', 49, 0, 0x001401fc) + b'\xff' * 16 + struct.pack('<IIIIII', 0, 0, 0, 0, 0, 0)
+    created = 1700000000
+    # A compound request: CREATE then CLOSE of the file it creates (related)
+    create_part = _smb2(5, 10, _smb2_create_request('temp.txt', delete_on_close=True), tree=2, session=sid)
+    create_part += b'\x00' * (-len(create_part) % 8)
+    compound = create_part[:20] + struct.pack('<I', len(create_part)) + create_part[24:] + \
+        _smb2(6, 11, _smb2_close_request(b'\xff' * 16), tree=2, session=sid, related=True)
+    created_part = _smb2(5, 10, _smb2_create_response(temp_fid, created, 0), response=True, tree=2, session=sid)
+    created_part += b'\x00' * (-len(created_part) % 8)
+    compound_ok = created_part[:20] + struct.pack('<I', len(created_part)) + created_part[24:] + \
+        _smb2(6, 11, _smb2_close_response(), response=True, tree=2, session=sid, related=True)
+    data = b'quarterly numbers\n' * 8
+    bind, bind_ack = _dcerpc_bind(2), _dcerpc_bind_ack(2)
+    messages = [
+        (True, _smb2(0, 0, negotiate)), (False, _smb2(0, 0, negotiated, response=True)),
+        (True, _smb2(1, 1, session_setup)),
+        (False, _smb2(1, 1, struct.pack('<HHHH', 9, 0, 0, 0), response=True, session=sid)),
+        (True, _smb2(3, 2, tree(ipc), session=sid)), (False, _smb2(3, 2, tree_ok(2), response=True, tree=1, session=sid)),
+        (True, _smb2(11, 3, ioctl, tree=1, session=sid)), (False, _smb2(11, 3, ioctl_ok, response=True, tree=1, session=sid)),
+        (True, _smb2(3, 4, tree(share), session=sid)), (False, _smb2(3, 4, tree_ok(1), response=True, tree=2, session=sid)),
+        (True, _smb2(5, 5, _smb2_create_request('Reports\\Q3.xlsx'), tree=2, session=sid)),
+        (False, _smb2(5, 5, _smb2_create_response(file_fid, created, len(data) * 2), response=True, tree=2, session=sid)),
+        (True, _smb2(8, 6, _smb2_read_request(file_fid, len(data), 0), tree=2, session=sid)),
+        (False, _smb2(8, 6, _smb2_read_response(data), response=True, tree=2, session=sid)),
+        (True, _smb2(8, 7, _smb2_read_request(file_fid, len(data), len(data)), tree=2, session=sid)),
+        (False, _smb2(8, 7, _smb2_read_response(data), response=True, tree=2, session=sid)),
+        (True, _smb2(6, 8, _smb2_close_request(file_fid), tree=2, session=sid)),
+        (False, _smb2(6, 8, _smb2_close_response(), response=True, tree=2, session=sid)),
+        (True, _smb2(5, 9, _smb2_create_request('Missing.docx'), tree=2, session=sid)),
+        (False, _smb2(5, 9, _smb2_error(5), response=True, status=0xc0000034, tree=2, session=sid)),
+        (True, compound), (False, compound_ok),
+        (True, _smb2(5, 12, _smb2_create_request('', directory=True), tree=2, session=sid)),
+        (False, _smb2(5, 12, _smb2_create_response(root_fid, created, 0), response=True, tree=2, session=sid)),
+        (True, _smb2(5, 13, _smb2_create_request('srvsvc'), tree=1, session=sid)),
+        (False, _smb2(5, 13, _smb2_create_response(pipe_fid, 0, 0), response=True, tree=1, session=sid)),
+        (True, _smb2(9, 14, _smb2_write_request(pipe_fid, bind), tree=1, session=sid)),
+        (False, _smb2(9, 14, _smb2_write_response(len(bind)), response=True, tree=1, session=sid)),
+        (True, _smb2(8, 15, _smb2_read_request(pipe_fid, 1024, 0), tree=1, session=sid)),
+        (False, _smb2(8, 15, _smb2_read_response(bind_ack), response=True, tree=1, session=sid)),
+        (True, _smb2(4, 16, b'\x04\x00\x00\x00', tree=2, session=sid)),
+        (False, _smb2(4, 16, b'\x04\x00\x00\x00', response=True, tree=2, session=sid)),
+        (True, _smb2(2, 17, b'\x04\x00\x00\x00', session=sid)), (False, _smb2(2, 17, b'\x04\x00\x00\x00', response=True, session=sid)),
+    ]
+    pkts = tcp_segments(CLIENT, SMB_SERVER, 49700, 445, [(c, _nbss(m)) for c, m in messages])
+    # SMB1 negotiate (offering SMB2), answered by an SMB2 negotiate response with the wildcard dialect
+    dialects = b''.join(b'\x02' + d + b'\x00' for d in (b'NT LM 0.12', b'SMB 2.002', b'SMB 2.???'))
+    smb1 = (b'\xffSMB' + struct.pack('<BIBHH8sHHHHH', 0x72, 0, 0x18, 0xc853, 0, b'\x00' * 8, 0, 0xffff, 0xfeff, 0, 0)
+            + b'\x00' + struct.pack('<H', len(dialects)) + dialects)
+    wildcard = struct.pack('<HHHH', 65, 1, 0x02ff, 0) + server_guid + struct.pack('<IIIIQQHHI', 0x7, 8388608, 8388608,
+                                                                                   8388608, 0, 0, 128, 0, 0)
+    pkts += tcp_segments(CLIENT, SMB_SERVER, 49701, 445, [(True, _nbss(smb1)), (False, _nbss(_smb2(0, 0, wildcard, response=True)))])
+    return pkts
+
+
+def write_smb_pcap(path):
+    write_pcap(path, smb_packets())
