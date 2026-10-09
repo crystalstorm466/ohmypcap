@@ -434,10 +434,10 @@ SHAR-CRATES status for a PCAP analysis. After Suricata finishes, the same captur
 
 | Status | Meaning |
 |---|---|
-| `ready` | Done. Adds `flows` (the flow count), `app_protos` (flows per application protocol, most first; `""` counts flows with none) and `seconds` (how long the run took, tshark and building the records - absent for a `shark.db` built before runs recorded it) |
+| `ready` | Done. Adds `flows` (the flow count), `app_protos` (flows per application protocol, most first; `""` counts flows with none), `seconds` (how long the run took, tshark and building the records - absent for a `shark.db` built before runs recorded it) and `merged` (whether its rows have joined Suricata's in the analysis's `events.db`; a status request that finds them not yet merged starts the merge) |
 | `queued` | Waiting for another analysis's run to finish. Adds `position` (1 = next) |
 | `running` | tshark is analyzing the capture. Adds `elapsed` (whole seconds since the run started) |
-| `waiting` | Suricata hasn't finished yet |
+| `waiting` | Suricata hasn't finished yet (tshark, which starts alongside it, has finished or not started); while both run, the status is tshark's own - `queued` or `running` |
 | `too_large` | Over the background size limit - start it with `POST /api/shark-start` |
 | `error` | The last run failed. Adds `message` |
 | `not_started` | Not queued yet |

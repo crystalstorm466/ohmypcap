@@ -2630,9 +2630,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return {'status': 'unavailable'}
         if not shark_analyzer.enabled(DATA_DIR):
             return {'status': 'disabled'}
-        if os.path.exists(os.path.join(dir_path, '.phase')):
-            return {'status': 'waiting'}
         pcap_path = os.path.join(dir_path, pcap_file)
+        if os.path.exists(os.path.join(dir_path, '.phase')):
+            # Suricata is still working; tshark, started alongside it, may be too
+            status = shark_analyzer.status(dir_path, pcap_path)
+            return {'status': 'waiting'} if status['status'] in ('not_started', 'ready') else status
         status = shark_analyzer.status(dir_path, pcap_path)
         if status['status'] == 'not_started' or (start and status['status'] in ('too_large', 'error')):
             shark_analyzer.enqueue(dir_path, pcap_path)
@@ -2642,6 +2644,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 status.update(get_shark_summary_sqlite(shark_analyzer.shark_db_path(dir_path)))
             except Exception:
                 return {'status': 'error', 'message': 'Database error'}
+            status['merged'] = shark_analyzer.merged(dir_path)
+            if not status['merged']:
+                # Built before tshark's rows joined Suricata's in events.db
+                # (or the merge was missed): add them now, in the background
+                shark_analyzer.merge_soon(dir_path)
         return status
 
     def handle_get_shark_status(self, params):

@@ -447,7 +447,8 @@ def _columns_type(event_type):
     return event_type
 
 
-def _build_where_conditions(has_acknowledged_table, terms, has_fts, event_type, event_type_col, acknowledged_only=False):
+def _build_where_conditions(has_acknowledged_table, terms, has_fts, event_type, event_type_col, acknowledged_only=False,
+                            include_connections=False):
     """Build WHERE conditions and parameters for event queries.
 
     Args:
@@ -479,6 +480,9 @@ def _build_where_conditions(has_acknowledged_table, terms, has_fts, event_type, 
             non-alert event_types either way: nothing but 'alert' rows can
             ever be in acknowledged_alerts, so this condition simply never
             matches (and never excludes anything) for e.g. dns/http/tls.
+        include_connections: with no event_type, keep tshark's connection
+            rows (left out of "all events" otherwise) - for the per-type
+            counts, which give each connection type its own tab.
 
     Returns:
         (conditions_list, params_list)
@@ -496,17 +500,26 @@ def _build_where_conditions(has_acknowledged_table, terms, has_fts, event_type, 
             params.append(_sanitize_like(term))
 
     if event_type and event_type.startswith(CONNECTION_TYPE_PREFIX):
+        # tshark's connection rows merged into events.db have the type
+        # itself; in a shark.db they're its flow rows with that protocol
+        # (no Suricata flow can match: these are protocols it doesn't parse)
         app_proto_col = (event_type_col or 'event_type').replace('event_type', 'app_proto')
-        conditions.append(f"{event_type_col} = 'flow' AND {app_proto_col} = ?")
-        params.append(event_type[len(CONNECTION_TYPE_PREFIX):])
+        conditions.append(f"({event_type_col} = ? OR ({event_type_col} = 'flow' AND {app_proto_col} = ?))")
+        params.extend([event_type, event_type[len(CONNECTION_TYPE_PREFIX):]])
     elif event_type:
         conditions.append(f'{event_type_col} = ?')
         params.append(event_type)
     else:
         # 'stats' is an internal per-analysis summary row, not a displayable
         # event - only relevant to exclude for the merged "all types" query,
-        # since a specific event_type filter never matches it anyway.
-        conditions.append(f"{event_type_col} != 'stats'")
+        # since a specific event_type filter never matches it anyway. Nor
+        # are tshark's connection rows: each is a connection Suricata's own
+        # flow row already lists, so "all events" would show it twice.
+        if include_connections:
+            conditions.append(f"{event_type_col} != 'stats'")
+        else:
+            conditions.append(f"{event_type_col} != 'stats' AND "
+                              f"substr({event_type_col}, 1, {len(CONNECTION_TYPE_PREFIX)}) != '{CONNECTION_TYPE_PREFIX}'")
 
     if has_acknowledged_table:
         # Must be a fully-qualified reference (events.id / e.id), never a
@@ -585,6 +598,103 @@ def create_shark_db(db_path, events):
                 conn.commit()
         conn.execute('PRAGMA optimize;')
         conn.commit()
+
+
+# Rows tshark adds to an analysis's events.db (shark_analyzer.merge) carry
+# this in their JSON, so a later merge can replace them.
+TSHARK_SOURCE = 'tshark'
+
+
+def replace_tshark_events(db_path, events, stamp):
+    """Replace the rows tshark added to events.db (TSHARK_SOURCE) with
+    events, and record stamp - which shark.db they came from - so the
+    same one isn't merged twice. Committed every so often; returns how
+    many rows were added."""
+    with _db_connection(db_path) as conn:
+        has_fts = _init_db(conn)
+        old = conn.execute("SELECT id, json_data FROM events WHERE json_extract(json_data, '$.source') = ?",
+                           (TSHARK_SOURCE,)).fetchall()
+        for rowid, data in old:
+            if has_fts:
+                # events_fts takes its text from events: removing a row
+                # from it means handing it the text that was indexed
+                conn.execute("INSERT INTO events_fts (events_fts, rowid, json_data) VALUES ('delete', ?, ?)", (rowid, data))
+            conn.execute('DELETE FROM events WHERE id = ?', (rowid,))
+        added = 0
+        for added, event in enumerate(events, 1):
+            event['source'] = TSHARK_SOURCE
+            _insert_event(conn, event, has_fts)
+            if added % 50000 == 0:
+                conn.commit()
+        conn.execute('CREATE TABLE IF NOT EXISTS tshark_merge (stamp TEXT, rows INTEGER)')
+        conn.execute('DELETE FROM tshark_merge')
+        conn.execute('INSERT INTO tshark_merge VALUES (?, ?)', (stamp, added))
+        conn.commit()
+    return added
+
+
+def tshark_merge_stamp(db_path):
+    """The stamp replace_tshark_events last recorded in events.db, or None."""
+    try:
+        conn = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
+        try:
+            row = conn.execute('SELECT stamp FROM tshark_merge').fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+    return row[0] if row else None
+
+
+def iter_events_json(db_path):
+    """Every event in a database, as stored, one at a time."""
+    with _db_connection(db_path) as conn:
+        for (data,) in conn.execute('SELECT json_data FROM events ORDER BY id'):
+            yield data
+
+
+# Event types that aren't the output of Suricata's protocol parsing
+_NOT_PROTOCOL_RECORDS = ('flow', 'alert', 'anomaly', 'fileinfo', 'stats', 'netflow', 'frame', 'drop')
+
+
+def suricata_identified_flows(db_path):
+    """Community ID -> [(start, end)] (epoch seconds) of the flows Suricata
+    identified: gave a protocol (not none or 'failed') and backed it with
+    at least one record of its protocol parsing during the flow. A bare
+    label isn't enough - Suricata 8.0.6 called an SSDP NOTIFY 'sip' and
+    logged no SIP for it (8.0.7 calls it 'failed')."""
+    out = {}
+    with _db_connection(db_path) as conn:
+        records = {}
+        placeholders = ','.join('?' * len(_NOT_PROTOCOL_RECORDS))
+        # (rows tshark added on an earlier merge are tshark's, not Suricata's)
+        for cid, when in conn.execute("SELECT json_extract(json_data, '$.community_id'), timestamp FROM events "
+                                      f"WHERE event_type NOT IN ({placeholders}) "
+                                      "AND json_extract(json_data, '$.source') IS NOT ?",
+                                      _NOT_PROTOCOL_RECORDS + (TSHARK_SOURCE,)):
+            at = _iso_epoch(when)
+            if cid and at is not None:
+                records.setdefault(cid, []).append(at)
+        rows = conn.execute("SELECT json_extract(json_data, '$.community_id'), json_extract(json_data, '$.flow.start'), "
+                            "json_extract(json_data, '$.flow.end'), app_proto FROM events WHERE event_type = 'flow'")
+        for cid, start, end, app in rows:
+            if not (cid and app and app != 'failed' and cid in records):
+                continue
+            first, last = _iso_epoch(start), _iso_epoch(end)
+            if first is None:
+                continue
+            last = last if last is not None else first
+            if any(first - 1 <= at <= last + 1 for at in records[cid]):
+                out.setdefault(cid, []).append((first, last))
+    return out
+
+
+def _iso_epoch(text):
+    """Suricata's (and SHAR-CRATES') timestamp - 2015-10-21T10:09:16.074689+0000 - in epoch seconds."""
+    try:
+        return datetime.strptime(text, '%Y-%m-%dT%H:%M:%S.%f%z').timestamp()
+    except (TypeError, ValueError):
+        return None
 
 
 def get_shark_summary_sqlite(db_path):
@@ -870,7 +980,8 @@ def get_event_types_sqlite(db_path, q=None):
         has_fts = _has_fts5(conn) if terms else False
 
         select, event_type_col = _events_select(terms, has_fts, 'event_type, COUNT(*) as cnt', 'e.event_type, COUNT(*) as cnt')
-        conditions, params = _build_where_conditions(_has_acknowledged_alerts_table(conn), terms, has_fts, None, event_type_col)
+        conditions, params = _build_where_conditions(_has_acknowledged_alerts_table(conn), terms, has_fts, None, event_type_col,
+                                                     include_connections=True)
 
         sql = select
         if conditions:

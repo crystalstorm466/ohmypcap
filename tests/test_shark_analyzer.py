@@ -19,6 +19,7 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 
 import config
+import db
 import shark_analyzer
 import shark_protocols
 import socrates as server
@@ -867,6 +868,118 @@ class TestAnalyze(unittest.TestCase):
         shark_analyzer._PACKET_COUNTS.clear()
 
 
+def _row(event_type, cid='1:a', when='2026-01-01T00:00:10.000000+0000', app=None, end=None):
+    e = {'event_type': event_type, 'community_id': cid, 'timestamp': when}
+    if event_type == 'flow':
+        e.update(app_proto=app or '', flow={'start': when, 'end': end or when})
+    else:
+        e[event_type] = {}
+    return json.dumps(e)
+
+
+class TestMergeRows(unittest.TestCase):
+    """Which of a shark.db's rows join Suricata's in events.db."""
+    SURICATA = {'1:http': [(1767225600.0, 1767225620.0)]}     # a flow Suricata called HTTP, 00:00:00-00:00:20
+
+    def _kept(self, rows):
+        return [(e['event_type'], e.get('app_proto')) for e in shark_analyzer.merge_rows(rows, self.SURICATA)]
+
+    def test_records_of_protocols_suricata_lacks_and_none_of_its_own(self):
+        self.assertEqual(self._kept([_row('s7comm'), _row('nbns'), _row('llmnr'), _row('ssdp'),
+                                     _row('dns'), _row('http'), _row('smb'), _row('ftp_data'), _row('mdns')]),
+                         [('s7comm', None), ('nbns', None), ('llmnr', None), ('ssdp', None)])
+
+    def test_flows_become_connection_rows_only_for_protocols_with_nothing_else(self):
+        self.assertEqual(self._kept([_row('flow', app='openvpn'), _row('flow', app='syslog'),
+                                     _row('flow', app='telnet'), _row('flow', app='http'), _row('flow', app='arp'),
+                                     _row('flow', app='s7comm'), _row('flow', app='')]),
+                         [('conn_openvpn', 'openvpn'), ('conn_syslog', 'syslog')],
+                         "telnet, http and arp are Suricata's; s7comm has records; '' is no protocol")
+
+    def test_nothing_on_a_flow_suricata_gave_a_protocol(self):
+        """The 4SICS case: a scanner's HTTP request to the rsh port is HTTP
+        to Suricata and rsh to tshark - Suricata's word stands."""
+        self.assertEqual(self._kept([_row('flow', cid='1:http', app='rsh'), _row('nbns', cid='1:http'),
+                                     _row('flow', cid='1:http', app='rsh', when='2026-01-01T01:00:00.000000+0000'),
+                                     _row('flow', cid='1:other', app='rsh')]),
+                         [('conn_rsh', 'rsh'), ('conn_rsh', 'rsh')],
+                         'the same Community ID an hour later is another connection; another ID is too')
+
+
+@unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
+class TestMerge(unittest.TestCase):
+    """shark_analyzer.merge: tshark's rows into the analysis's events.db,
+    built here from Suricata's output for the extra fixture capture."""
+
+    def setUp(self):
+        from tests.protocol_fixtures import write_extra_pcap
+        self.dir = tempfile.mkdtemp()
+        self.pcap = os.path.join(self.dir, 'extra.pcap')
+        write_extra_pcap(self.pcap)
+        self.events_db = os.path.join(self.dir, 'events.db')
+        db.create_sqlite_db(self.events_db, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data',
+                                                         'extra_fixture.eve.json'))
+        self.suricata_counts = db.get_event_types_sqlite(self.events_db)
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _added(self):
+        after = db.get_event_types_sqlite(self.events_db)
+        return {t: n - self.suricata_counts.get(t, 0) for t, n in after.items() if n != self.suricata_counts.get(t, 0)}
+
+    def test_adds_what_suricata_lacks_once_both_are_done(self):
+        self.assertIsNone(shark_analyzer.merge(self.dir), 'no shark.db yet')
+        self.assertTrue(shark_analyzer.build(self.dir, self.pcap))
+        with open(os.path.join(self.dir, '.phase'), 'w') as f:
+            f.write('importing')
+        self.assertIsNone(shark_analyzer.merge(self.dir), "Suricata isn't done")
+        os.unlink(os.path.join(self.dir, '.phase'))
+        self.assertEqual(shark_analyzer.merge(self.dir), 10)
+        self.assertEqual(self._added(), {'s7comm': 4, 'ssdp': 3, 'nbns': 2, 'llmnr': 1},
+                         "tshark's DNS, mDNS, HTTP and FTP records stay out - Suricata has those")
+        self.assertTrue(shark_analyzer.merged(self.dir))
+        self.assertIsNone(shark_analyzer.merge(self.dir), 'the same shark.db is merged once')
+
+    def test_a_new_shark_db_replaces_the_rows_of_the_last(self):
+        self.assertTrue(shark_analyzer.build(self.dir, self.pcap))
+        shark_analyzer.merge(self.dir)
+        time.sleep(0.01)
+        self.assertTrue(shark_analyzer.build(self.dir, self.pcap))     # a retried run
+        self.assertFalse(shark_analyzer.merged(self.dir))
+        self.assertEqual(shark_analyzer.merge(self.dir), 10)
+        self.assertEqual(self._added(), {'s7comm': 4, 'ssdp': 3, 'nbns': 2, 'llmnr': 1}, 'replaced, not added twice')
+        self.assertEqual(db.get_event_types_sqlite(self.events_db, 'FILESERVER').get('nbns'), 1,
+                         'search finds them (the full-text index was updated both times)')
+
+    def test_the_queue_merges_when_its_run_finishes(self):
+        shark_analyzer.enqueue(self.dir, self.pcap)
+        self.assertTrue(shark_analyzer.wait_idle(30))
+        self.assertTrue(shark_analyzer.merged(self.dir))
+        self.assertEqual(self._added().get('s7comm'), 4)
+
+    def test_a_bare_suricata_label_doesnt_keep_tshark_out(self):
+        """Suricata 8.0.6 labelled the fixture's SSDP NOTIFY flow 'sip' but
+        logged no SIP: the label alone doesn't make it Suricata's flow."""
+        flows = [json.loads(line) for line in open(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data',
+                                                                'extra_fixture.eve.json')) if '"app_proto":"sip"' in line]
+        self.assertEqual(len(flows), 1)
+        self.assertNotIn(flows[0]['community_id'], db.suricata_identified_flows(self.events_db))
+
+    def test_connection_rows_have_their_own_tab_but_stay_out_of_all_events(self):
+        from tests.pcap_fixtures import write_pcap
+        from tests.protocol_fixtures import _udp_packet
+        syslog = os.path.join(self.dir, 'syslog.pcap')
+        write_pcap(syslog, [_udp_packet('10.1.0.10', '10.1.0.99', 40514, 514, b'<34>Oct 11 22:14:15 host su: test')])
+        os.replace(syslog, self.pcap)
+        self.assertTrue(shark_analyzer.build(self.dir, self.pcap))
+        shark_analyzer.merge(self.dir)
+        self.assertEqual(self._added(), {'conn_syslog': 1})
+        self.assertEqual([e['event_type'] for e in db.query_events_sqlite(self.events_db, 'conn_syslog')], ['conn_syslog'])
+        self.assertNotIn('conn_syslog', {e['event_type'] for e in db.query_events_sqlite(self.events_db, limit=100000)},
+                         "it's a connection Suricata's own flow row already lists")
+
+
 class TestSettingsSwitch(unittest.TestCase):
     def test_on_unless_turned_off_and_survives_a_bad_file(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1097,7 +1210,8 @@ class TestSharkAPI(unittest.TestCase):
         self.assertIn(body['status'], ('queued', 'running', 'ready'))
         body = self._wait_ready()
         self.assertIsInstance(body.pop('seconds'), int)
-        self.assertEqual(body, {'status': 'ready', 'flows': 3, 'app_protos': {'ftp': 1, 'ftp-data': 1, 'http': 1}})
+        self.assertEqual(body, {'status': 'ready', 'flows': 3, 'app_protos': {'ftp': 1, 'ftp-data': 1, 'http': 1},
+                                'merged': True})
 
     def test_view_shark_reads_shark_db_and_the_default_reads_events_db(self):
         self._get(f'/api/shark-status?md5={self.md5}')

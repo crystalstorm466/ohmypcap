@@ -886,6 +886,12 @@ def spawn_suricata(dir_path, pcap_path, suricata_config_path=None, data_dir=None
 
     _clear_error(dir_path)
     _set_phase(dir_path, 'network')
+    # tshark starts alongside Suricata (in its own low-priority process, see
+    # shark_analyzer), so the protocols it adds are usually ready as soon as
+    # Suricata's results are - if it's on and the capture is small enough
+    # to run unasked.
+    if shark_analyzer.enabled(data_dir) and shark_analyzer.background_eligible(pcap_path):
+        shark_analyzer.enqueue(dir_path, pcap_path)
 
     def on_suricata_done():
         # Phase 2: Run YARA scan on extracted files
@@ -905,11 +911,12 @@ def spawn_suricata(dir_path, pcap_path, suricata_config_path=None, data_dir=None
                 _set_error(dir_path, f'Database creation failed: {e}')
         # Clear phase only after DB (with YARA matches) is ready
         _clear_phase(dir_path)
-        # SHAR-CRATES: the analysis is ready on Suricata's data now; tshark's
-        # view of the same capture is built in the background, if it's small
-        # enough to do so unasked (see shark_analyzer).
-        if shark_analyzer.enabled(data_dir) and shark_analyzer.background_eligible(pcap_path):
-            shark_analyzer.enqueue(dir_path, pcap_path)
+        # If tshark finished first, its rows join Suricata's now (otherwise
+        # its own finish does this - see shark_analyzer.merge)
+        try:
+            shark_analyzer.merge(dir_path)
+        except Exception as e:
+            _set_error(dir_path, f'Adding tshark protocols failed: {e}')
 
     try:
         proc = subprocess.Popen(

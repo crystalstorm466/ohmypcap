@@ -50,8 +50,9 @@ from datetime import datetime, timezone
 import sqlite3
 
 import config
-from db import create_shark_db
-from shark_protocols import PROTOCOLS, STRUCTURED_PROTOCOLS, Packet
+from db import (create_shark_db, iter_events_json, replace_tshark_events, suricata_identified_flows,
+                tshark_merge_stamp, _iso_epoch)
+from shark_protocols import PROTOCOLS, RECORDED_APP_PROTOS, STRUCTURED_PROTOCOLS, Packet
 
 SHARK_DB = 'shark.db'
 SHARK_ERROR = '.shark_error'
@@ -814,6 +815,8 @@ def _work():
             _running, _running_since = dir_path, time.time()
         if os.path.isfile(pcap_path):
             analyze(dir_path, pcap_path, on_start=_set_running_proc)
+            if not _was_cancelled(dir_path):
+                merge(dir_path)
         with _lock:
             _running = _running_since = _running_proc = None
             _cancelled.discard(dir_path)
@@ -932,6 +935,123 @@ def format_version(db_path):
             conn.close()
     except sqlite3.Error:
         return 0
+
+
+# ----------------------------------------------------------------------
+# Merging into the analysis's own events.db: Suricata stays the source of
+# truth for every protocol it parses; tshark adds what it can't see.
+# ----------------------------------------------------------------------
+
+# Suricata 8's app-layer parsers (suricata --list-app-layer-protos), in the
+# names SHAR-CRATES' app_proto uses, plus what it logs below the app layer
+# (ICMP flows, ARP). static/socrates.js keeps the same list.
+SURICATA_APP_PROTOS = frozenset((
+    'http', 'ftp', 'ftp-data', 'smtp', 'tls', 'ssh', 'imap', 'smb', 'dcerpc', 'dns', 'modbus', 'enip', 'dnp3', 'nfs',
+    'ntp', 'tftp', 'ike', 'krb5', 'quic', 'dhcp', 'sip', 'rfb', 'mqtt', 'pgsql', 'telnet', 'websocket', 'ldap', 'doh2',
+    'rdp', 'http2', 'bittorrent-dht', 'pop3', 'mdns', 'snmp', 'icmp', 'ipv6-icmp', 'icmpv6', 'arp'))
+
+_merge_locks = {}
+_merge_locks_lock = threading.Lock()
+
+
+def _merge_lock(dir_path):
+    with _merge_locks_lock:
+        return _merge_locks.setdefault(dir_path, threading.Lock())
+
+
+def _merge_stamp(db_path):
+    """Which shark.db a merge came from: its format and modification time."""
+    return f'{SHARK_FORMAT_VERSION}:{os.path.getmtime(db_path):.6f}'
+
+
+def merge_rows(shark_rows, identified):
+    """The rows of a shark.db (its stored JSON, one at a time) that belong
+    in the analysis's events.db: records of protocols Suricata doesn't
+    parse, and - as connection rows, CONNECTION_TYPE_PREFIX + protocol -
+    flows of protocols that have neither Suricata's parsing nor records of
+    their own here. Nothing on a flow Suricata identified - gave a protocol
+    and backed it with records (by Community ID and time, from
+    db.suricata_identified_flows): there Suricata's word stands, as on a
+    scanner's HTTP request to an rsh port, which tshark, going by the port,
+    calls rsh."""
+    from db import CONNECTION_TYPE_PREFIX
+
+    def suricata_knows(cid, first, last):
+        return any(start - 1 <= last and first <= end + 1 for start, end in identified.get(cid, ()))
+    for data in shark_rows:
+        event = json.loads(data)
+        event_type = event.get('event_type', '')
+        cid = event.get('community_id')
+        if event_type == 'flow':
+            app = event.get('app_proto') or ''
+            if not app or app in SURICATA_APP_PROTOS or app in RECORDED_APP_PROTOS:
+                continue
+            flow = event.get('flow') or {}
+            first, last = _iso_epoch(flow.get('start')), _iso_epoch(flow.get('end'))
+            if first is not None and suricata_knows(cid, first, last if last is not None else first):
+                continue
+            event['event_type'] = CONNECTION_TYPE_PREFIX + app
+        else:
+            if event_type.replace('_', '-') in SURICATA_APP_PROTOS:
+                continue
+            when = _iso_epoch(event.get('timestamp'))
+            if when is not None and suricata_knows(cid, when, when):
+                continue
+        yield event
+
+
+def merge(dir_path):
+    """Add tshark's rows (merge_rows) to the analysis's events.db - once
+    both Suricata (its events.db imported, no .phase left) and SHAR-CRATES
+    (a current shark.db) are done, whichever finishes last calls this. A
+    later shark.db (a retried run) replaces the rows of an earlier one.
+    Returns how many rows were added, or None if it wasn't time to."""
+    shark_db = shark_db_path(dir_path)
+    events_db = os.path.join(dir_path, 'events.db')
+    with _merge_lock(dir_path):
+        if not (os.path.exists(shark_db) and os.path.exists(events_db)) or \
+                os.path.exists(os.path.join(dir_path, '.phase')) or format_version(shark_db) != SHARK_FORMAT_VERSION:
+            return None
+        stamp = _merge_stamp(shark_db)
+        if tshark_merge_stamp(events_db) == stamp:
+            return None
+        added = replace_tshark_events(events_db, merge_rows(iter_events_json(shark_db),
+                                                            suricata_identified_flows(events_db)), stamp)
+    from analysis_cache import evict_analysis_cache
+    evict_analysis_cache(os.path.basename(os.path.normpath(dir_path)))
+    return added
+
+
+_merging = set()
+
+
+def merge_soon(dir_path):
+    """merge() in the background, unless one is already under way for
+    this analysis - a status poll that finds it unmerged asks again every
+    couple of seconds."""
+    with _merge_locks_lock:
+        if dir_path in _merging:
+            return
+        _merging.add(dir_path)
+
+    def run():
+        try:
+            merge(dir_path)
+        except Exception:
+            pass       # status() keeps reporting it unmerged; the next poll retries
+        finally:
+            with _merge_locks_lock:
+                _merging.discard(dir_path)
+    threading.Thread(target=run, daemon=True).start()
+
+
+def merged(dir_path):
+    """Whether the analysis's events.db has the current shark.db's rows."""
+    shark_db = shark_db_path(dir_path)
+    try:
+        return tshark_merge_stamp(os.path.join(dir_path, 'events.db')) == _merge_stamp(shark_db)
+    except OSError:
+        return False
 
 
 def status(dir_path, pcap_path=None):
