@@ -375,6 +375,111 @@ class S7comm:
         return self.records
 
 
+# ---------------------------------------------------------------- Telnet
+#
+# Suricata recognizes Telnet but logs nothing about it. One record per
+# session: the server's banner, the name and password typed at its login
+# prompts, whether it said the login failed, and the lines typed after -
+# rebuilt from the keystrokes (a client sends each as it's typed; the
+# server echoes them, and its echo is ignored here).
+
+_TELNET_ESCAPES = re.compile(r'\x1b\[[0-9;?]*[A-Za-z~]|\x1b[()][A-Za-z0-9]|\x1b.?')
+_TELNET_USER_PROMPT = re.compile(r'(login|user ?name|user|account)\s*:\s*$', re.I)
+_TELNET_PASSWORD_PROMPT = re.compile(r'pass(word|code)?\s*:\s*$', re.I)
+_TELNET_FAILED = re.compile(r'login incorrect|access denied|authentication fail|invalid (password|login|user)|'
+                            r'login fail|incorrect password|bad password', re.I)
+_TELNET_MAX_SERVER_TEXT = 4096     # of the session's start, enough for its banner and login
+_TELNET_MAX_COMMANDS = 100
+_TELNET_MAX_LINE = 200
+
+
+class _TelnetSession:
+    __slots__ = ('first', 'flow', 'server_text', 'tail', 'state', 'line', 'body', 'commands')
+
+    def __init__(self, flow, when):
+        self.flow, self.first = flow, when
+        self.server_text = ''      # the start of everything the server sent
+        self.tail = ''             # the end of it, for spotting the latest prompt
+        self.state = None          # what the next line typed is: 'user', 'password', or a command
+        self.line = ''
+        self.body = {}
+        self.commands = []
+
+
+class Telnet:
+    """Telnet sessions - see the comment above."""
+    event_type = 'telnet'
+    app_protos = ('telnet',)
+    fields = ('telnet.data',)
+
+    def __init__(self):
+        self.sessions = {}        # flow key -> _TelnetSession
+
+    def feed(self, pkt, v):
+        text = ''.join(v['telnet.data'])
+        if not text:
+            return
+        session = self.sessions.get(pkt.flow.key)
+        if session is None:
+            session = self.sessions[pkt.flow.key] = _TelnetSession(pkt.flow, pkt.when)
+        # The server is whoever's on the Telnet port (the flow's client may
+        # not be settled yet when its first data arrives)
+        if pkt.sport == 23 or (pkt.dport != 23 and pkt.sport == pkt.flow.sport):
+            self._from_server(session, text)
+        else:
+            self._from_client(session, text)
+
+    @staticmethod
+    def _from_server(session, text):
+        clean = _TELNET_ESCAPES.sub('', text)
+        if len(session.server_text) < _TELNET_MAX_SERVER_TEXT:
+            session.server_text += clean
+        session.tail = (session.tail + clean)[-200:]
+        last = session.tail.rstrip(' \t')
+        if _TELNET_PASSWORD_PROMPT.search(last):
+            session.state = 'password'
+        elif _TELNET_USER_PROMPT.search(last):
+            session.state = 'user'
+        if _TELNET_FAILED.search(clean):
+            session.body['login'] = 'failed'
+
+    @staticmethod
+    def _from_client(session, text):
+        for ch in _TELNET_ESCAPES.sub('', text):
+            if ch in '\r\n':
+                line, session.line = session.line, ''
+                if session.state == 'user':
+                    session.body.setdefault('username', line)
+                    session.state = None
+                elif session.state == 'password':
+                    session.body.setdefault('password', line)
+                    session.state = None
+                elif line.strip() and len(session.commands) < _TELNET_MAX_COMMANDS:
+                    session.commands.append(line[:_TELNET_MAX_LINE])
+                session.tail = ''
+            elif ch in '\x08\x7f':
+                session.line = session.line[:-1]
+            elif ch >= ' ' and len(session.line) < 4 * _TELNET_MAX_LINE:
+                session.line += ch
+
+    def finish(self):
+        records = []
+        for session in self.sessions.values():
+            body = dict(session.body)
+            # The banner: the first line of the server's text that reads as
+            # text (option negotiation leaves stray bytes ahead of it)
+            for line in session.server_text.replace('\r', '\n').split('\n'):
+                line = ''.join(ch for ch in line if ch >= ' ' and ch != '\ufffd').strip()
+                if sum(ch.isalnum() for ch in line) >= 3:
+                    body['banner'] = line[:_TELNET_MAX_LINE]
+                    break
+            if session.commands:
+                body['commands'] = session.commands
+            if body:
+                records.append((session.flow, session.first, 'telnet', body))
+        return records
+
+
 # ---------------------------------------------------------------- structured protocols
 #
 # Protocols whose messages nest - several SMB2 commands in one packet, a
@@ -416,7 +521,7 @@ def _pdus(layer):
 
 # Every protocol with records here, from tshark's fields, in the order their
 # fields follow the base fields in tshark's output.
-PROTOCOLS = (LLMNR, NBNS, SSDP, S7comm)
+PROTOCOLS = (LLMNR, NBNS, SSDP, S7comm, Telnet)
 # ... and from the structured pass (shark_analyzer._structured_pass): none
 # yet - it's for a protocol whose messages nest, which flat fields can't
 # keep apart (several commands per packet, a token inside a command).

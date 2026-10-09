@@ -2148,6 +2148,7 @@
                 nbns: '#8d6e63',
                 s7comm: '#00897b',
                 ssdp: '#7e57c2',
+                telnet: '#ffa726',
                 email: '#4fc3f7',
                 filealerts: '#e91e63',
                 fileinfo: '#9c27b0',
@@ -3760,6 +3761,19 @@
             return html;
         }
 
+        // tshark's Telnet records (shark_protocols.Telnet): one per session.
+        function renderTelnetDetails(e) {
+            const t = e.telnet || {};
+            let html = htmlSection('Telnet Details', COLORS.EVENT.telnet);
+            html += htmlRowText('Banner', t.banner);
+            html += htmlRowText('User', t.username, 'mono');
+            html += htmlRowText('Password', t.password, 'mono');
+            html += htmlRowText('Login', t.login);
+            // the lines typed after logging in, one per line
+            if ((t.commands || []).length) html += htmlRow('Commands', escapeHtml(t.commands.join('\n')), 'mono', 'white-space: pre-wrap');
+            return html;
+        }
+
         // tshark's SSDP records (shark_protocols.SSDP).
         function renderSsdpDetails(e) {
             const sp = e.ssdp || {};
@@ -4122,6 +4136,7 @@
             nbns: renderNbnsDetails,
             s7comm: renderS7commDetails,
             ssdp: renderSsdpDetails,
+            telnet: renderTelnetDetails,
             dnp3: renderDnp3Details,
             http: renderHttpDetails,
             modbus: renderModbusDetails,
@@ -6779,6 +6794,7 @@
             nbns: 'NBNS',
             s7comm: 'S7comm',
             ssdp: 'SSDP',
+            telnet: 'Telnet',
             dns_heuristics: 'DNS Heuristics',
             email: 'Emails',
             filealerts: 'File Alerts',
@@ -7155,6 +7171,8 @@
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Type', 'Function', 'Area', 'Error'];
                 case 'ssdp':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Method', 'Search Target', 'Location', 'Server'];
+                case 'telnet':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Banner', 'User', 'Password', 'Login'];
                 case 'ldap':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Operation', 'Message ID', 'Result Code'];
                 case 'arp':
@@ -7615,10 +7633,11 @@
                     break;
                 }
                 case 's7comm':
-                case 'ssdp': {
+                case 'ssdp':
+                case 'telnet': {
                     const cols = getColumnsForType(etype).slice(6);
                     colSpan = 10;
-                    row = rowPrefixCells(e) + cols.map(col => `<td${['Search Target', 'Location'].includes(col) ? ' class="mono"' : ''}>${escapeHtml(extractValue(e, col))}</td>`).join('') + '</tr>';
+                    row = rowPrefixCells(e) + cols.map(col => `<td${['Search Target', 'Location', 'User', 'Password'].includes(col) ? ' class="mono"' : ''}>${escapeHtml(extractValue(e, col))}</td>`).join('') + '</tr>';
                     break;
                 }
                 case 'nbns': {
@@ -9798,6 +9817,10 @@
                 case 'Search Target': return e.ssdp?.search_target || e.ssdp?.notification_type || '';
                 case 'Location': return e.ssdp?.location || '';
                 case 'Server': return e.ssdp?.server || '';
+                case 'Banner': return e.telnet?.banner || '';
+                case 'User': return e.telnet?.username || '';
+                case 'Password': return e.telnet?.password || '';
+                case 'Login': return e.telnet?.login || '';
                 case 'Area': return e.s7comm?.items?.[0]?.area || '';
                 case 'Error': return e.s7comm?.response?.error_class || '';
                 case 'Host': return e.http?.hostname || '';

@@ -383,3 +383,49 @@ def extra_packets():
 
 def write_extra_pcap(path):
     write_pcap(path, extra_packets())
+
+
+# ---------------------------------------------------------------- Telnet
+#
+# Three sessions to TELNET_SERVER:23 - a login (option negotiation, a
+# banner, a name typed a key at a time and echoed back, a password with a
+# backspace in it, commands, an arrow key), a failed login at a MOXA-style
+# "Account:" prompt, and a scanner's HTTP request to the Telnet port,
+# which Suricata takes for HTTP.
+
+TELNET_SERVER = '10.1.0.23'
+
+
+def _keystrokes(text, echo=True):
+    """Each character typed as its own segment, echoed back unless a
+    password."""
+    out = []
+    for ch in text:
+        out.append((True, ch.encode()))
+        if echo and ch not in '\r\x7f':
+            out.append((False, ch.encode()))
+    return out
+
+
+def telnet_packets():
+    iac_do_ttype, iac_will_ttype = b'\xff\xfd\x18', b'\xff\xfb\x18'
+    login = ([(False, iac_do_ttype), (True, iac_will_ttype),
+              (False, b'\r\nUbuntu 22.04.3 LTS\r\nrouter1 login: ')]
+             + _keystrokes('admin\r') + [(False, b'\r\nPassword: ')]
+             + _keystrokes('s3crx\x7fet\r', echo=False)
+             + [(False, b'\r\nLast login: Mon Oct  9 10:00:00 2026\r\nadmin@router1:~$ ')]
+             + _keystrokes('ls -la\r') + [(False, b'\r\ntotal 0\r\nadmin@router1:~$ ')]
+             + [(True, b'\x1b[A'), (False, b'ls -la'), (True, b'\x7f' * 6), (True, b'\r'), (False, b'\r\nadmin@router1:~$ ')]
+             + _keystrokes('exit\r') + [(False, b'\r\nlogout\r\n')])
+    failed = ([(False, iac_do_ttype), (True, iac_will_ttype),
+               (False, b'\r\nMOXA EtherDevice Switch EDS-508A\r\nAccount: ')]
+              + _keystrokes('admin\r') + [(False, b'\r\nPassword: ')] + _keystrokes('admin\r', echo=False)
+              + [(False, b'\r\nLogin incorrect\r\n')])
+    probe = [(True, b'GET / HTTP/1.0\r\n\r\n'), (False, iac_do_ttype + b'\r\nrouter2 login: ')]
+    return (tcp_segments(CLIENT, TELNET_SERVER, 41023, 23, login)
+            + tcp_segments(CLIENT, TELNET_SERVER, 41024, 23, failed)
+            + tcp_segments(CLIENT, TELNET_SERVER, 41025, 23, probe))
+
+
+def write_telnet_pcap(path):
+    write_pcap(path, telnet_packets())

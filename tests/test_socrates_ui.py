@@ -1383,8 +1383,12 @@ class TestSecurityInUI(unittest.TestCase):
         self.assertIn('escapeHtml(', JS_CONTENT)
 
     def test_no_hardcoded_credentials(self):
-        content = JS_CONTENT.lower().replace('disclaimer', '').replace('password-protected', '').replace('password protected', '').replace('common passwords', '')
-        self.assertNotIn('password', content)
+        """No credential written into the page: a password (or secret,
+        token, API key) given a literal value. The word itself is fine -
+        Telnet records have a Password column, read from the capture."""
+        literal = re.compile(r'''(password|passwd|secret|api_?key|token)['"]?\s*[:=]\s*['"][^'"]+['"]''', re.I)
+        self.assertEqual(literal.findall(JS_CONTENT), [])
+        self.assertEqual(literal.findall(HTML_CONTENT), [])
 
     def test_uses_https_for_external_resources(self):
         self.assertIn('https://', HTML_CONTENT)
@@ -21764,6 +21768,8 @@ class TestTsharkUI(unittest.TestCase):
         's7comm': {'event_type': 's7comm', 's7comm': {'type': 'job', 'function': 'Read Var',
                                                       'items': [{'area': 'Data blocks', 'db': 1, 'address': '10.0'}],
                                                       'response': {'error_class': 'Error on supplies'}}},
+        'telnet': {'event_type': 'telnet', 'telnet': {'banner': 'MOXA EtherDevice Switch EDS-508A', 'username': 'admin',
+                                                      'password': 'admin', 'login': 'failed', 'commands': ['ls', 'exit']}},
         'ssdp': {'event_type': 'ssdp', 'ssdp': {'type': 'request', 'method': 'M-SEARCH', 'search_target': 'upnp:rootdevice',
                                                 'location': 'http://10.1.0.60/d.xml', 'server': 'TestGateway/1.0'}},
     }
@@ -21772,6 +21778,7 @@ class TestTsharkUI(unittest.TestCase):
         'nbns': ['registration', 'DESKTOP-TEST01', 'Server service', '10.1.0.10'],
         's7comm': ['job', 'Read Var', 'Data blocks', 'Error on supplies'],
         'ssdp': ['M-SEARCH', 'upnp:rootdevice', 'http://10.1.0.60/d.xml', 'TestGateway/1.0'],
+        'telnet': ['MOXA EtherDevice Switch EDS-508A', 'admin', 'admin', 'failed'],
     }
 
     def test_tshark_record_types_render_their_columns(self):
@@ -21801,6 +21808,19 @@ class TestTsharkUI(unittest.TestCase):
                 self.assertEqual(r['cells'][6:6 + len(expected)], expected)
                 self.assertIn(f'{r["label"]} Details', r['detail'])
 
+    def test_telnet_details_list_the_commands_one_per_line(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""
+            var e = {id: 1, event_type: 'telnet', timestamp: '2026-01-01T00:00:00', proto: 'TCP', source: 'tshark',
+                     telnet: {banner: 'Ubuntu', username: 'admin', password: 's3cret', commands: ['ls -la', '<b>exit</b>']}};
+            var d = document.createElement('div'); d.innerHTML = formatEvent(e);
+            var block = [...d.querySelectorAll('.detail-label')].find(l => l.textContent === 'Commands').nextElementSibling;
+            window.__jsdom_result = {text: block.textContent, html: block.innerHTML, label: eventTypeLabel('telnet')};
+        """)
+        self.assertEqual(result['text'], 'ls -la\n<b>exit</b>', 'escaped, one per line')
+        self.assertNotIn('<b>', result['html'])
+        self.assertEqual(result['label'], 'Telnet')
+
     def test_llmnr_details_show_transmissions_and_responses(self):
         """tshark folds an LLMNR query's resends and repeated answers into
         one record; its details give both counts, when there are any."""
@@ -21825,7 +21845,7 @@ class TestTsharkUI(unittest.TestCase):
         import db
         from tests.jsdom_helper import js_statements
         cols = js_statements("""window.__jsdom_result = Object.fromEntries(
-            ['llmnr', 'nbns', 's7comm', 'ssdp'].map(t => [t, getColumnsForType(t).slice(6)]));""")
+            ['llmnr', 'nbns', 's7comm', 'ssdp', 'telnet'].map(t => [t, getColumnsForType(t).slice(6)]));""")
         for t, columns in cols.items():
             self.assertEqual(list(db.AGGREGATION_JSON_PATHS[t]), columns, t)
 

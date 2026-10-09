@@ -13,6 +13,9 @@ each card marked with a dot:
 - **NBNS, LLMNR, SSDP and S7comm** - one record per transaction: Windows
   name resolution and registration, UPnP device discovery, and Siemens PLC
   reads, writes and control
+- **Telnet** - one record per session: the device's banner, the user name
+  and password typed at its login, whether the login failed, and the
+  commands typed (Suricata recognizes Telnet but logs nothing about it)
 - **A card for every other protocol tshark recognizes** - OpenVPN, PRP,
   RADIUS, MongoDB and so on - listing its connections
 - **Suricata stays in charge** of everything it parses: nothing from tshark
@@ -25,6 +28,12 @@ each card marked with a dot:
 tshark runs at low priority with a 4 GB memory limit; captures of more
 than 4 million packets wait until you click **Add tshark protocols**, and
 Settings can turn tshark off.
+
+### Suricata 8.0.7 and tshark 4.4.19
+
+Suricata is now 8.0.7, the current release in Debian's `trixie-backports`
+repo (up from 8.0.6), and tshark 4.4.19, from Debian's security updates.
+On the test captures, Suricata 8.0.7 logs the same records 8.0.6 did.
 
 ### Fixes
 

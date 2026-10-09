@@ -1388,6 +1388,12 @@ AGGREGATION_JSON_PATHS = {
         'Area': ['$.s7comm.items[0].area'],
         'Error': ['$.s7comm.response.error_class'],
     },
+    'telnet': {
+        'Banner': ['$.telnet.banner'],
+        'User': ['$.telnet.username'],
+        'Password': ['$.telnet.password'],
+        'Login': ['$.telnet.login'],
+    },
     'ssdp': {
         'Method': ['$.ssdp.method', '$.ssdp.status'],
         'Search Target': ['$.ssdp.search_target', '$.ssdp.notification_type'],

@@ -375,6 +375,60 @@ class TestExtraCaptureAgainstSuricata(unittest.TestCase):
         self.assertEqual(write['response']['error_class'], 'Error on supplies')
         self.assertEqual((userdata['type'], userdata['function_group'], userdata['subfunction']), ('userdata', 'CPU functions', 1))
 
+@unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
+class TestTelnet(unittest.TestCase):
+    """tests/protocol_fixtures.write_telnet_pcap: a login, a failed login and
+    a scanner's HTTP request to the Telnet port - with what Suricata 8.0.7
+    logged for them (tests/data/telnet_fixture.eve.json): a 'telnet' label
+    and nothing else for the two sessions, HTTP for the probe."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests.protocol_fixtures import write_telnet_pcap
+        cls.tmpdir = tempfile.mkdtemp()
+        cls.pcap = os.path.join(cls.tmpdir, 'telnet.pcap')
+        write_telnet_pcap(cls.pcap)
+        cls.records = shark_analyzer.run_tshark(cls.pcap)
+        cls.by_port = {r['src_port']: r['telnet'] for r in cls.records if r['event_type'] == 'telnet'}
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    def test_a_login_rebuilt_from_its_keystrokes(self):
+        """Each key its own segment, the server's echo ignored, a
+        backspace applied, an arrow key no command."""
+        self.assertEqual(self.by_port[41023], {'banner': 'Ubuntu 22.04.3 LTS', 'username': 'admin', 'password': 's3cret',
+                                               'commands': ['ls -la', 'exit']})
+
+    def test_a_failed_login(self):
+        self.assertEqual(self.by_port[41024], {'banner': 'MOXA EtherDevice Switch EDS-508A', 'username': 'admin',
+                                               'password': 'admin', 'login': 'failed'})
+
+    def test_flows_match_suricata(self):
+        from scripts.compare_shark_suricata import compare
+        report = compare(_load_eve('telnet_fixture.eve.json'), self.records)['flow']
+        self.assertEqual(report['matched'], 2)
+        self.assertEqual([d['fields'] for d in report['differences']], [{'app_proto': ('http', 'telnet')}],
+                         'only the probe: HTTP by its content to Suricata, Telnet by its port to tshark')
+
+    def test_the_merge_adds_the_sessions_suricata_only_labelled(self):
+        """Suricata recognizes Telnet but logs nothing about it: a 'telnet'
+        label alone keeps nothing out. The probe it logged as HTTP stays
+        Suricata's."""
+        d = os.path.join(self.tmpdir, 'analysis')
+        os.makedirs(d)
+        shutil.copy(self.pcap, d)
+        events_db = os.path.join(d, 'events.db')
+        db.create_sqlite_db(events_db, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data',
+                                                    'telnet_fixture.eve.json'))
+        self.assertTrue(shark_analyzer.build(d, os.path.join(d, 'telnet.pcap')))
+        shark_analyzer.merge(d)
+        merged = db.query_events_sqlite(events_db, 'telnet')
+        self.assertEqual(sorted(e['src_port'] for e in merged), [41023, 41024])
+        self.assertNotIn('conn_telnet', db.get_event_types_sqlite(events_db))
+
+
 class _NbnsFromJson:
     """A structured protocol for testing the structured pass, which no
     protocol uses yet: NBNS names, read from each packet's JSON tree."""

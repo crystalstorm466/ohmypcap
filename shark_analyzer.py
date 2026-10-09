@@ -60,7 +60,7 @@ SHARK_ARTIFACTS = (SHARK_DB, SHARK_DB + '-wal', SHARK_DB + '-shm', SHARK_DB + '.
 # change here or in shark_protocols changes what a run produces: a
 # shark.db stamped with an older version is rebuilt the next time its
 # status is asked for, so existing analyses pick up the change.
-SHARK_FORMAT_VERSION = 8
+SHARK_FORMAT_VERSION = 9
 
 # The fields every packet is read for, one per column of tshark's
 # tab-separated output, in this order - then each of shark_protocols'
@@ -953,6 +953,9 @@ SURICATA_APP_PROTOS = frozenset((
     'http', 'ftp', 'ftp-data', 'smtp', 'tls', 'ssh', 'imap', 'smb', 'dcerpc', 'dns', 'modbus', 'enip', 'dnp3', 'nfs',
     'ntp', 'tftp', 'ike', 'krb5', 'quic', 'dhcp', 'sip', 'rfb', 'mqtt', 'pgsql', 'telnet', 'websocket', 'ldap', 'doh2',
     'rdp', 'http2', 'bittorrent-dht', 'pop3', 'mdns', 'snmp', 'icmp', 'ipv6-icmp', 'icmpv6', 'arp'))
+# ... less the ones it recognizes but writes no records for - tshark's
+# records of those are still the only ones there are.
+SURICATA_RECORDED_APP_PROTOS = SURICATA_APP_PROTOS - {'telnet', 'imap'}
 
 _merge_locks = {}
 _merge_locks_lock = threading.Lock()
@@ -996,7 +999,7 @@ def merge_rows(shark_rows, identified):
                 continue
             event['event_type'] = CONNECTION_TYPE_PREFIX + app
         else:
-            if event_type.replace('_', '-') in SURICATA_APP_PROTOS:
+            if event_type.replace('_', '-') in SURICATA_RECORDED_APP_PROTOS:
                 continue
             when = _iso_epoch(event.get('timestamp'))
             if when is not None and suricata_knows(cid, when, when):
