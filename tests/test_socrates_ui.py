@@ -21447,7 +21447,7 @@ class TestTsharkUI(unittest.TestCase):
                 var el = document.getElementById('tsharkLineStatus');
                 var link = el.querySelector('a');
                 return {text: el.textContent, link: link ? link.dataset.action : null,
-                        barHidden: el.closest('.tshark-line').hidden};
+                        barHidden: el.closest('.tshark-line').hidden, dot: !!el.querySelector('.stat-badge-dot')};
             }
             window.__jsdom_result = {
                 added: shown({status: 'ready', merged: true, seconds: 24}, ['s7comm', 'conn_rsh']),
@@ -21461,11 +21461,12 @@ class TestTsharkUI(unittest.TestCase):
                 disabled: shown({status: 'disabled'}),
             };
         """)
-        self.assertEqual(result['added']['text'], "tshark added 2 protocols Suricata doesn't parse in 24s")
-        self.assertEqual(result['one']['text'], "tshark added 1 protocol Suricata doesn't parse")
-        self.assertEqual(result['none']['text'], "tshark found no protocols beyond Suricata's in 3s")
-        self.assertEqual(result['merging']['text'], 'Adding tshark protocols\u2026')
-        self.assertEqual(result['running']['text'], 'Adding tshark protocols\u2026 5s')
+        self.assertEqual(result['added']['text'], 'tshark parsed 2 additional protocols in 24s')
+        self.assertEqual(result['added']['dot'], True, "it starts with the dot that marks tshark's cards - the key to them")
+        self.assertEqual(result['one']['text'], 'tshark parsed 1 additional protocol')
+        self.assertEqual((result['none']['text'], result['none']['dot']), ('tshark found no additional protocols in 3s', False))
+        self.assertEqual(result['merging']['text'], 'tshark is parsing additional protocols\u2026')
+        self.assertEqual((result['running']['text'], result['running']['dot']), ('tshark is parsing additional protocols\u2026 5s', False))
         self.assertIn('waiting for another capture', result['queued']['text'])
         self.assertIn('more packets than tshark analyzes automatically', result['tooLarge']['text'])
         self.assertEqual(result['tooLarge']['link'], 'start-shark', 'Add tshark protocols starts it')
@@ -21497,10 +21498,10 @@ class TestTsharkUI(unittest.TestCase):
             var d = document.createElement('div'); d.innerHTML = sharkStatusHtml(sharkStatus);
             window.__jsdom_result = {held: held, refreshed: refreshed, pending: tsharkRowsPending, text: d.textContent};
         """)
-        self.assertEqual(result['held'], {'refreshed': 0, 'text': 'tshark found more protocols \u2013 Show them',
+        self.assertEqual(result['held'], {'refreshed': 0, 'text': 'tshark parsed additional protocols \u2013 Show them',
                                           'link': 'show-tshark-rows'})
         self.assertEqual((result['refreshed'], result['pending']), (1, False))
-        self.assertEqual(result['text'], "tshark added 1 protocol Suricata doesn't parse")
+        self.assertEqual(result['text'], 'tshark parsed 1 additional protocol')
 
     def test_tshark_line_sits_between_the_header_and_search_and_is_cleared_with_the_page(self):
         html = HTML_CONTENT
@@ -21599,16 +21600,17 @@ class TestTsharkUI(unittest.TestCase):
             window.__jsdom_result = {first: first, later: later, ticking: ticking, hidden: timer.getAttribute('aria-hidden'),
                 stoppedAfter: sharkClockTimer === null, ready: document.getElementById('tsharkLineStatus').textContent};
         """)
-        self.assertEqual(result['first'], 'Adding tshark protocols\u2026 12s')
+        self.assertEqual(result['first'], 'tshark is parsing additional protocols\u2026 12s')
         self.assertEqual(result['later'], '15s')
         self.assertTrue(result['ticking'])
         self.assertEqual(result['hidden'], 'true', 'not read out every second from the live region')
         self.assertTrue(result['stoppedAfter'])
-        self.assertEqual(result['ready'], "tshark added 2 protocols Suricata doesn't parse in 48s")
+        self.assertEqual(result['ready'], 'tshark parsed 2 additional protocols in 48s')
 
     def test_the_badge_is_a_corner_dot_with_a_key_and_hidden_text(self):
-        """The badge keeps the card at two lines: a dot, explained by the
-        tshark line's key, and readable text only for screen readers."""
+        """The badge keeps the card at two lines: a dot - the tshark line
+        starts with the same one - with a tooltip, and readable text only for
+        screen readers. There's no separate key."""
         from tests.jsdom_helper import js_statements
         result = js_statements("""
             document.getElementById('tsharkLineContainer').innerHTML = tsharkLineHtml();
@@ -21617,19 +21619,13 @@ class TestTsharkUI(unittest.TestCase):
             tsharkTypes = new Set(['s7comm']);
             buildStats(null);
             var badge = document.querySelector('.stat-badge');
-            var shown = !document.getElementById('tsharkLineKey').hidden;
-            eventTypes = ['flow', 'dns']; eventStats = {flow: 1, dns: 1}; tsharkTypes = new Set();
-            buildStats(null);
             window.__jsdom_result = {text: badge.textContent, visibleText: [...badge.childNodes].filter(n => n.nodeType === 3).length,
-                srOnly: !!badge.querySelector('.sr-only'), keyShown: shown, keyHiddenWithout: document.getElementById('tsharkLineKey').hidden,
-                keyText: document.getElementById('tsharkLineKey').textContent, title: badge.title};
+                srOnly: !!badge.querySelector('.sr-only'), title: badge.title, key: !!document.getElementById('tsharkLineKey')};
         """)
         self.assertEqual(result['text'], 'from tshark')
         self.assertTrue(result['srOnly'])
         self.assertEqual(result['visibleText'], 0)
-        self.assertTrue(result['keyShown'])
-        self.assertTrue(result['keyHiddenWithout'])
-        self.assertEqual(result['keyText'], 'from tshark')
+        self.assertFalse(result['key'])
         self.assertEqual(result['title'], "From tshark: Suricata doesn't parse this protocol")
         self.assertIn('.stat-badge { position: absolute;', CSS_CONTENT)
 

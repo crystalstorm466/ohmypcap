@@ -9483,10 +9483,6 @@
                     </div>
                 `;
             }).join('');
-            // The key to the cards' corner dot, beside the view tabs - only
-            // when some card carries one.
-            const badgeKey = document.getElementById('tsharkLineKey');
-            if (badgeKey) badgeKey.hidden = !stats.some(s => s.count > 0 && s.notInSuricata);
             const numberEls = grid.querySelectorAll('.stat-number');
             stats.filter(s => s.count > 0).forEach((s, i) => animateStatNumber(numberEls[i], s.count));
             fitStatLabels(grid);
@@ -11774,32 +11770,33 @@
         function tsharkLineHtml() {
             return `<div class="tshark-line">`
                 + `<span id="tsharkLineStatus" class="tshark-line-status" aria-live="polite"></span>`
-                + `<span id="tsharkLineKey" class="tshark-line-key" hidden><span class="stat-badge-dot" aria-hidden="true"></span>from tshark</span>`
                 + `</div>`;
         }
 
         // The line's text, as HTML, with a link for the two states that
-        // need a click.
+        // need a click. Once tshark has added protocols, the line starts
+        // with the dot that marks their cards - it's the key to it.
         function sharkStatusHtml(status) {
             const st = status && status.status;
+            const dot = '<span class="stat-badge-dot" aria-hidden="true"></span>';
             // tshark's rows have joined, but the cards haven't reloaded yet:
             // held while the analyst is on the cards, or loading now
             if (st === 'ready' && tsharkRowsPending === 'held') {
-                return 'tshark found more protocols \u2013 <a href="#" data-action="show-tshark-rows">Show them</a>';
+                return `${dot}tshark parsed additional protocols \u2013 <a href="#" data-action="show-tshark-rows">Show them</a>`;
             }
-            if (st === 'ready' && tsharkRowsPending) return 'Adding tshark protocols\u2026';
+            if (st === 'ready' && tsharkRowsPending) return 'tshark is parsing additional protocols\u2026';
             if (st === 'ready' && status.merged !== false) {
                 const took = Number.isFinite(status.seconds) ? ` in ${status.seconds.toLocaleString()}s` : '';
                 return tsharkTypes.size
-                    ? `tshark added ${tsharkTypes.size} protocol${tsharkTypes.size === 1 ? '' : 's'} Suricata doesn't parse${took}`
-                    : `tshark found no protocols beyond Suricata's${took}`;
+                    ? `${dot}tshark parsed ${tsharkTypes.size} additional protocol${tsharkTypes.size === 1 ? '' : 's'}${took}`
+                    : `tshark found no additional protocols${took}`;
             }
-            if (st === 'ready') return 'Adding tshark protocols…';
+            if (st === 'ready') return 'tshark is parsing additional protocols\u2026';
             if (st === 'queued') return 'tshark is waiting for another capture to finish';
             // The ticking count is hidden from screen readers: the status is
             // a live region, and a number changing every second would be
             // read out every second.
-            if (st === 'running') return `Adding tshark protocols… <span id="tsharkLineTimer" class="tshark-line-timer" aria-hidden="true">${Math.max(0, status.elapsed || 0)}s</span>`;
+            if (st === 'running') return `tshark is parsing additional protocols… <span id="tsharkLineTimer" class="tshark-line-timer" aria-hidden="true">${Math.max(0, status.elapsed || 0)}s</span>`;
             if (st === 'too_large') return 'This capture has more packets than tshark analyzes automatically – <a href="#" data-action="start-shark">Add tshark protocols</a>';
             if (st === 'error') return `Couldn't add tshark protocols: ${escapeHtml(status.message || 'tshark analysis failed')} – <a href="#" data-action="start-shark">Try again</a>`;
             return '';    // waiting (Suricata isn't done), disabled, unavailable
@@ -11810,7 +11807,7 @@
             if (!statusEl) return;
             statusEl.innerHTML = sharkStatusHtml(sharkStatus);
             const bar = statusEl.closest('.tshark-line');
-            if (bar) bar.hidden = !statusEl.textContent && document.getElementById('tsharkLineKey').hidden;
+            if (bar) bar.hidden = !statusEl.textContent;
             syncSharkClock();
         }
 
