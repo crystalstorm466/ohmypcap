@@ -6,6 +6,7 @@ real tshark output skip when tshark isn't installed."""
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -780,7 +781,7 @@ class TestQueue(unittest.TestCase):
         from tests.protocol_fixtures import write_protocol_pcap
         write_protocol_pcap(self.pcaps[0])
         with mock.patch.object(shark_analyzer.time, 'monotonic', side_effect=[100.0, 117.4] + [200.0] * 50):
-            shark_analyzer.analyze(self.dirs[0], self.pcaps[0])
+            self.assertTrue(shark_analyzer.build(self.dirs[0], self.pcaps[0]))
         self.assertEqual(shark_analyzer.status(self.dirs[0]), {'status': 'ready', 'seconds': 17})
 
     def test_a_shark_db_without_its_run_time_is_still_ready(self):
@@ -806,18 +807,53 @@ class TestQueue(unittest.TestCase):
             self.assertTrue(shark_analyzer.wait_idle(10))
         self.assertEqual(ran, [self.dirs[0]])
 
-    def test_cancel_kills_a_running_tshark_without_recording_an_error(self):
-        with mock.patch.object(shark_analyzer, 'tshark_command', return_value=['sleep', '30']):
+    def test_cancel_kills_a_running_build_and_its_tshark_without_recording_an_error(self):
+        """The build runs in a child process with tshark as its own child:
+        cancelling kills the whole process group, so neither outlives it."""
+        marker = os.path.join(self.dirs[0], 'grandchild.pid')
+        with mock.patch.object(shark_analyzer, '_child_command',
+                               return_value=['sh', '-c', f'sleep 30 & echo $! > {marker}; wait']):
             shark_analyzer.enqueue(self.dirs[0], self.pcaps[0])
             deadline = time.monotonic() + 5
-            while shark_analyzer._running_proc is None and time.monotonic() < deadline:
+            while not (os.path.exists(marker) and os.path.getsize(marker)) and time.monotonic() < deadline:
                 time.sleep(0.02)
+            grandchild = int(open(marker).read())
             start = time.monotonic()
             shark_analyzer.cancel(self.dirs[0])
             self.assertTrue(shark_analyzer.wait_idle(10))
         self.assertLess(time.monotonic() - start, 5)
+        deadline = time.monotonic() + 5
+        while os.path.exists(f'/proc/{grandchild}') and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertFalse(os.path.exists(f'/proc/{grandchild}'), "the build's own child (tshark) was killed too")
         self.assertFalse(os.path.exists(os.path.join(self.dirs[0], shark_analyzer.SHARK_ERROR)))
         self.assertFalse(os.path.exists(shark_analyzer.shark_db_path(self.dirs[0])))
+
+    def test_a_build_that_dies_without_saying_why_is_recorded_as_an_error(self):
+        """Killed (out of memory, most often) or crashed: the build never
+        got to write .shark_error, so analyze does."""
+        for command, expected in ((['sh', '-c', 'kill -9 $$'], 'tshark analysis stopped: killed - out of memory?'),
+                                  (['sh', '-c', 'echo "MemoryError: boom" >&2; exit 1'], 'tshark analysis stopped: MemoryError: boom')):
+            with self.subTest(command=command), mock.patch.object(shark_analyzer, '_child_command', return_value=command):
+                shark_analyzer.analyze(self.dirs[0], self.pcaps[0])
+                self.assertEqual(shark_analyzer.status(self.dirs[0]), {'status': 'error', 'message': expected})
+
+    @unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
+    def test_the_build_runs_in_its_own_lower_priority_process(self):
+        from tests.protocol_fixtures import write_protocol_pcap
+        write_protocol_pcap(self.pcaps[0])
+        seen = {}
+        real_popen = subprocess.Popen
+
+        def spy(cmd, **kwargs):
+            seen.update(cmd=cmd, kwargs=kwargs)
+            return real_popen(cmd, **kwargs)
+        with mock.patch.object(shark_analyzer.subprocess, 'Popen', side_effect=spy):
+            shark_analyzer.analyze(self.dirs[0], self.pcaps[0])
+        self.assertEqual(seen['cmd'][-4:], ['shark_analyzer', 'build', self.dirs[0], self.pcaps[0]])
+        self.assertTrue(seen['kwargs']['start_new_session'])
+        self.assertIs(seen['kwargs']['preexec_fn'], shark_analyzer._low_priority)
+        self.assertEqual(shark_analyzer.status(self.dirs[0])['status'], 'ready')
 
 
 @unittest.skipUnless(HAS_TSHARK, 'tshark not installed')

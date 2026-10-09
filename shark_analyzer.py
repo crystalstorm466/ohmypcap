@@ -35,7 +35,9 @@ import ipaddress
 import os
 import re
 import shutil
+import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -332,6 +334,13 @@ def build_records(lines):
     """Turn tshark's per-packet field lines (tshark_command's output) into
     records: one flow per conversation, in order of first packet, then
     shark_protocols' transaction records."""
+    return list(iter_records(lines))
+
+
+def iter_records(lines):
+    """build_records' records, one at a time: a flow's is built as it's
+    handed out and the flow then let go, so a capture's flows - most of
+    its records - never exist twice over, or all at once as records."""
     flows = {}
     protocols = [(proto(), [_COLUMN[field] for field in proto.fields]) for proto in PROTOCOLS]
     for line in lines:
@@ -410,11 +419,15 @@ def build_records(lines):
                 packet = Packet(_int(f[_F_FRAME]), when, flow, sport, dport, app, src, dst)
             handler.feed(packet, {name: [_unescape(x) for x in value.split(_AGGREGATOR)] if value else []
                                   for name, value in zip(handler.fields, values)})
-    events = [flow.event() for flow in sorted(flows.values(), key=lambda fl: fl.first)]
+    ordered = sorted(flows.values(), key=lambda fl: fl.first)
+    flows.clear()
+    for i, flow in enumerate(ordered):
+        ordered[i] = None    # the transaction records below hold the flows they need
+        yield flow.event()
+    del ordered
     for handler, _ in protocols:
         for flow, when, event_type, body in handler.finish():
-            events.append(flow.record(when, event_type, body))
-    return events
+            yield flow.record(when, event_type, body)
 
 
 def build_flows(lines):
@@ -431,11 +444,12 @@ def _low_priority():
         pass
 
 
-def run_tshark(pcap_path, timeout=None, on_start=None):
-    """Run tshark over pcap_path and return its records. Raises
-    RuntimeError if tshark is missing, fails, is killed, or exceeds the
-    timeout. on_start, if given, is called with the tshark process as soon
-    as it starts (so the queue can kill it on cancel)."""
+def run_tshark(pcap_path, timeout=None, on_start=None, consume=list):
+    """Run tshark over pcap_path and return consume(its records) - by
+    default, the records as a list; analyze's build streams them into
+    shark.db instead. Raises RuntimeError if tshark is missing, fails, is
+    killed, or exceeds the timeout. on_start, if given, is called with the
+    tshark process as soon as it starts."""
     if not shutil.which('tshark'):
         raise RuntimeError('tshark is not installed')
     cmd = tshark_command(pcap_path)
@@ -457,7 +471,7 @@ def run_tshark(pcap_path, timeout=None, on_start=None):
         killer = threading.Timer(timeout, _kill)
         killer.start()
         try:
-            events = build_records(proc.stdout)
+            events = consume(iter_records(proc.stdout))
             proc.wait()
         finally:
             killer.cancel()
@@ -473,18 +487,68 @@ def run_tshark(pcap_path, timeout=None, on_start=None):
     return events
 
 
+def _child_command(dir_path, pcap_path):
+    cmd = [sys.executable, '-m', 'shark_analyzer', 'build', dir_path, pcap_path]
+    if shutil.which('ionice'):
+        cmd = ['ionice', '-c', '3'] + cmd
+    return cmd
+
+
+def _kill_group(proc):
+    """Kill a build and its tshark: the build leads its own process group."""
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except OSError:
+        pass
+
+
 def analyze(dir_path, pcap_path, on_start=None):
-    """Build dir_path's shark.db from pcap_path. On failure, writes the
-    reason to .shark_error instead - unless the run was cancelled, whose
-    directory is being cleared or removed."""
+    """Build dir_path's shark.db from pcap_path, in a child process (build)
+    at the lowest CPU and I/O priority - so building the records competes
+    with neither the server's own Python nor Suricata, and the memory it
+    took goes back when it exits. On failure, .shark_error says why -
+    unless the run was cancelled, whose directory is being cleared or
+    removed. on_start is called with the child process (the queue kills
+    its process group to cancel it)."""
+    _remove(os.path.join(dir_path, SHARK_ERROR))
+    with tempfile.TemporaryFile(mode='w+', errors='replace') as stderr_file:
+        proc = subprocess.Popen(_child_command(dir_path, pcap_path), cwd=os.path.dirname(os.path.abspath(__file__)),
+                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=stderr_file,
+                                preexec_fn=_low_priority, start_new_session=True)
+        if on_start:
+            on_start(proc)
+        try:
+            # The build enforces tshark's own timeout; this one is for a
+            # build that hangs after it
+            proc.wait(timeout=config.SHARK_RUN_TIMEOUT + 600)
+        except subprocess.TimeoutExpired:
+            _kill_group(proc)
+            proc.wait()
+        if proc.returncode == 0 or _was_cancelled(dir_path) or os.path.exists(os.path.join(dir_path, SHARK_ERROR)):
+            return
+        stderr_file.seek(0)
+        lines = stderr_file.read()[-64 * 1024:].strip().splitlines()
+    # It died without saying why: killed (out of memory, most often) or crashed
+    detail = lines[-1] if lines else ('killed - out of memory?' if proc.returncode == -signal.SIGKILL else f'exit code {proc.returncode}')
+    _remove(shark_db_path(dir_path) + '.tmp')
+    try:
+        with open(os.path.join(dir_path, SHARK_ERROR), 'w') as f:
+            f.write(f'tshark analysis stopped: {detail}'[:500])
+    except OSError:
+        pass
+
+
+def build(dir_path, pcap_path):
+    """analyze's child process: run tshark and write its records into
+    shark.db as they're built, committing as it goes. On failure, writes
+    the reason to .shark_error. Returns whether it succeeded."""
     db_path = shark_db_path(dir_path)
     tmp_path = db_path + '.tmp'
-    _remove(os.path.join(dir_path, SHARK_ERROR))
     started = time.monotonic()
     try:
-        events = run_tshark(pcap_path, on_start=on_start)
-        _remove(tmp_path)
-        create_shark_db(tmp_path, events)
+        for name in (tmp_path, tmp_path + '-wal', tmp_path + '-shm'):
+            _remove(name)
+        run_tshark(pcap_path, consume=lambda records: create_shark_db(tmp_path, records))
         conn = sqlite3.connect(tmp_path)
         try:
             conn.execute(f'PRAGMA user_version = {SHARK_FORMAT_VERSION}')
@@ -496,15 +560,15 @@ def analyze(dir_path, pcap_path, on_start=None):
         finally:
             conn.close()
         os.replace(tmp_path, db_path)
+        return True
     except Exception as e:
         _remove(tmp_path)
-        if _was_cancelled(dir_path):
-            return
         try:
             with open(os.path.join(dir_path, SHARK_ERROR), 'w') as f:
                 f.write(str(e)[:500])
         except OSError:
             pass
+        return False
 
 
 def _remove(path):
@@ -537,8 +601,8 @@ def _set_running_proc(proc):
     global _running_proc
     with _lock:
         _running_proc = proc
-        if _running in _cancelled:   # cancelled before tshark had started
-            proc.kill()
+        if _running in _cancelled:   # cancelled before the build had started
+            _kill_group(proc)
 
 
 def _work():
@@ -583,10 +647,7 @@ def cancel(dir_path):
         elif dir_path == _running:
             _cancelled.add(dir_path)
             if _running_proc is not None:
-                try:
-                    _running_proc.kill()
-                except OSError:
-                    pass
+                _kill_group(_running_proc)
 
 
 def background_eligible(pcap_path):
@@ -668,3 +729,10 @@ def wait_idle(timeout=60):
                 return True
         time.sleep(0.05)
     return False
+
+
+if __name__ == '__main__':
+    # analyze's child: python3 -m shark_analyzer build <analysis dir> <pcap>
+    if len(sys.argv) == 4 and sys.argv[1] == 'build':
+        sys.exit(0 if build(sys.argv[2], sys.argv[3]) else 1)
+    sys.exit('usage: python3 -m shark_analyzer build <analysis dir> <pcap>')

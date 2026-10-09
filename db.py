@@ -576,8 +576,13 @@ def create_shark_db(db_path, events):
     query function here reads either one."""
     with _db_connection(db_path) as conn:
         has_fts = _init_db(conn)
-        for event in events:
+        # Committed every so often, so a capture's million records don't
+        # pile up in one transaction's journal (events can be a generator -
+        # shark_analyzer streams them in as it builds them)
+        for i, event in enumerate(events, 1):
             _insert_event(conn, event, has_fts)
+            if i % 50000 == 0:
+                conn.commit()
         conn.execute('PRAGMA optimize;')
         conn.commit()
 

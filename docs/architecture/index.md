@@ -47,7 +47,7 @@ A stdlib-only Python HTTP server (`http.server.SimpleHTTPRequestHandler`). Handl
 | `ohmydebn_colors.py` | Derives a full SO-CRATES theme from an OhMyDebn/Aether color palette (`colors.toml` or `alacritty.toml`), for the theme-sync feature |
 | `cyberchef.py` | The bundled CyberChef: where it lives (`CYBERCHEF_DIR`) and the Content-Security-Policy its responses get |
 | `stream_payload.py` | Exact-byte stream payloads for `/api/raw-stream`, via `tshark`'s follow mode |
-| `shark_analyzer.py` | SHAR-CRATES, the tshark view of a PCAP: one background tshark run per capture, grouped into Suricata-shaped flow records in `shark.db` (same schema as `events.db`) |
+| `shark_analyzer.py` | SHAR-CRATES, the tshark view of a PCAP: one background run per capture, in a child process at the lowest CPU and I/O priority (`python3 -m shark_analyzer build`), grouping tshark's fields into Suricata-shaped records streamed into `shark.db` (same schema as `events.db`) |
 | `shark_protocols.py` | SHAR-CRATES's per-protocol transaction records (DNS/mDNS/LLMNR, HTTP, TLS/QUIC, Modbus, FTP, NBNS, SSDP, S7comm), in Suricata's eve.json layout where Suricata has one |
 | `samples.py` | Sample files built into SO-CRATES (the main screen's offline Sample PCAP, log, binary and email files), generated on request for `POST /api/load-sample` |
 | `email_analyzer.py` | Email message (`.eml`) analysis: parsing headers, links and forwarded messages into events, and storing and YARA-scanning the message and its attachments |
