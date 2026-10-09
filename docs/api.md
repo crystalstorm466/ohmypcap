@@ -422,7 +422,7 @@ or, if analysis (Suricata/YARA/Zircolite/email parsing) failed:
 
 ### `GET /api/shark-status`
 
-SHAR-CRATES status for a PCAP analysis. After Suricata finishes, the same capture is analyzed by tshark in the background (captures up to `SHARK_BACKGROUND_MAX_BYTES`, 250 MB by default; bigger ones only on request - see `POST /api/shark-start`), and its records are stored in the analysis's `shark.db`. The data endpoints read them with `view=shark`. An analysis that has never been queued (one from before SHAR-CRATES, or whose queued run was lost to a server restart) is queued by its first status request, if it's under the size limit.
+SHAR-CRATES status for a PCAP analysis. After Suricata finishes, the same capture is analyzed by tshark in the background (captures up to `SHARK_BACKGROUND_MAX_PACKETS`, 4 million packets by default; bigger ones only on request - see `POST /api/shark-start`. A run whose processes pass `SHARK_MAX_MEMORY_BYTES`, 4 GB by default, is stopped with an error), and its records are stored in the analysis's `shark.db`. The data endpoints read them with `view=shark`. An analysis that has never been queued (one from before SHAR-CRATES, or whose queued run was lost to a server restart) is queued by its first status request, if it's under the packet limit. While SHAR-CRATES is switched off (`POST /api/shark-settings`), every status is `disabled` and nothing runs.
 
 **Query Parameters:**
 
@@ -442,6 +442,7 @@ SHAR-CRATES status for a PCAP analysis. After Suricata finishes, the same captur
 | `error` | The last run failed. Adds `message` |
 | `not_started` | Not queued yet |
 | `unavailable` | Not a PCAP analysis |
+| `disabled` | SHAR-CRATES is switched off in Settings |
 
 ### `GET /api/sigma-alerts`
 
@@ -689,6 +690,10 @@ Only `md5` is read from the request body - the response's `phase` is determined 
 Starts SHAR-CRATES for a PCAP analysis on request, whatever its size - for a capture over the background size limit, or to retry after an error. Returns the same response as `GET /api/shark-status`.
 
 **Request Body:** `{"md5": "<md5>"}` (`400` if invalid, `404` if the analysis doesn't exist)
+
+### `GET /api/shark-settings` / `POST /api/shark-settings`
+
+Whether SHAR-CRATES runs at all, for every analysis on the server - on by default. `GET` returns `{"enabled": true}`; `POST` with `{"enabled": false}` (or `true`) changes it and returns the new value (`400` unless `enabled` is a boolean). Turning it off stops new runs (one already running finishes) and hides SHAR-CRATES; existing `shark.db` files stay, so turning it back on shows them again. Kept in the data directory's `shark_settings.json`.
 
 ### `POST /api/delete-analysis`
 

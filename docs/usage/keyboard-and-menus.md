@@ -38,7 +38,7 @@ Typing any letter or digit outside a text field opens a command palette, pre-fil
 The gear icon in the upper-right corner opens a menu with five entries:
 
 - **Help** - the welcome/help modal, including a link to this documentation site
-- **Settings** - upload size, query result limit, custom lookup sites, and a Danger Zone section to permanently delete every previous analysis at once (with a live count of how many exist)
+- **Settings** - upload size, query result limit, whether PCAPs are also analyzed with tshark (SHAR-CRATES), custom lookup sites, and a Danger Zone section to permanently delete every previous analysis at once (with a live count of how many exist)
 - **Themes** - browse and apply themes; see [Themes](../themes.md)
 - **Rules** - check the current rule count and last-updated time for Suricata, YARA, and Sigma, and trigger an update for one ruleset (or all three) with live progress. Rule updates are not run automatically at startup - this modal is the only way to refresh them after the initial install. The Suricata section also has a "Show protocol-anomaly noise alerts" toggle (off by default) for Suricata's own built-in decoder alerts (e.g. excessive retransmissions) - see [Decoder Alerts](exploring-results.md#navigate-results) - and a "Notify me when detection rules are stale after N days" option that shows a reminder on the main screen
 - **About** - current version, links to this documentation site and the GitHub repo, and an opt-in "Check GitHub for newer releases" setting with a manual "Check Now" button

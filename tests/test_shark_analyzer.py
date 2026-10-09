@@ -846,12 +846,44 @@ class TestAnalyze(unittest.TestCase):
                 shark_analyzer.run_tshark(self.pcap, timeout=0.3)
         self.assertLess(time.monotonic() - start, 10)
 
-    def test_background_size_limit(self):
+    def test_background_limit_is_a_packet_count(self):
+        """tshark's memory follows packets, not bytes: the limit counts them."""
+        self.assertEqual(shark_analyzer.packet_count(self.pcap), 52)
         self.assertTrue(shark_analyzer.background_eligible(self.pcap))
-        with mock.patch.object(config, 'SHARK_BACKGROUND_MAX_BYTES', 10):
+        with mock.patch.object(config, 'SHARK_BACKGROUND_MAX_PACKETS', 51):
             self.assertFalse(shark_analyzer.background_eligible(self.pcap))
             self.assertEqual(shark_analyzer.status(self.dir, self.pcap), {'status': 'too_large'})
+        with mock.patch.object(config, 'SHARK_BACKGROUND_MAX_BYTES', 10):
+            self.assertTrue(shark_analyzer.background_eligible(self.pcap), 'the file size no longer decides')
         self.assertFalse(shark_analyzer.background_eligible(os.path.join(self.dir, 'missing.pcap')))
+
+    def test_without_capinfos_the_size_decides(self):
+        real_which = shutil.which
+        with mock.patch.object(shark_analyzer.shutil, 'which', side_effect=lambda n: None if n == 'capinfos' else real_which(n)):
+            shark_analyzer._PACKET_COUNTS.clear()
+            self.assertIsNone(shark_analyzer.packet_count(self.pcap))
+            with mock.patch.object(config, 'SHARK_BACKGROUND_MAX_BYTES', 10):
+                self.assertFalse(shark_analyzer.background_eligible(self.pcap))
+        shark_analyzer._PACKET_COUNTS.clear()
+
+
+class TestSettingsSwitch(unittest.TestCase):
+    def test_on_unless_turned_off_and_survives_a_bad_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertTrue(shark_analyzer.enabled(d))
+            shark_analyzer.set_enabled(d, False)
+            self.assertFalse(shark_analyzer.enabled(d))
+            shark_analyzer.set_enabled(d, True)
+            self.assertTrue(shark_analyzer.enabled(d))
+            with open(os.path.join(d, shark_analyzer.SHARK_SETTINGS), 'w') as f:
+                f.write('not json')
+            self.assertTrue(shark_analyzer.enabled(d), 'an unreadable setting leaves it on')
+
+    def test_suricatas_completion_queues_shar_crates_only_when_on(self):
+        import inspect
+        import suricata_analyzer
+        src = inspect.getsource(suricata_analyzer.spawn_suricata)
+        self.assertIn('shark_analyzer.enabled(data_dir) and shark_analyzer.background_eligible(pcap_path)', src)
 
 
 class TestQueue(unittest.TestCase):
@@ -958,6 +990,21 @@ class TestQueue(unittest.TestCase):
         self.assertFalse(os.path.exists(f'/proc/{grandchild}'), "the build's own child (tshark) was killed too")
         self.assertFalse(os.path.exists(os.path.join(self.dirs[0], shark_analyzer.SHARK_ERROR)))
         self.assertFalse(os.path.exists(shark_analyzer.shark_db_path(self.dirs[0])))
+
+    def test_a_build_that_passes_the_memory_limit_is_stopped(self):
+        """The limit covers the build and everything in its process group
+        (tshark): here a child of the build is the one that grows."""
+        grow = [sys.executable, '-c', 'import subprocess, sys; subprocess.run([sys.executable, "-c", '
+                '"import time; x = bytearray(300 * 1024 * 1024); time.sleep(30)"])']
+        with mock.patch.object(shark_analyzer, '_child_command', return_value=grow), \
+                mock.patch.object(config, 'SHARK_MAX_MEMORY_BYTES', 100 * 1024 * 1024), \
+                mock.patch.object(config, 'SHARK_MEMORY_CHECK_SECONDS', 0.05):
+            start = time.monotonic()
+            shark_analyzer.analyze(self.dirs[0], self.pcaps[0])
+        self.assertLess(time.monotonic() - start, 15, 'stopped, not left to sleep')
+        status = shark_analyzer.status(self.dirs[0])
+        self.assertEqual(status['status'], 'error')
+        self.assertIn('more than 0.0976562 GB of memory', status['message'])
 
     def test_a_build_that_dies_without_saying_why_is_recorded_as_an_error(self):
         """Killed (out of memory, most often) or crashed: the build never
@@ -1093,13 +1140,26 @@ class TestSharkAPI(unittest.TestCase):
         self.assertEqual(body, {'status': 'waiting'})
 
     def test_too_large_waits_to_be_asked_then_shark_start_runs_it(self):
-        with mock.patch.object(config, 'SHARK_BACKGROUND_MAX_BYTES', 10):
+        with mock.patch.object(config, 'SHARK_BACKGROUND_MAX_PACKETS', 1):
             _, body = self._get(f'/api/shark-status?md5={self.md5}')
             self.assertEqual(body, {'status': 'too_large'})
             status, body = self._post('/api/shark-start', {'md5': self.md5})
             self.assertEqual(status, 200)
             self.assertIn(body['status'], ('queued', 'running', 'ready'))
             self.assertEqual(self._wait_ready()['status'], 'ready')
+
+    def test_the_settings_switch_turns_shar_crates_off_and_on(self):
+        self.assertEqual(self._get('/api/shark-settings')[1], {'enabled': True}, 'on by default')
+        try:
+            self.assertEqual(self._post('/api/shark-settings', {'enabled': False}), (200, {'enabled': False}))
+            self.assertEqual(self._get('/api/shark-settings')[1], {'enabled': False})
+            self.assertEqual(self._get(f'/api/shark-status?md5={self.md5}')[1], {'status': 'disabled'})
+            self.assertEqual(self._post('/api/shark-start', {'md5': self.md5})[1], {'status': 'disabled'},
+                             'nothing runs while it is off, even on request')
+            self.assertEqual(self._post('/api/shark-settings', {'enabled': 'no'})[0], 400)
+        finally:
+            self._post('/api/shark-settings', {'enabled': True})
+        self.assertEqual(self._wait_ready()['status'], 'ready', 'back on: the analysis gets its run')
 
     def test_not_a_pcap_analysis(self):
         os.unlink(os.path.join(self.dir, 'sample.pcap'))

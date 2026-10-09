@@ -639,6 +639,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         '/api/sigma-stats': 'handle_get_sigma_stats',
         '/api/status': 'handle_get_status',
         '/api/shark-status': 'handle_get_shark_status',
+        '/api/shark-settings': 'handle_get_shark_settings',
         '/api/rule-update-status': 'handle_get_rule_update_status',
         '/api/rules-info': 'handle_get_rules_info',
         '/api/playbook': 'handle_get_playbook',
@@ -652,6 +653,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         '/api/check-status': 'handle_post_check_status',
         '/api/reanalyze': 'handle_post_reanalyze',
         '/api/shark-start': 'handle_post_shark_start',
+        '/api/shark-settings': 'handle_post_shark_settings',
         '/api/delete-analysis': 'handle_post_delete_analysis',
         '/api/rename-analysis': 'handle_post_rename_analysis',
         '/api/analysis-notes': 'handle_post_analysis_notes',
@@ -2621,10 +2623,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         was lost to a server restart - is queued here, on the first status
         request. start=True (the user asked) queues it whatever its size.
         'waiting' means Suricata hasn't finished; 'unavailable' that this
-        isn't a PCAP analysis."""
+        isn't a PCAP analysis; 'disabled' that SHAR-CRATES is switched off
+        in Settings."""
         pcap_file = find_pcap_file(dir_path)
         if not pcap_file:
             return {'status': 'unavailable'}
+        if not shark_analyzer.enabled(DATA_DIR):
+            return {'status': 'disabled'}
         if os.path.exists(os.path.join(dir_path, '.phase')):
             return {'status': 'waiting'}
         pcap_path = os.path.join(dir_path, pcap_file)
@@ -2645,6 +2650,26 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self._send_error(*error)
             return
         self._send_json(self._shark_status(dir_path))
+
+    def handle_get_shark_settings(self, params):
+        self._send_json({'enabled': shark_analyzer.enabled(DATA_DIR)})
+
+    def handle_post_shark_settings(self):
+        """Turn SHAR-CRATES on or off for every analysis. Off stops new runs
+        (a running one finishes) and hides SHAR-CRATES; existing shark.db
+        files stay, so turning it back on shows them again."""
+        data = self._read_json_body(config.MAX_REQUEST_BODY_SIZE)
+        if data is None:
+            return
+        if not isinstance(data.get('enabled'), bool):
+            self._send_error(400, 'enabled must be true or false')
+            return
+        try:
+            shark_analyzer.set_enabled(DATA_DIR, data['enabled'])
+        except OSError:
+            self._send_error(500, 'Could not save the setting')
+            return
+        self._send_json({'enabled': data['enabled']})
 
     def handle_post_shark_start(self):
         """Build SHAR-CRATES for an analysis on request - for a capture over

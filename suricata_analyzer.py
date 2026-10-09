@@ -908,7 +908,7 @@ def spawn_suricata(dir_path, pcap_path, suricata_config_path=None, data_dir=None
         # SHAR-CRATES: the analysis is ready on Suricata's data now; tshark's
         # view of the same capture is built in the background, if it's small
         # enough to do so unasked (see shark_analyzer).
-        if shark_analyzer.background_eligible(pcap_path):
+        if shark_analyzer.enabled(data_dir) and shark_analyzer.background_eligible(pcap_path):
             shark_analyzer.enqueue(dir_path, pcap_path)
 
     try:

@@ -21765,6 +21765,39 @@ class TestSharkCratesUI(unittest.TestCase):
         self.assertGreater(result['long'], 10.5, 'shrunk only as far as it needs')
         self.assertEqual(result['short'], '', 'a label that fits keeps its size')
 
+    def test_switched_off_hides_the_tab_and_points_to_settings(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""
+            document.getElementById('viewBarContainer').innerHTML = viewBarHtml();
+            sharkStatus = {status: 'disabled'};
+            updateViewToggle();
+            var status = document.getElementById('viewBarStatus');
+            window.__jsdom_result = {hidden: document.querySelector('[data-arg="shark"]').hidden, text: status.textContent,
+                                     action: status.querySelector('a').dataset.action};
+        """)
+        self.assertEqual(result, {'hidden': True, 'text': 'SHAR-CRATES is off \u2013 turn it on in Settings',
+                                  'action': 'show-settings-modal'})
+
+    def test_the_tshark_switch_is_saved_to_the_server_only_when_changed(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""
+            var posts = [];
+            window.fetch = async function(url, opts) {
+                if (opts && opts.method === 'POST') posts.push([url, JSON.parse(opts.body)]);
+                return {ok: true, json: async () => ({enabled: true})};
+            };
+            var input = document.getElementById('sharkEnabledInput');
+            input.disabled = false; input.dataset.saved = 'true'; input.checked = true;
+            var unchanged = await saveSharkSetting();
+            input.checked = false;
+            var changed = await saveSharkSetting();
+            window.__jsdom_result = {unchanged: unchanged, changed: changed, posts: posts, saved: input.dataset.saved};
+        """)
+        self.assertEqual(result['unchanged'], 'unchanged')
+        self.assertEqual(result['changed'], 'saved')
+        self.assertEqual(result['posts'], [['/api/shark-settings', {'enabled': False}]])
+        self.assertEqual(result['saved'], 'false')
+
     def test_suricata_view_has_no_badges(self):
         from tests.jsdom_helper import js_statements
         result = js_statements("""

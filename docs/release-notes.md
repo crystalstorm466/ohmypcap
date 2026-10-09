@@ -35,7 +35,9 @@ tables, Sankey diagram, search and pivot menu work on both:
   discovery, and Siemens PLC reads, writes and control
 
 SHAR-CRATES builds itself in the background once Suricata finishes;
-captures over 250 MB wait until you ask. Switching views keeps your search
+captures of more than 4 million packets wait until you ask, a run is
+stopped if it needs more than 4 GB of memory, and Settings can turn
+SHAR-CRATES off altogether. Switching views keeps your search
 and filters, and the pivot menu's **View in SHAR-CRATES** / **View in
 SURI-CRATES** finds the same flow in the other view by its Community ID.
 

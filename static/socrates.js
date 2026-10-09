@@ -4387,6 +4387,16 @@
                 uploadInput.max = maxUploadMB;
                 uploadHint.textContent = `Default: ${CONFIG.DEFAULT_UPLOAD_SIZE_MB.toLocaleString()} MB. Server maximum: ${maxUploadMB.toLocaleString()} MB.`;
             }).catch(() => {});
+            // SHAR-CRATES' switch is the server's, not this browser's: shown
+            // as the server has it, and only saved if it changes.
+            const sharkInput = document.getElementById('sharkEnabledInput');
+            document.getElementById('sharkSettingError').style.display = 'none';
+            sharkInput.disabled = true;
+            fetch('/api/shark-settings').then(r => r.json()).then(data => {
+                sharkInput.checked = data.enabled !== false;
+                sharkInput.dataset.saved = String(sharkInput.checked);
+                sharkInput.disabled = false;
+            }).catch(() => { sharkInput.disabled = false; });
             renderCustomLookupSitesSection();
             renderSettingsDeleteAllSection();
             document.getElementById('settingsModal').classList.add('active');
@@ -4571,9 +4581,37 @@
                 }
             }
 
-            if (queryLimitResult === 'saved' && uploadSizeResult === 'saved') {
+            const sharkResult = await saveSharkSetting();
+
+            if (queryLimitResult === 'saved' && uploadSizeResult === 'saved' && sharkResult !== 'error') {
                 closeSettingsModal();
             }
+        }
+
+        // Saves the SHAR-CRATES switch if it changed, then refreshes the open
+        // analysis's view bar (and leaves SHAR-CRATES if it was just turned off).
+        async function saveSharkSetting() {
+            const input = document.getElementById('sharkEnabledInput');
+            const errorEl = document.getElementById('sharkSettingError');
+            if (input.disabled || input.dataset.saved === String(input.checked)) return 'unchanged';
+            try {
+                const resp = await fetch('/api/shark-settings', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                                                 body: JSON.stringify({enabled: input.checked})});
+                if (!resp.ok) throw new Error();
+            } catch (e) {
+                errorEl.textContent = 'Could not save the tshark setting. Check that the server is running and try again.';
+                errorEl.style.display = 'block';
+                return 'error';
+            }
+            input.dataset.saved = String(input.checked);
+            if (currentMd5 && document.getElementById('viewToggle')) {
+                if (!input.checked && currentView === 'shark') {
+                    setAnalysisView('suricata');
+                    await refreshAnalysisData();
+                }
+                await refreshSharkStatus(currentMd5);
+            }
+            return 'saved';
         }
 
         function showAnalysisUI() {
@@ -11789,6 +11827,7 @@
                 return `tshark: ${escapeHtml(status.flows.toLocaleString())} flow${status.flows === 1 ? '' : 's'}, ${protocols} protocol${protocols === 1 ? '' : 's'}${took}`;
             }
             if (st === 'waiting') return 'SHAR-CRATES starts once Suricata finishes';
+            if (st === 'disabled') return 'SHAR-CRATES is off \u2013 turn it on in <a href="#" data-action="show-settings-modal">Settings</a>';
             if (st === 'queued') return 'SHAR-CRATES is waiting for another capture\'s tshark analysis to finish';
             // The ticking count is hidden from screen readers: the status is
             // a live region, and a number changing every second would be
@@ -11812,6 +11851,7 @@
             shark.title = sharkToggleTitle(sharkStatus);
             shark.classList.toggle('view-toggle-busy', SHARK_BUSY_STATES.has(st));
             shark.classList.toggle('view-toggle-attention', st === 'too_large' || st === 'error');
+            shark.hidden = st === 'disabled';
             const statusEl = document.getElementById('viewBarStatus');
             if (statusEl) statusEl.innerHTML = sharkStatusHtml(sharkStatus);
             syncSharkClock();

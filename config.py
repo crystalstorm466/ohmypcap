@@ -101,10 +101,16 @@ MAX_EMAIL_SIZE = 100 * 1024 * 1024         # bigger .eml files are analyzed as p
 MAX_EMAIL_BODY_CHARS = 65536               # characters of body text kept in the email event
 
 # SHAR-CRATES (shark_analyzer.py) - tshark's memory grows with a capture's
-# packet count (~1.5 KB per packet measured, ~1.1 GB for a 532 MB pcap), so
-# only captures up to this size are analyzed in the background without
-# being asked; bigger ones run when the user requests them.
+# packet count, not its size (~930 bytes per packet measured: 2.1 GB for
+# the 2.27 million packets of a 209 MB capture). A run whose processes
+# together pass SHARK_MAX_MEMORY_BYTES is stopped, and only captures up to
+# SHARK_BACKGROUND_MAX_PACKETS are analyzed without being asked - bigger
+# ones run when the user requests them (and may still hit the memory limit).
+SHARK_MAX_MEMORY_BYTES = 4 * 1024 ** 3
+SHARK_BACKGROUND_MAX_PACKETS = 4_000_000
+# ... and only up to this size when the packets can't be counted (no capinfos)
 SHARK_BACKGROUND_MAX_BYTES = 250 * 1024 * 1024
+SHARK_MEMORY_CHECK_SECONDS = 0.5
 
 # Thresholds
 STALE_THRESHOLD_SECONDS = 600              # 10 minutes

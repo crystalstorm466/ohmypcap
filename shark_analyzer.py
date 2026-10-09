@@ -21,9 +21,11 @@ tshark runs once per capture with plain field output (-T fields): its
 JSON output is several times slower and many times larger for the same
 packets (measured: 532 MB pcap, 10.6s and 81 MB of fields vs 168s and
 8.5 GB of full JSON). It runs at low CPU and I/O priority, one capture
-at a time, under a timeout. tshark's memory grows with the capture's
-packet count (about 1.5 KB per packet measured), so captures over
-config.SHARK_BACKGROUND_MAX_BYTES only run when the user asks.
+at a time, under a timeout and a memory limit (config.SHARK_MAX_MEMORY_BYTES,
+across the build and its tshark). tshark's memory grows with the capture's
+packet count (about 930 bytes per packet measured), so captures over
+config.SHARK_BACKGROUND_MAX_PACKETS only run when the user asks. The
+Settings switch (enabled/set_enabled) turns SHAR-CRATES off altogether.
 
 Files in the analysis directory:
     shark.db       the records, written to shark.db.tmp then renamed, so
@@ -647,6 +649,38 @@ def _child_command(dir_path, pcap_path):
     return cmd
 
 
+def _group_memory(pgid):
+    """Bytes of memory the processes of one process group hold (resident
+    set) - the build and its tshark, which runs in the build's group."""
+    total = 0
+    for pid in os.listdir('/proc'):
+        if not pid.isdigit():
+            continue
+        try:
+            with open(f'/proc/{pid}/stat') as f:
+                fields = f.read().rsplit(')', 1)[1].split()
+            if int(fields[2]) == pgid:            # field 5 of stat, the process group
+                total += int(fields[21]) * _PAGE_SIZE   # field 24, resident pages
+        except (OSError, ValueError, IndexError):
+            continue
+    return total
+
+
+_PAGE_SIZE = os.sysconf('SC_PAGE_SIZE') if hasattr(os, 'sysconf') else 4096
+
+
+def _watch_memory(proc, too_big):
+    """Stop a build whose processes together pass SHARK_MAX_MEMORY_BYTES -
+    tshark's memory grows with the capture's packet count, and a capture
+    with millions of small packets could otherwise take all of it."""
+    while proc.poll() is None:
+        if _group_memory(proc.pid) > config.SHARK_MAX_MEMORY_BYTES:
+            too_big.set()
+            _kill_group(proc)
+            return
+        time.sleep(config.SHARK_MEMORY_CHECK_SECONDS)
+
+
 def _kill_group(proc):
     """Kill a build and its tshark: the build leads its own process group."""
     try:
@@ -670,6 +704,9 @@ def analyze(dir_path, pcap_path, on_start=None):
                                 preexec_fn=_low_priority, start_new_session=True)
         if on_start:
             on_start(proc)
+        too_big = threading.Event()
+        watchdog = threading.Thread(target=_watch_memory, args=(proc, too_big), daemon=True)
+        watchdog.start()
         try:
             # The build enforces tshark's own timeout; this one is for a
             # build that hangs after it
@@ -677,12 +714,19 @@ def analyze(dir_path, pcap_path, on_start=None):
         except subprocess.TimeoutExpired:
             _kill_group(proc)
             proc.wait()
-        if proc.returncode == 0 or _was_cancelled(dir_path) or os.path.exists(os.path.join(dir_path, SHARK_ERROR)):
+        watchdog.join()
+        if not too_big.is_set() and (proc.returncode == 0 or _was_cancelled(dir_path)
+                                     or os.path.exists(os.path.join(dir_path, SHARK_ERROR))):
             return
         stderr_file.seek(0)
         lines = stderr_file.read()[-64 * 1024:].strip().splitlines()
-    # It died without saying why: killed (out of memory, most often) or crashed
-    detail = lines[-1] if lines else ('killed - out of memory?' if proc.returncode == -signal.SIGKILL else f'exit code {proc.returncode}')
+    if too_big.is_set():
+        detail = (f'it needed more than {config.SHARK_MAX_MEMORY_BYTES / 1024 ** 3:g} GB of memory '
+                  '(tshark needs about 1 KB per packet)')
+    else:
+        # It died without saying why: killed (out of memory, most often) or crashed
+        detail = lines[-1] if lines else ('killed - out of memory?' if proc.returncode == -signal.SIGKILL
+                                          else f'exit code {proc.returncode}')
     _remove(shark_db_path(dir_path) + '.tmp')
     try:
         with open(os.path.join(dir_path, SHARK_ERROR), 'w') as f:
@@ -803,12 +847,65 @@ def cancel(dir_path):
                 _kill_group(_running_proc)
 
 
+_PACKET_COUNTS = {}     # (path, size, mtime) -> packet count
+
+
+def packet_count(pcap_path):
+    """A capture's packet count (capinfos, which reads it without decoding -
+    a fraction of a second for millions of packets), or None if it can't be
+    counted. Remembered per file, since status() asks on every poll."""
+    try:
+        st = os.stat(pcap_path)
+    except OSError:
+        return None
+    key = (pcap_path, st.st_size, st.st_mtime)
+    if key not in _PACKET_COUNTS:
+        count = None
+        if shutil.which('capinfos'):
+            try:
+                out = subprocess.run(['capinfos', '-c', '-M', '-T', '-r', pcap_path], capture_output=True,
+                                     text=True, timeout=120).stdout
+                count = int(out.strip().rsplit('\t', 1)[1])
+            except (subprocess.SubprocessError, OSError, ValueError, IndexError):
+                count = None
+        if len(_PACKET_COUNTS) > 1000:
+            _PACKET_COUNTS.clear()
+        _PACKET_COUNTS[key] = count
+    return _PACKET_COUNTS[key]
+
+
 def background_eligible(pcap_path):
-    """Whether a capture is small enough to analyze without being asked."""
+    """Whether a capture is small enough to analyze without being asked: by
+    its packet count - what tshark's memory follows - or, when that can't
+    be counted, by its size."""
+    count = packet_count(pcap_path)
+    if count is not None:
+        return count <= config.SHARK_BACKGROUND_MAX_PACKETS
     try:
         return os.path.getsize(pcap_path) <= config.SHARK_BACKGROUND_MAX_BYTES
     except OSError:
         return False
+
+
+SHARK_SETTINGS = 'shark_settings.json'
+
+
+def enabled(data_dir):
+    """Whether SHAR-CRATES runs at all - the Settings switch, kept in the
+    data directory (on unless turned off)."""
+    try:
+        with open(os.path.join(data_dir, SHARK_SETTINGS)) as f:
+            return json.load(f).get('enabled', True) is not False
+    except (OSError, ValueError, AttributeError):
+        return True
+
+
+def set_enabled(data_dir, on):
+    path = os.path.join(data_dir, SHARK_SETTINGS)
+    tmp = path + '.tmp'
+    with open(tmp, 'w') as f:
+        json.dump({'enabled': bool(on)}, f)
+    os.replace(tmp, path)
 
 
 def run_seconds(db_path):
