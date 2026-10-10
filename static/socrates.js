@@ -2156,6 +2156,7 @@
                 browser: '#78909c',
                 lldp: '#26a69a',
                 cdp: '#8d6e63',
+                dhcpv6: '#9ccc65',
                 opcua_action: '#ff7043',
                 bacnet_property: '#5c6bc0',
                 bacnet_device: '#8d6e63',
@@ -3794,6 +3795,31 @@
             return html;
         }
 
+        // tshark's DHCPv6 records (shark_protocols.DHCPv6): one per
+        // transaction - a client's message and the server's reply.
+        function renderDhcpv6Details(e) {
+            const d = e.dhcpv6 || {};
+            let html = htmlSection('DHCPv6 Details', COLORS.EVENT.dhcpv6);
+            html += htmlRowText('Message', d.message);
+            html += htmlRowText('Reply', d.reply);
+            html += htmlRowText('Result', d.status);
+            html += htmlRowText('Status Message', d.status_message);
+            html += htmlRowText('Transaction ID', d.transaction_id, 'mono');
+            html += htmlRowText('Hostname', d.hostname, 'mono');
+            html += htmlRowText('Client MAC', d.client_mac, 'mono');
+            html += htmlRowText('Client DUID', d.client_duid, 'mono');
+            html += htmlRowText('Vendor Class', d.vendor_class);
+            html += htmlRowText('Requested Addresses', (d.requested_addresses || []).join(', '), 'mono');
+            html += htmlRowText('Assigned Addresses', (d.assigned_addresses || []).join(', '), 'mono');
+            html += htmlRowText('Delegated Prefixes', (d.prefixes || []).join(', '), 'mono');
+            html += htmlRowText('Server DUID', d.server_duid, 'mono');
+            html += htmlRowText('DNS Servers', (d.dns_servers || []).join(', '), 'mono');
+            html += htmlRowText('Search Domains', (d.domain_search || []).join(', '), 'mono');
+            html += htmlRowText('Relay Link', d.link_address, 'mono');
+            html += htmlRowText('Transmissions', d.transmissions !== undefined ? d.transmissions.toLocaleString() : '');
+            return html;
+        }
+
         // tshark's LLDP and CDP records (shark_protocols.LLDP/CDP): one per
         // sending MAC, device and port.
         function renderNeighborDetails(e) {
@@ -4352,6 +4378,7 @@
             opcua: renderOpcuaDetails,
             goose: renderGooseDetails,
             browser: renderBrowserDetails,
+            dhcpv6: renderDhcpv6Details,
             lldp: renderNeighborDetails,
             cdp: renderNeighborDetails,
             opcua_action: renderOpcuaActionDetails,
@@ -7021,6 +7048,7 @@
             opcua: 'OPC UA',
             goose: 'GOOSE',
             browser: 'Windows Browser',
+            dhcpv6: 'DHCPv6',
             lldp: 'LLDP',
             cdp: 'CDP',
             opcua_action: 'OPC UA Actions',
@@ -7411,6 +7439,8 @@
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Service', 'Object', 'Property', 'Value', 'Password', 'Result'];
                 case 'browser':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Message', 'NetBIOS Name', 'Workgroup', 'Windows', 'Roles', 'Count'];
+                case 'dhcpv6':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Message', 'Reply', 'Hostname', 'Client MAC', 'Assigned IP', 'Vendor Class', 'Result'];
                 case 'lldp':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'System Name', 'Chassis ID', 'Port ID', 'Capabilities', 'Management IP', 'VLAN', 'Count'];
                 case 'cdp':
@@ -7899,10 +7929,11 @@
                 case 'goose':
                 case 'browser':
                 case 'lldp':
-                case 'cdp': {
+                case 'cdp':
+                case 'dhcpv6': {
                     const cols = getColumnsForType(etype).slice(6);
                     colSpan = cols.length + 6;
-                    row = rowPrefixCells(e) + cols.map(col => `<td${['Search Target', 'Location', 'User', 'Password', 'Chassis ID', 'Port ID', 'Device ID', 'Management IP'].includes(col) ? ' class="mono"' : ''}>${escapeHtml(extractValue(e, col))}</td>`).join('') + '</tr>';
+                    row = rowPrefixCells(e) + cols.map(col => `<td${['Search Target', 'Location', 'User', 'Password', 'Chassis ID', 'Port ID', 'Device ID', 'Management IP', 'Hostname', 'Client MAC', 'Assigned IP'].includes(col) ? ' class="mono"' : ''}>${escapeHtml(extractValue(e, col))}</td>`).join('') + '</tr>';
                     break;
                 }
                 case 'nbns': {
@@ -10088,7 +10119,7 @@
                     if (r?.value !== undefined) return String(r.value);
                     return e.opcua_action?.arguments ? e.opcua_action.arguments.join(', ') : '';
                 }
-                case 'Result': return e.iec104?.result || e.bacnet?.result || e.opcua_action?.result || '';
+                case 'Result': return e.iec104?.result || e.bacnet?.result || e.opcua_action?.result || e.dhcpv6?.status || '';
                 case 'Updates': return e.iec104_point?.updates !== undefined ? String(e.iec104_point.updates) : '';
                 case 'Last Value': { const r = e.iec104_point || e.bacnet_property; return r?.last_value !== undefined ? String(r.last_value) : ''; }
                 // BACnet: an action's, a read/notification summary's, a device's
@@ -10106,7 +10137,7 @@
                 case 'VLAN': return e.lldp?.vlan !== undefined ? String(e.lldp.vlan) : '';
                 case 'Native VLAN': return e.cdp?.native_vlan !== undefined ? String(e.cdp.native_vlan) : '';
                 // Windows Browser: a host's announcements, elections...
-                case 'Message': return e.browser?.message || '';
+                case 'Message': return e.browser?.message || e.dhcpv6?.message || '';
                 case 'Workgroup': return e.browser?.destination_name || '';
                 case 'Windows': return e.browser?.os_version || '';
                 case 'Roles': return (e.browser?.roles || []).join(', ');
@@ -10229,9 +10260,11 @@
                 case 'JA3': return e.quic?.ja3?.hash || '';
                 case 'JA3S': return e.quic?.ja3s?.hash || '';
                 case 'DHCP Type': return e.dhcp?.dhcp_type || e.dhcp?.type || '';
-                case 'Client MAC': return e.dhcp?.client_mac || '';
-                case 'Assigned IP': return e.dhcp?.assigned_ip || '';
-                case 'Hostname': return e.dhcp?.hostname || '';
+                case 'Client MAC': return e.dhcp?.client_mac || e.dhcpv6?.client_mac || '';
+                // DHCPv6: its addresses, or the prefixes it delegated
+                case 'Assigned IP': return e.dhcp?.assigned_ip || (e.dhcpv6?.assigned_addresses || e.dhcpv6?.prefixes || []).join(', ');
+                case 'Hostname': return e.dhcp?.hostname || e.dhcpv6?.hostname || '';
+                case 'Vendor Class': return e.dhcpv6?.vendor_class || '';
                 case 'FTP Command': return e.ftp_data?.command || '';
                 case 'SMB Command': return e.smb?.command || '';
                 case 'Share': return e.smb?.share || '';
@@ -10305,7 +10338,7 @@
                 case 'Rcpt To': return (e.smtp?.rcpt_to || []).join(', ');
                 case 'Command Data': return e.ftp?.command_data || '';
                 case 'Completion Code': return (e.ftp?.completion_code || []).join(', ');
-                case 'Reply': return (e.ftp?.reply || []).join(' | ');
+                case 'Reply': return e.dhcpv6 ? e.dhcpv6.reply || '' : (e.ftp?.reply || []).join(' | ');
                 case 'Event': return e.anomaly?.event || '';
                 case 'Layer': return e.anomaly?.layer || '';
                 case 'App Proto': return e.event_type === 'anomaly' ? (e.anomaly?.app_proto || '') : (e.app_proto || '');

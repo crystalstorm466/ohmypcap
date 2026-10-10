@@ -1396,6 +1396,15 @@ AGGREGATION_JSON_PATHS = {
         'Roles': ['$.browser.roles'],
         'Count': ['$.browser.count'],
     },
+    'dhcpv6': {
+        'Message': ['$.dhcpv6.message'],
+        'Reply': ['$.dhcpv6.reply'],
+        'Hostname': ['$.dhcpv6.hostname'],
+        'Client MAC': ['$.dhcpv6.client_mac'],
+        'Assigned IP': ['$.dhcpv6.assigned_addresses', '$.dhcpv6.prefixes'],
+        'Vendor Class': ['$.dhcpv6.vendor_class'],
+        'Result': ['$.dhcpv6.status'],
+    },
     'lldp': {
         'System Name': ['$.lldp.system_name'],
         'Chassis ID': ['$.lldp.chassis_id'],

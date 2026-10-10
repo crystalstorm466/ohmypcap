@@ -708,6 +708,64 @@ class TestGOOSE(unittest.TestCase):
 
 
 @unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
+class TestDHCPv6(unittest.TestCase):
+    """tests/protocol_fixtures.write_dhcpv6_pcap: one record per
+    transaction, the server's reply (on another flow) paired with the
+    client's message - with what Suricata 8.0.7 logged for the capture
+    (tests/data/dhcpv6_fixture.eve.json): flows it gives no protocol,
+    since it parses DHCP for IPv4 only."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests.protocol_fixtures import write_dhcpv6_pcap
+        cls.tmpdir = tempfile.mkdtemp()
+        cls.pcap = os.path.join(cls.tmpdir, 'dhcpv6.pcap')
+        write_dhcpv6_pcap(cls.pcap)
+        cls.records = shark_analyzer.run_tshark(cls.pcap)
+        cls.transactions = {r['dhcpv6']['transaction_id']: r['dhcpv6'] for r in cls.records
+                            if r['event_type'] == 'dhcpv6'}
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    def test_each_message_is_paired_with_its_reply(self):
+        self.assertEqual({t: (b['message'], b.get('reply')) for t, b in self.transactions.items()},
+                         {'0x000101': ('Solicit', 'Advertise'), '0x000102': ('Request', 'Reply'),
+                          '0x00abcd': ('Solicit', None)})
+
+    def test_the_reply_says_what_the_client_got(self):
+        reply = self.transactions['0x000102']
+        self.assertEqual((reply['client_mac'], reply['assigned_addresses'], reply['dns_servers'],
+                          reply['domain_search'], reply['status'], reply['status_message']),
+                         ('00:1b:21:00:00:10', ['2001:0db8:0000:0000:0000:0000:0000:0010'],
+                          ['2001:0db8:0000:0000:0000:0000:0000:0053'], ['example.com'], 'Success',
+                          'All addresses assigned'))
+        self.assertEqual(reply['server_duid'], '0001000123c34600001b21000001')
+
+    def test_a_windows_solicit_gives_its_hostname_and_retransmissions_are_counted(self):
+        laptop = self.transactions['0x00abcd']
+        self.assertEqual((laptop['hostname'], laptop['vendor_class'], laptop['client_mac'], laptop['transmissions']),
+                         ('LAPTOP.example.com', 'MSFT 5.0', '00:1b:21:00:00:20', 2))
+
+    def test_flows_match_suricatas_and_the_merge_adds_the_records(self):
+        from scripts.compare_shark_suricata import compare
+        report = compare(_load_eve('dhcpv6_fixture.eve.json'), self.records)['flow']
+        self.assertEqual((report['matched'], report['named_by_tshark'], report['differences']), (3, 3, []))
+        d = os.path.join(self.tmpdir, 'analysis')
+        os.makedirs(d)
+        shutil.copy(self.pcap, d)
+        events_db = os.path.join(d, 'events.db')
+        db.create_sqlite_db(events_db, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data',
+                                                    'dhcpv6_fixture.eve.json'))
+        self.assertTrue(shark_analyzer.build(d, os.path.join(d, 'dhcpv6.pcap')))
+        shark_analyzer.merge(d)
+        counts = db.get_event_types_sqlite(events_db)
+        self.assertEqual(counts.get('dhcpv6'), 3)
+        self.assertNotIn('conn_dhcpv6', counts, 'records, not a connection card')
+
+
+@unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
 class TestNeighbors(unittest.TestCase):
     """tests/protocol_fixtures.write_neighbor_pcap: LLDP and CDP
     announcements, one record per sending MAC, device and port - with

@@ -34,6 +34,10 @@ each card marked with a dot:
   change a protection relay publishes: its values and which ones changed,
   how many times it was repeated, and a jump or reset in its state number,
   which is what a forged message looks like
+- **DHCPv6** (Suricata parses DHCP for IPv4 only) - a record for each
+  transaction, the client's message paired with the server's reply: the
+  client's hostname, MAC address and vendor class, and the addresses or
+  prefixes, DNS servers and search domains it was given
 - **Windows Browser** (NetBIOS datagrams) - a passive inventory of the
   Windows machines on the network: each one's name, workgroup or domain,
   Windows version and roles (domain controller, SQL server, master

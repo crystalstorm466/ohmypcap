@@ -833,3 +833,59 @@ def neighbor_packets():
 
 def write_neighbor_pcap(path):
     write_pcap(path, neighbor_packets())
+
+
+# ---------------------------------------------------------------- DHCPv6
+#
+# A client (DHCPV6_CLIENT, MAC 00:1b:21:00:00:10) getting an address from
+# DHCPV6_SERVER: Solicit, Advertise, Request, Reply - and a Windows
+# laptop (DHCPV6_LAPTOP) soliciting twice with the same transaction ID,
+# its hostname and vendor class given, and nobody answering.
+
+DHCPV6_CLIENT, DHCPV6_SERVER, DHCPV6_LAPTOP = 'fe80::21b:21ff:fe00:10', 'fe80::1', 'fe80::21b:21ff:fe00:20'
+_DHCPV6_ALL_SERVERS = 'ff02::1:2'
+
+
+def _udp6_packet(src, dst, sport, dport, payload):
+    s, d = socket.inet_pton(socket.AF_INET6, src), socket.inet_pton(socket.AF_INET6, dst)
+    udp = struct.pack('!HHHH', sport, dport, 8 + len(payload), 0) + payload
+    pseudo = s + d + struct.pack('!I3xB', len(udp), 17)
+    udp = udp[:6] + struct.pack('!H', _checksum(pseudo + udp) or 0xffff) + udp[8:]
+    ip = struct.pack('!IHBB', 0x60000000, len(udp), 17, 64) + s + d
+    return b'\x33\x33\x00\x01\x00\x02' + b'\x11' * 6 + struct.pack('!H', 0x86dd) + ip + udp
+
+
+def _dhcpv6_option(code, value):
+    return struct.pack('!HH', code, len(value)) + value
+
+
+def _duid(mac):
+    return struct.pack('!HHI', 1, 1, 600000000) + bytes.fromhex(mac.replace(':', ''))      # DUID-LLT, Ethernet
+
+
+def _dhcpv6(src, dst, kind, xid, options):
+    sport, dport = (546, 547) if dst == _DHCPV6_ALL_SERVERS else (547, 546)
+    return _udp6_packet(src, dst, sport, dport, bytes([kind]) + xid.to_bytes(3, 'big') + b''.join(options))
+
+
+def dhcpv6_packets():
+    client_id = _dhcpv6_option(1, _duid('00:1b:21:00:00:10'))
+    server_id = _dhcpv6_option(2, _duid('00:1b:21:00:00:01'))
+    address = _dhcpv6_option(5, socket.inet_pton(socket.AF_INET6, '2001:db8::10') + struct.pack('!II', 3600, 7200))
+    ia_na = _dhcpv6_option(3, struct.pack('!III', 1, 1800, 2880) + address)
+    dns = _dhcpv6_option(23, socket.inet_pton(socket.AF_INET6, '2001:db8::53'))
+    search = _dhcpv6_option(24, b'\x07example\x03com\x00')
+    success = _dhcpv6_option(13, struct.pack('!H', 0) + b'All addresses assigned')
+    laptop = [_dhcpv6_option(1, _duid('00:1b:21:00:00:20')), _dhcpv6_option(3, struct.pack('!III', 2, 0, 0)),
+              _dhcpv6_option(39, b'\x00\x06LAPTOP\x07example\x03com\x00'),
+              _dhcpv6_option(16, struct.pack('!IH', 311, 8) + b'MSFT 5.0')]
+    return [_dhcpv6(DHCPV6_CLIENT, _DHCPV6_ALL_SERVERS, 1, 0x000101, [client_id, ia_na]),
+            _dhcpv6(DHCPV6_SERVER, DHCPV6_CLIENT, 2, 0x000101, [client_id, server_id, ia_na, dns, search]),
+            _dhcpv6(DHCPV6_CLIENT, _DHCPV6_ALL_SERVERS, 3, 0x000102, [client_id, server_id, ia_na]),
+            _dhcpv6(DHCPV6_SERVER, DHCPV6_CLIENT, 7, 0x000102, [client_id, server_id, ia_na, dns, search, success]),
+            _dhcpv6(DHCPV6_LAPTOP, _DHCPV6_ALL_SERVERS, 1, 0x00abcd, laptop),
+            _dhcpv6(DHCPV6_LAPTOP, _DHCPV6_ALL_SERVERS, 1, 0x00abcd, laptop)]
+
+
+def write_dhcpv6_pcap(path):
+    write_pcap(path, dhcpv6_packets())

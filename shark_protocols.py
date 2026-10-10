@@ -20,6 +20,7 @@ server like its flow records.
 """
 
 import re
+import struct
 
 
 def _first(values, default=''):
@@ -212,6 +213,110 @@ class NBNS:
             body['rcode'] = _NBNS_RCODES.get(rcode, str(rcode))
         else:
             body['transmissions'] = body.get('transmissions', 0) + 1
+
+    def finish(self):
+        return self.records
+
+
+# ---------------------------------------------------------------- DHCPv6
+#
+# Suricata parses DHCP for IPv4 only. A DHCPv6 client multicasts its
+# message (Solicit, Request, Renew, Information-request...) to ff02::1:2
+# and the server answers it directly (Advertise, Reply) - on another
+# flow, so a transaction is keyed by the client's address and its
+# transaction ID, like NBNS's. One record per transaction, its
+# retransmissions counted: the client's DUID and the MAC address in it,
+# the hostname it gave (the Client FQDN option - Windows always sends
+# one), its vendor class, and from the reply the addresses and prefixes
+# assigned, the server's DUID, DNS servers, search domains and status.
+# Through a relay, the record is the relay's, with the link it serves.
+
+_DHCPV6_MESSAGES = {1: 'Solicit', 2: 'Advertise', 3: 'Request', 4: 'Confirm', 5: 'Renew', 6: 'Rebind', 7: 'Reply',
+                    8: 'Release', 9: 'Decline', 10: 'Reconfigure', 11: 'Information-request', 12: 'Relay-forw',
+                    13: 'Relay-reply'}
+_DHCPV6_FROM_SERVER = {2, 7, 10, 13}
+_DHCPV6_STATUS = {0: 'Success', 1: 'UnspecFail', 2: 'NoAddrsAvail', 3: 'NoBinding', 4: 'NotOnLink', 5: 'UseMulticast',
+                  6: 'NoPrefixAvail'}
+_DHCPV6_MAX_LIST = 20
+
+
+def _duid_mac(duid):
+    """The Ethernet address in a link-layer DUID (types 1 and 3), or ''."""
+    try:
+        raw = bytes.fromhex(duid.replace(':', ''))
+    except ValueError:
+        return ''
+    kind, hwtype = struct.unpack('!HH', raw[:4]) if len(raw) >= 4 else (0, 0)
+    address = raw[8:] if kind == 1 else raw[4:] if kind == 3 else b''
+    return ':'.join(f'{b:02x}' for b in address) if hwtype == 1 and len(address) == 6 else ''
+
+
+class DHCPv6:
+    """DHCPv6 - see the comment above."""
+    event_type = 'dhcpv6'
+    app_protos = ('dhcpv6',)
+    fields = ('dhcpv6.msgtype', 'dhcpv6.xid', 'dhcpv6.linkaddr', 'dhcpv6.option.type', 'dhcpv6.duid.bytes',
+              'dhcpv6.client_domain', 'dhcpv6.vendorclass.data', 'dhcpv6.iaaddr.ip', 'dhcpv6.iaprefix.pref_addr',
+              'dhcpv6.iaprefix.pref_len',
+              'dhcpv6.status_code', 'dhcpv6.status_msg', 'dhcpv6.dns_server', 'dhcpv6.search_list_entry')
+
+    def __init__(self):
+        self.records = []
+        self.open = {}           # (client's or relay's address, transaction id) -> body
+
+    def feed(self, pkt, v):
+        kinds = [_int(t) for t in v['dhcpv6.msgtype']]
+        txid = _int(_first(v['dhcpv6.xid']))
+        if not kinds or txid is None:
+            return
+        outer, message = kinds[0], kinds[-1]      # a relay's message carries the client's
+        from_server = outer in _DHCPV6_FROM_SERVER
+        key = (pkt.dst if from_server else pkt.src, txid)
+        body = self.open.get(key)
+        if body is None:
+            body = self.open[key] = {'transaction_id': f'0x{txid:06x}'}
+            self.records.append((pkt.flow, pkt.when, self.event_type, body))
+        name = _DHCPV6_MESSAGES.get(message, f'type {message}')
+        if from_server:
+            body['reply'] = name
+        else:
+            body.setdefault('message', name)
+            body['transmissions'] = body.get('transmissions', 0) + 1
+        if outer in (12, 13):
+            body['relayed'] = True
+            if v['dhcpv6.linkaddr'] and v['dhcpv6.linkaddr'][0] != '::':
+                body['link_address'] = ipv6_exploded(v['dhcpv6.linkaddr'][0])
+        # Each Client ID (1) and Server ID (2) option holds one DUID, in order
+        owners = [t for t in (_int(x) for x in v['dhcpv6.option.type']) if t in (1, 2)]
+        for owner, duid in zip(owners, v['dhcpv6.duid.bytes']):
+            duid = duid.replace(':', '')
+            if owner == 1:
+                body['client_duid'] = duid
+                if _duid_mac(duid):
+                    body['client_mac'] = _duid_mac(duid)
+            else:
+                body['server_duid'] = duid
+        if v['dhcpv6.client_domain']:
+            body['hostname'] = v['dhcpv6.client_domain'][0].rstrip('.')
+        if v['dhcpv6.vendorclass.data']:
+            body['vendor_class'] = v['dhcpv6.vendorclass.data'][0]
+        addresses = [ipv6_exploded(a) for a in dict.fromkeys(v['dhcpv6.iaaddr.ip'])][:_DHCPV6_MAX_LIST]
+        prefixes = list(dict.fromkeys(f'{ipv6_exploded(a)}/{n}' for a, n in
+                                      zip(v['dhcpv6.iaprefix.pref_addr'], v['dhcpv6.iaprefix.pref_len'])))
+        if from_server:
+            for field, values in (('assigned_addresses', addresses), ('prefixes', prefixes),
+                                 ('dns_servers', [ipv6_exploded(a) for a in dict.fromkeys(v['dhcpv6.dns_server'])]),
+                                 ('domain_search', list(dict.fromkeys(e.rstrip('.') for e in
+                                                                      v['dhcpv6.search_list_entry'])))):
+                if values:
+                    body[field] = values[:_DHCPV6_MAX_LIST]
+            code = _int(_first(v['dhcpv6.status_code']))
+            if code is not None:
+                body['status'] = _DHCPV6_STATUS.get(code, str(code))
+                if v['dhcpv6.status_msg']:
+                    body['status_message'] = v['dhcpv6.status_msg'][0]
+        elif addresses:
+            body['requested_addresses'] = addresses
 
     def finish(self):
         return self.records
@@ -1751,7 +1856,7 @@ def _pdus(layer):
 
 # Every protocol with records here, from tshark's fields, in the order their
 # fields follow the base fields in tshark's output.
-PROTOCOLS = (LLMNR, NBNS, SSDP, S7comm, Telnet, IEC104, BACnet, GOOSE, Browser, LLDP, CDP)
+PROTOCOLS = (LLMNR, NBNS, DHCPv6, SSDP, S7comm, Telnet, IEC104, BACnet, GOOSE, Browser, LLDP, CDP)
 # ... and from the structured pass (shark_analyzer._structured_pass): none
 # yet - it's for a protocol whose messages nest, which flat fields can't
 # keep apart (several commands per packet, a token inside a command).
