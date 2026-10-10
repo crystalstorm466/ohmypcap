@@ -82,11 +82,15 @@
         // a protocol neither Suricata nor shark_protocols has records for -
         // a tab per protocol, with tshark's flow columns.
         const CONNECTION_TYPE_PREFIX = 'conn_';
+        // ... except the protocols whose every connection was a probe nothing
+        // answered (db.py's PROBED_CONNECTION_TYPE): one tab for all of them.
+        const PROBED_CONNECTION_TYPE = CONNECTION_TYPE_PREFIX + '_probed';
         // A tshark flow's columns: no State or Alerted (Suricata's own flow
         // tracking and detection) - its protocol is the point.
         const TSHARK_FLOW_COLUMNS = ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'App Proto', 'Answered', 'Pkts →', 'Pkts ←', 'Bytes →', 'Bytes ←'];
         function isConnectionType(type) { return typeof type === 'string' && type.startsWith(CONNECTION_TYPE_PREFIX); }
         function eventTypeLabel(type) {
+            if (type === PROBED_CONNECTION_TYPE) return 'Probed Only';
             if (isConnectionType(type)) {
                 const proto = type.slice(CONNECTION_TYPE_PREFIX.length);
                 // tshark's own name otherwise, with _ as a space so a name
@@ -141,8 +145,10 @@
             // affecting the pcap-mode ordering above.
             // email/link only occur in email mode, where the message
             // itself leads, then its links.
-            // tshark's connection tabs follow every record type.
-            const order = { email: -2, link: -1, alert: 0, filealerts: 1, protocol_decode: 2, anomaly: 3, sigmaalert: 4, log: 5 };
+            // tshark's connection tabs follow every record type, Probed Only
+            // last.
+            const order = { email: -2, link: -1, alert: 0, filealerts: 1, protocol_decode: 2, anomaly: 3, sigmaalert: 4, log: 5,
+                            [PROBED_CONNECTION_TYPE]: 101 };
             return [...types].sort((a, b) => {
                 const ai = order[a] ?? (isConnectionType(a) ? 100 : 99);
                 const bi = order[b] ?? (isConnectionType(b) ? 100 : 99);
@@ -5486,14 +5492,14 @@
             if (!referenceCard) return [];
             const cards = Array.from(document.querySelectorAll('#statsGrid .stat-card'));
             const columnCount = statsGridColumnCount();
-            const referenceIndex = cards.indexOf(referenceCard);
-            if (referenceIndex === -1) return [];
-            const columnStart = referenceIndex % columnCount;
-            const column = [];
-            for (let i = columnStart; i < cards.length; i += columnCount) {
-                column.push(cards[i]);
-            }
-            return column;
+            if (!cards.includes(referenceCard)) return [];
+            // tshark's connection cards start a fresh row under their
+            // heading (CONNECTIONS_HEADING_HTML), so their columns count
+            // from the first of them.
+            const firstConnection = cards.findIndex(c => c.classList.contains('stat-card-connection'));
+            const columnOf = i => (firstConnection === -1 || i < firstConnection ? i : i - firstConnection) % columnCount;
+            const column = columnOf(cards.indexOf(referenceCard));
+            return cards.filter((c, i) => columnOf(i) === column);
         }
 
         // True for the controls that behave as one horizontal group within
@@ -9685,6 +9691,13 @@
             requestAnimationFrame(tick);
         }
 
+        // Heads tshark's connection cards in #statsGrid, on a row of its own:
+        // they follow every type with records, in an alphabetical run of
+        // their own (sortEventTypes).
+        const CONNECTIONS_HEADING_HTML = '<div class="stats-grid-heading">Connections tshark identified'
+            + '<span class="stats-grid-heading-note">by port, payload or link-layer type; no records parsed - a row per connection, and whether it was answered</span></div>';
+        const PROBED_TITLE = "Every connection of the protocols nothing ever answered - no reply, or only an ICMP error: a scanner's probes of closed ports. Each row has its protocol.";
+
         function buildStats(filteredStats) {
             const grid = document.getElementById('statsGrid');
             const stats = [];
@@ -9723,17 +9736,25 @@
                     id: type,
                     label: eventTypeLabel(type),
                     count: filtered,
-                    color: COLORS.EVENT[connProto || type] || (connProto ? COLORS.EVENT.flow : COLORS.EVENT.tls),
+                    color: type === PROBED_CONNECTION_TYPE ? 'var(--text-muted)' : COLORS.EVENT[connProto || type] || (connProto ? COLORS.EVENT.flow : COLORS.EVENT.tls),
                     notInSuricata: tsharkTypes.has(type),
+                    connection: !!connProto,
+                    title: type === PROBED_CONNECTION_TYPE ? PROBED_TITLE : '',
                 });
             });
 
+            // All Events and Acknowledged Alerts end the record types' cards,
+            // ahead of tshark's connection cards (sortEventTypes puts those
+            // last), which follow under a heading of their own.
+            const firstConnection = stats.findIndex(s => s.connection);
+            const connectionStats = firstConnection === -1 ? [] : stats.splice(firstConnection);
             if (!isLogAnalysisMode && !isEmailAnalysisMode) {
                 stats.push({
                     id: 'all',
                     label: 'All Events',
                     count: allFiltered,
-                    color: 'var(--text-bright)'
+                    color: 'var(--text-bright)',
+                    title: connectionStats.some(c => c.count > 0) ? "Every record except tshark's connection rows, which list connections by protocol the way Flows does" : '',
                 });
                 // Not filtered by the current search/filter bar the way
                 // every other card above is (filteredStats has no entry
@@ -9748,6 +9769,7 @@
                     color: 'var(--text-muted)'
                 });
             }
+            stats.push(...connectionStats);
 
             const visibleSection = document.querySelector('.section:not(.section-hidden):not(.agg-section)');
             // find(s => s.count > 0), not just stats[0] - a zero-count
@@ -9767,7 +9789,9 @@
             // dropped rather than shown disabled, so a heavily-filtered
             // large sample (20+ event types, most zeroed out) doesn't turn
             // into a wall of grayed-out cards.
+            let headingShown = false;
             grid.innerHTML = stats.filter(s => s.count > 0).map(s => {
+                const heading = s.connection && !headingShown ? (headingShown = true, CONNECTIONS_HEADING_HTML) : '';
                 // Filtered/searched-down counts show as just the filtered
                 // number, not "filtered / total" - the filter bar's own
                 // chips already signal that a filter is active, and a
@@ -9781,8 +9805,8 @@
                 // by animateStatNumber() below - aria-label carries the
                 // real final value immediately so assistive tech isn't
                 // stuck reading "0" or a mid-animation number.
-                return `
-                    <div class="stat-card${activeClass}" data-action="show-tab" data-section="section-${s.id}">
+                return heading + `
+                    <div class="stat-card${activeClass}${s.connection ? ' stat-card-connection' : ''}" data-action="show-tab" data-section="section-${s.id}"${s.title ? ` title="${escapeHtml(s.title)}"` : ''}>
                         <div class="stat-number" style="color: ${s.color}" aria-label="${countDisplay}">0</div>
                         <div class="stat-label">${escapeHtml(s.label)}</div>${s.notInSuricata ? '<span class="stat-badge" title="From tshark: Suricata doesn\'t parse this protocol"><span class="sr-only">from tshark</span></span>' : ''}
                     </div>

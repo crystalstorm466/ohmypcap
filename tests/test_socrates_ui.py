@@ -21652,6 +21652,38 @@ class TestTsharkUI(unittest.TestCase):
         self.assertEqual(result['title'], "From tshark: Suricata doesn't parse this protocol")
         self.assertIn('.stat-badge { position: absolute;', CSS_CONTENT)
 
+    def test_connection_cards_follow_all_events_under_a_heading_of_their_own(self):
+        """REGRESSION: the connection cards' alphabetical run (BFD...) after
+        the record types' (...TLS) read as the cards sorted wrong."""
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""
+            currentMd5 = 'abc123';
+            isLogAnalysisMode = false; isEmailAnalysisMode = false;
+            eventTypes = sortEventTypes(['tls', 'conn__probed', 'conn_coap', 'alert', 'conn_bfd', 'http']);
+            eventStats = {tls: 2, conn__probed: 1640, conn_coap: 73, alert: 1, conn_bfd: 10, http: 5};
+            buildStats();
+            var grid = document.getElementById('statsGrid');
+            var order = [...grid.children].map(el => el.classList.contains('stats-grid-heading') ? 'HEADING'
+                : el.querySelector('.stat-label').textContent);
+            // a 3-column grid: the connection cards start a row of their own
+            window.statsGridColumnCount = function() { return 3; };
+            verticalNavSelection = [...grid.querySelectorAll('.stat-card')].find(c => c.textContent.includes('BFD'));
+            var column = activeColumnStatCards().map(c => c.querySelector('.stat-label').textContent);
+            var all = grid.querySelector('[data-section="section-all"]');
+            var heading = grid.querySelector('.stats-grid-heading').textContent;
+            var probedTitle = grid.querySelector('[data-section="section-conn__probed"]').title;
+            buildStats({tls: 2, alert: 1, http: 5});      // a filter that leaves no connection rows
+            window.__jsdom_result = {order: order, column: column, heading: heading, probedTitle: probedTitle,
+                                     allTitle: all.title, allTitleWithoutConnections: grid.querySelector('[data-section="section-all"]').title};
+        """)
+        self.assertEqual(result['order'], ['Network Alerts', 'HTTP', 'TLS', 'All Events', 'HEADING', 'BFD', 'COAP', 'Probed Only'])
+        self.assertEqual(result['column'], ['Network Alerts', 'All Events', 'BFD'],
+                         "BFD heads the first column of its own rows, under All Events' column")
+        self.assertIn('Connections tshark identified', result['heading'])
+        self.assertEqual(result['allTitle'], "Every record except tshark's connection rows, which list connections by protocol the way Flows does")
+        self.assertIn('nothing ever answered', result['probedTitle'])
+        self.assertEqual(result['allTitleWithoutConnections'], '', 'nothing to explain with no connection cards')
+
     def test_tshark_connection_rows_show_its_flow_columns_and_say_so(self):
         from tests.jsdom_helper import js_statements
         result = js_statements("""
@@ -21750,8 +21782,8 @@ class TestTsharkUI(unittest.TestCase):
 
     def test_connection_cards_follow_the_records_and_stay_out_of_all_events(self):
         """One card order: alerts, record types alphabetically (Suricata's
-        and tshark's mixed), connection cards, then ALL EVENTS last - which
-        doesn't count connections, each already one of Suricata's flows."""
+        and tshark's mixed), ALL EVENTS - which doesn't count connections,
+        each already one of Suricata's flows - then the connection cards."""
         from tests.jsdom_helper import js_statements
         result = js_statements("""
             eventTypes = sortEventTypes(['flow', 'conn_rsh', 's7comm', 'alert', 'dns', 'conn_prp', 'nbns']);
@@ -21761,7 +21793,7 @@ class TestTsharkUI(unittest.TestCase):
             window.__jsdom_result = [...document.querySelectorAll('.stat-card')].map(c => [c.dataset.section.replace('section-', ''),
                 c.querySelector('.stat-number').getAttribute('aria-label')]);
         """)
-        self.assertEqual([t for t, _ in result], ['alert', 'dns', 'flow', 'nbns', 's7comm', 'conn_prp', 'conn_rsh', 'all'])
+        self.assertEqual([t for t, _ in result], ['alert', 'dns', 'flow', 'nbns', 's7comm', 'all', 'conn_prp', 'conn_rsh'])
         self.assertEqual(dict(result)['all'], '19', 'alert, dns, flow, nbns and s7comm - not the connections')
 
     def test_column_filters_count_connection_rows_like_any_type(self):

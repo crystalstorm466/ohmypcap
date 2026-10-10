@@ -824,6 +824,8 @@ class TestNeighbors(unittest.TestCase):
         counts = db.get_event_types_sqlite(events_db)
         self.assertEqual((counts.get('lldp'), counts.get('cdp')), (2, 1))
         self.assertNotIn('conn_lldp', counts, 'records, not a connection card')
+        flows = [r for r in self.records if r['event_type'] == 'flow']
+        self.assertTrue(flows and all('answered' not in f['shark'] for f in flows), 'nothing answers a link-layer announcement')
         self.assertNotIn('conn_cdp', counts)
 
 
@@ -1016,6 +1018,38 @@ class TestAnswered(unittest.TestCase):
                          {'10.9.0.3': ('coap', 'yes'), '10.9.0.2': ('coap', 'ICMP error only'),
                           '10.9.0.4': ('coap', 'no'), '224.0.1.187': ('coap', None)})
         self.assertEqual(flows['10.9.0.2']['flow']['pkts_toclient'], 1, 'the ICMP error still counts as a packet back')
+
+    def test_the_merge_gives_the_protocols_nobody_answered_one_card(self):
+        """CoAP was answered once, so it keeps its card; memcached's probes
+        got only an ICMP error, so they're filed under Probed Only - with
+        their own app_proto."""
+        from tests.pcap_fixtures import write_pcap
+        from tests.protocol_fixtures import _icmp_unreachable, _udp_packet
+        coap = b'\x40\x01\x00\x01\xbb.well-known\x04core'
+        memcache = b'\x00\x01\x00\x00\x00\x01\x00\x00stats\r\n'
+        probe = _udp_packet('10.9.0.1', '10.9.0.2', 40005, 11211, memcache)
+        packets = [_udp_packet('10.9.0.1', '10.9.0.3', 40002, 5683, coap),
+                   _udp_packet('10.9.0.3', '10.9.0.1', 5683, 40002, b'\x60\x45\x00\x01'),
+                   _udp_packet('10.9.0.1', '10.9.0.4', 40003, 5683, coap),
+                   probe, _icmp_unreachable('10.9.0.2', '10.9.0.1', probe),
+                   _udp_packet('10.9.0.1', '10.9.0.5', 40006, 11211, memcache)]
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        pcap = os.path.join(d, 'probes.pcap')
+        write_pcap(pcap, packets)
+        eve = os.path.join(d, 'eve.json')
+        open(eve, 'w').close()
+        events_db = os.path.join(d, 'events.db')
+        db.create_sqlite_db(events_db, eve)
+        self.assertTrue(shark_analyzer.build(d, pcap))
+        self.assertEqual(shark_analyzer.probe_only_protocols(shark_analyzer.shark_db_path(d)), {'memcache'})
+        shark_analyzer.merge(d)
+        counts = db.get_event_types_sqlite(events_db)
+        self.assertEqual((counts.get('conn_coap'), counts.get(db.PROBED_CONNECTION_TYPE)), (2, 2))
+        self.assertNotIn('conn_memcache', counts)
+        probed = db.query_events_sqlite(events_db, db.PROBED_CONNECTION_TYPE)
+        self.assertEqual(sorted((e['app_proto'], e['shark']['answered']) for e in probed),
+                         [('memcache', 'ICMP error only'), ('memcache', 'no')])
 
 
 class TestFlowOrientation(unittest.TestCase):
@@ -1270,6 +1304,9 @@ class TestMerge(unittest.TestCase):
         self.assertEqual([e['event_type'] for e in db.query_events_sqlite(self.events_db, 'conn_syslog')], ['conn_syslog'])
         self.assertNotIn('conn_syslog', {e['event_type'] for e in db.query_events_sqlite(self.events_db, limit=100000)},
                          "it's a connection Suricata's own flow row already lists")
+        [row] = db.query_events_sqlite(self.events_db, 'conn_syslog')
+        self.assertEqual(row['shark']['answered'], 'no',
+                         'unanswered, as syslog always is - which is why it keeps its card, not Probed Only')
 
 
 class TestSettingsSwitch(unittest.TestCase):

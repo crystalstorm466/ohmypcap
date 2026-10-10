@@ -438,6 +438,10 @@ def create_file_analysis_db(db_path, file_path, yara_matches, file_md5, file_sha
 # its own tab, with flow's columns; all-events queries leave them out,
 # since Suricata's own flow rows already list those connections.
 CONNECTION_TYPE_PREFIX = 'conn_'
+# One connection type for every protocol whose connections were all
+# probes - none answered (shark_analyzer.probe_only_protocols) - rather
+# than a card each; its rows keep their own app_proto.
+PROBED_CONNECTION_TYPE = CONNECTION_TYPE_PREFIX + '_probed'
 
 
 def _columns_type(event_type):

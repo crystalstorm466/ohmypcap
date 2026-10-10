@@ -50,7 +50,9 @@ each card marked with a dot:
 - **A card for every other protocol tshark recognizes** - OpenVPN, PRP,
   RADIUS, MongoDB and so on - listing its connections, each marked with
   whether the server answered (yes, no, or only with an ICMP error - a
-  scanner's probe of a closed port)
+  scanner's probe of a closed port); the protocols nothing ever answered
+  share one card, **Probed Only**, so a week of scans hitting an
+  internet-facing server shows a few cards there instead of dozens
 - **Suricata stays in charge** of everything it parses: nothing from tshark
   is added on a connection Suricata identified, so a scanner's HTTP request
   to an rsh port stays HTTP, the way Suricata logged it

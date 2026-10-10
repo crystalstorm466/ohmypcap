@@ -1344,6 +1344,13 @@
         header { background: linear-gradient(135deg, var(--bg-secondary) 0%, var(--bg-tertiary) 100%); padding: 30px; border-radius: 12px; margin-bottom: 20px; border: 1px solid var(--border-color); }
         #mainHeader { padding: 0; background: transparent; border: none; }
         .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 15px; margin-bottom: 20px; }
+        /* Its own solid panel, like the cards: the fun themes animate the
+           page background behind the grid, and bare text over it was
+           unreadable (CGA's dithering, Vaporwave's sun). */
+        .stats-grid-heading { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin-top: 10px; padding: 10px 16px; background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 10px; color: var(--text-muted); font-size: 0.8rem; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; }
+        /* the cards' label color (.stat-label): readable on every theme, where
+           --text-primary isn't always (Breadbin Blue's is the dimmer one) */
+        .stats-grid-heading-note { font-weight: normal; text-transform: none; letter-spacing: normal; }
         .stat-card { background: var(--bg-secondary); padding: 20px; border-radius: 10px; border: 1px solid var(--border-color); text-align: center; cursor: pointer; container-type: inline-size; position: relative; }
         .stat-card:hover { border-color: var(--interactive-highlight, var(--accent)); }
         .stat-card.tab-active { border-color: var(--interactive-highlight, var(--accent)); background: var(--bg-tertiary); }

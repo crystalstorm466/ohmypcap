@@ -44,6 +44,7 @@ import tempfile
 import threading
 import time
 from collections import deque
+from contextlib import closing
 from datetime import datetime, timezone
 
 import sqlite3
@@ -61,7 +62,7 @@ SHARK_ARTIFACTS = (SHARK_DB, SHARK_DB + '-wal', SHARK_DB + '-shm', SHARK_DB + '.
 # change here or in shark_protocols changes what a run produces: a
 # shark.db stamped with an older version is rebuilt the next time its
 # status is asked for, so existing analyses pick up the change.
-SHARK_FORMAT_VERSION = 17
+SHARK_FORMAT_VERSION = 18
 
 # The fields every packet is read for, one per column of tshark's
 # tab-separated output, in this order - then each of shark_protocols'
@@ -365,8 +366,9 @@ class _Flow:
         """Whether the server answered: 'yes', 'no', or 'ICMP error only' -
         a probe of a closed UDP port, answered port unreachable, has
         packets back but no reply. '' for a flow to a multicast or
-        broadcast address, whose replies come back on another flow."""
-        if _is_group_address(self.server):
+        broadcast address, whose replies come back on another flow, and
+        for one that isn't IP (STP, LLDP...), which nothing answers."""
+        if not self.ip_v or _is_group_address(self.server):
             return ''
         if self.pkts_tc > self.icmp_tc:
             return 'yes'
@@ -1200,12 +1202,39 @@ def _merge_lock(dir_path):
         return _merge_locks.setdefault(dir_path, threading.Lock())
 
 
+# Bump it whenever merge_rows changes what a merge adds from the same
+# shark.db: an analysis merged by an older one is merged again.
+_MERGE_VERSION = 3
+
+
 def _merge_stamp(db_path):
-    """Which shark.db a merge came from: its format and modification time."""
-    return f'{SHARK_FORMAT_VERSION}:{os.path.getmtime(db_path):.6f}'
+    """Which shark.db a merge came from, and by which merge: its format
+    and modification time, and _MERGE_VERSION."""
+    return f'{SHARK_FORMAT_VERSION}.{_MERGE_VERSION}:{os.path.getmtime(db_path):.6f}'
 
 
-def merge_rows(shark_rows, identified):
+# Protocols that only ever send - logs, flow exports, media streams,
+# wake-up packets: an unanswered connection is how they work, not a
+# probe, so they're never probe_only_protocols.
+_ONE_WAY_PROTOCOLS = frozenset(('syslog', 'cflow', 'sflow', 'gelf', 'collectd', 'tzsp', 'rtp', 'rtpevent', 'rtcp',
+                                'wol'))
+
+
+def probe_only_protocols(shark_db):
+    """The application protocols whose every connection in shark.db was
+    a probe nothing answered - no reply, or only an ICMP error (_Flow.
+    answered). Not one with a connection to a multicast or broadcast
+    address, or one that isn't IP: neither can say whether it was
+    answered. Nor a one-way protocol (_ONE_WAY_PROTOCOLS)."""
+    with closing(sqlite3.connect(f'file:{shark_db}?mode=ro', uri=True)) as conn:
+        rows = conn.execute(
+            "SELECT json_extract(json_data, '$.app_proto') AS app, "
+            "max(coalesce(json_extract(json_data, '$.shark.answered'), '') IN ('yes', '')) "
+            "FROM events WHERE event_type = 'flow' AND app IS NOT NULL AND app != '' GROUP BY app").fetchall()
+    return frozenset(app for app, kept in rows if not kept and app not in _ONE_WAY_PROTOCOLS)
+
+
+def merge_rows(shark_rows, identified, probed=frozenset()):
     """The rows of a shark.db (its stored JSON, one at a time) that belong
     in the analysis's events.db: records of protocols Suricata doesn't
     parse, and - as connection rows, CONNECTION_TYPE_PREFIX + protocol -
@@ -1214,8 +1243,9 @@ def merge_rows(shark_rows, identified):
     and backed it with records (by Community ID and time, from
     db.suricata_identified_flows): there Suricata's word stands, as on a
     scanner's HTTP request to an rsh port, which tshark, going by the port,
-    calls rsh."""
-    from db import CONNECTION_TYPE_PREFIX
+    calls rsh. The connections of the protocols in probed
+    (probe_only_protocols) share one type, PROBED_CONNECTION_TYPE."""
+    from db import CONNECTION_TYPE_PREFIX, PROBED_CONNECTION_TYPE
 
     def suricata_knows(cid, first, last):
         return any(start - 1 <= last and first <= end + 1 for start, end in identified.get(cid, ()))
@@ -1231,7 +1261,7 @@ def merge_rows(shark_rows, identified):
             first, last = _iso_epoch(flow.get('start')), _iso_epoch(flow.get('end'))
             if first is not None and suricata_knows(cid, first, last if last is not None else first):
                 continue
-            event['event_type'] = CONNECTION_TYPE_PREFIX + app
+            event['event_type'] = PROBED_CONNECTION_TYPE if app in probed else CONNECTION_TYPE_PREFIX + app
         else:
             if event_type.replace('_', '-') in SURICATA_RECORDED_APP_PROTOS:
                 continue
@@ -1257,7 +1287,8 @@ def merge(dir_path):
         if tshark_merge_stamp(events_db) == stamp:
             return None
         added = replace_tshark_events(events_db, merge_rows(iter_events_json(shark_db),
-                                                            suricata_identified_flows(events_db)), stamp)
+                                                            suricata_identified_flows(events_db),
+                                                            probe_only_protocols(shark_db)), stamp)
     from analysis_cache import evict_analysis_cache
     evict_analysis_cache(os.path.basename(os.path.normpath(dir_path)))
     return added
