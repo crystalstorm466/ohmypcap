@@ -43,6 +43,10 @@ each card marked with a dot:
 - **Suricata stays in charge** of everything it parses: nothing from tshark
   is added on a connection Suricata identified, so a scanner's HTTP request
   to an rsh port stays HTTP, the way Suricata logged it
+- **Not the same as Security Onion's metadata** - Security Onion logs
+  protocol metadata with Zeek; SO-CRATES shows Suricata's protocol records
+  plus tshark's, so its fields and record counts won't match Security
+  Onion's Zeek logs for the same capture
 - **Nothing waits on tshark** - Suricata's results show as soon as they're
   ready, and tshark's protocols join them when it finishes (usually first);
   a line under the header counts the seconds while it works
