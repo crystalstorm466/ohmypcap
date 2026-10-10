@@ -2154,6 +2154,8 @@
                 opcua: '#29b6f6',
                 goose: '#d4e157',
                 browser: '#78909c',
+                lldp: '#26a69a',
+                cdp: '#8d6e63',
                 opcua_action: '#ff7043',
                 bacnet_property: '#5c6bc0',
                 bacnet_device: '#8d6e63',
@@ -3792,6 +3794,46 @@
             return html;
         }
 
+        // tshark's LLDP and CDP records (shark_protocols.LLDP/CDP): one per
+        // sending MAC, device and port.
+        function renderNeighborDetails(e) {
+            const lldp = e.event_type === 'lldp';
+            const n = (lldp ? e.lldp : e.cdp) || {};
+            let html = htmlSection(lldp ? 'LLDP Details' : 'CDP Details', COLORS.EVENT[e.event_type]);
+            if (lldp) {
+                html += htmlRowText('System Name', n.system_name, 'mono');
+                html += htmlRowText('Chassis ID', n.chassis_id, 'mono');
+            } else {
+                html += htmlRowText('Device ID', n.device_id, 'mono');
+                html += htmlRowText('System Name', n.system_name, 'mono');
+            }
+            html += htmlRowText('Port ID', n.port_id, 'mono');
+            html += htmlRowText('Port Description', n.port_description);
+            html += htmlRowText('Platform', n.platform);
+            html += htmlRowText(lldp ? 'Description' : 'Software', lldp ? n.system_description : n.software_version, '', 'white-space: pre-wrap; word-break: break-word;');
+            html += htmlRowText('Capabilities', (n.capabilities || []).join(', '));
+            html += htmlRowText('Management IP', (n.management_addresses || n.addresses || []).join(', '), 'mono');
+            html += htmlRowText('VLAN', n.vlan !== undefined ? String(n.vlan) : '');
+            html += htmlRowText('VLAN Names', (n.vlan_names || []).join(', '));
+            html += htmlRowText('Native VLAN', n.native_vlan !== undefined ? String(n.native_vlan) : '');
+            html += htmlRowText('Voice VLAN', n.voice_vlan !== undefined ? String(n.voice_vlan) : '');
+            html += htmlRowText('VTP Domain', n.vtp_domain, 'mono');
+            html += htmlRowText('Duplex', n.duplex);
+            html += htmlRowText('Location', n.location);
+            html += htmlRowText('Manufacturer', n.manufacturer);
+            html += htmlRowText('Model', n.model);
+            html += htmlRowText('Serial Number', n.serial_number, 'mono');
+            html += htmlRowText('Hardware', n.hardware_revision);
+            html += htmlRowText('Firmware', n.firmware_revision);
+            html += htmlRowText('Software Revision', n.software_revision);
+            html += htmlRowText('Asset ID', n.asset_id, 'mono');
+            html += htmlRowText('TTL', n.ttl !== undefined ? `${n.ttl} s` : '');
+            html += htmlRowText('Shutdowns', n.shutdowns ? n.shutdowns.toLocaleString() : '');
+            html += htmlRowText('Count', n.count !== undefined ? n.count.toLocaleString() : '');
+            html += htmlRowText('Last Seen', (n.last_seen || '').slice(0, 23).replace('T', ' '));
+            return html;
+        }
+
         // tshark's GOOSE records (shark_protocols.GOOSE): one per state change.
         function renderGooseDetails(e) {
             const g = e.goose || {};
@@ -4310,6 +4352,8 @@
             opcua: renderOpcuaDetails,
             goose: renderGooseDetails,
             browser: renderBrowserDetails,
+            lldp: renderNeighborDetails,
+            cdp: renderNeighborDetails,
             opcua_action: renderOpcuaActionDetails,
             bacnet_property: renderBacnetPropertyDetails,
             bacnet_device: renderBacnetDeviceDetails,
@@ -6977,6 +7021,8 @@
             opcua: 'OPC UA',
             goose: 'GOOSE',
             browser: 'Windows Browser',
+            lldp: 'LLDP',
+            cdp: 'CDP',
             opcua_action: 'OPC UA Actions',
             bacnet_property: 'BACnet Properties',
             bacnet_device: 'BACnet Devices',
@@ -7365,6 +7411,10 @@
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Service', 'Object', 'Property', 'Value', 'Password', 'Result'];
                 case 'browser':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Message', 'NetBIOS Name', 'Workgroup', 'Windows', 'Roles', 'Count'];
+                case 'lldp':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'System Name', 'Chassis ID', 'Port ID', 'Capabilities', 'Management IP', 'VLAN', 'Count'];
+                case 'cdp':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Device ID', 'Port ID', 'Platform', 'Capabilities', 'Management IP', 'Native VLAN', 'Count'];
                 case 'goose':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Control Block', 'Dataset', 'stNum', 'Repeats', 'Anomaly'];
                 case 'opcua':
@@ -7847,10 +7897,12 @@
                 case 'opcua':
                 case 'opcua_action':
                 case 'goose':
-                case 'browser': {
+                case 'browser':
+                case 'lldp':
+                case 'cdp': {
                     const cols = getColumnsForType(etype).slice(6);
                     colSpan = cols.length + 6;
-                    row = rowPrefixCells(e) + cols.map(col => `<td${['Search Target', 'Location', 'User', 'Password'].includes(col) ? ' class="mono"' : ''}>${escapeHtml(extractValue(e, col))}</td>`).join('') + '</tr>';
+                    row = rowPrefixCells(e) + cols.map(col => `<td${['Search Target', 'Location', 'User', 'Password', 'Chassis ID', 'Port ID', 'Device ID', 'Management IP'].includes(col) ? ' class="mono"' : ''}>${escapeHtml(extractValue(e, col))}</td>`).join('') + '</tr>';
                     break;
                 }
                 case 'nbns': {
@@ -10042,7 +10094,17 @@
                 // BACnet: an action's, a read/notification summary's, a device's
                 case 'Object': return e.bacnet?.object || e.bacnet_property?.object || '';
                 case 'Property': return e.bacnet?.property || e.bacnet_property?.property || '';
-                case 'Count': { const r = e.bacnet_property || e.browser; return r?.count !== undefined ? String(r.count) : ''; }
+                case 'Count': { const r = e.bacnet_property || e.browser || e.lldp || e.cdp; return r?.count !== undefined ? String(r.count) : ''; }
+                // LLDP and CDP: a neighbor's announcements
+                case 'System Name': return e.lldp?.system_name || '';
+                case 'Chassis ID': return e.lldp?.chassis_id || '';
+                case 'Device ID': return e.cdp?.device_id || '';
+                case 'Port ID': { const n = e.lldp || e.cdp; return n?.port_id || ''; }
+                case 'Platform': return e.cdp?.platform || '';
+                case 'Capabilities': { const n = e.lldp || e.cdp; return (n?.capabilities || []).join(', '); }
+                case 'Management IP': return (e.lldp?.management_addresses || e.cdp?.addresses || []).join(', ');
+                case 'VLAN': return e.lldp?.vlan !== undefined ? String(e.lldp.vlan) : '';
+                case 'Native VLAN': return e.cdp?.native_vlan !== undefined ? String(e.cdp.native_vlan) : '';
                 // Windows Browser: a host's announcements, elections...
                 case 'Message': return e.browser?.message || '';
                 case 'Workgroup': return e.browser?.destination_name || '';

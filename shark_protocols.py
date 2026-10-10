@@ -1109,6 +1109,165 @@ class Browser:
         return records
 
 
+# ---------------------------------------------------------------- LLDP and CDP
+#
+# Switches, routers, phones, PLCs and some PCs announce themselves to
+# their neighbor on each port every half minute or so - LLDP (the IEEE
+# standard) and CDP (Cisco's) - by Ethernet multicast, never routed: so
+# these records are a passive inventory of the devices on the captured
+# link. One record per sending MAC, device and port, counted, with what
+# its latest announcement said: the device's name, description or
+# platform and software, what it is (bridge, router, phone...), its
+# management addresses and VLAN, and LLDP-MED's inventory (maker, model,
+# serial number). An LLDP announcement with a time to live of 0 is a
+# port shutting down.
+
+_LLDP_CAPABILITIES = ((0x1, 'other'), (0x2, 'repeater'), (0x4, 'bridge'), (0x8, 'WLAN access point'),
+                      (0x10, 'router'), (0x20, 'telephone'), (0x40, 'DOCSIS cable device'), (0x80, 'station'),
+                      (0x100, 'C-VLAN'), (0x200, 'S-VLAN'), (0x400, 'TPMR'))
+_CDP_CAPABILITIES = ((0x1, 'router'), (0x2, 'transparent bridge'), (0x4, 'source route bridge'), (0x8, 'switch'),
+                     (0x10, 'host'), (0x20, 'IGMP'), (0x40, 'repeater'), (0x80, 'phone'), (0x100, 'remotely managed'),
+                     (0x200, 'CVTA'), (0x400, 'MAC relay'))
+_LLDP_MAX_ADDRESSES = 20
+
+
+def _capabilities(value, names):
+    bits = _int(value, 0)
+    return [name for bit, name in names if bits & bit]
+
+
+def _lldp_id(hexbytes):
+    """An LLDP chassis or port ID that tshark only shows as bytes: its
+    text when it's printable (a PROFINET station name, a host name),
+    otherwise its bytes, colon-separated."""
+    try:
+        raw = bytes.fromhex(hexbytes.replace(':', ''))
+    except ValueError:
+        return hexbytes
+    text = raw.decode('ascii', 'replace').strip()
+    if raw and text.isprintable() and '�' not in text:
+        return ' '.join(text.split())     # an S7 pads its ID's parts with spaces
+    return ':'.join(f'{b:02x}' for b in raw)
+
+
+def _addresses(*lists):
+    """Addresses, each once, without the unset 0.0.0.0 and ::."""
+    seen = dict.fromkeys(a for values in lists for a in values if a and a not in ('0.0.0.0', '::'))
+    return list(seen)[:_LLDP_MAX_ADDRESSES]
+
+
+class _Neighbors:
+    """LLDP's and CDP's shared bookkeeping: one record per sending MAC,
+    device and port (see the comment above)."""
+
+    def __init__(self):
+        self.devices = {}      # (source MAC, device, port) -> [flow, first seen, body]
+
+    def _record(self, pkt, device, port):
+        key = (pkt.src, device, port)
+        entry = self.devices.get(key)
+        if entry is None:
+            entry = self.devices[key] = [pkt.flow, pkt.when, {'count': 0}]
+        body = entry[2]
+        body['count'] += 1
+        body['last_seen'] = pkt.when
+        return body
+
+    def finish(self):
+        records = []
+        for flow, when, body in self.devices.values():
+            body['last_seen'] = _iso_utc(body['last_seen'])
+            records.append((flow, when, self.event_type, body))
+        return records
+
+
+class LLDP(_Neighbors):
+    """LLDP - see the comment above."""
+    event_type = 'lldp'
+    app_protos = ('lldp',)
+    fields = ('lldp.chassis.subtype', 'lldp.chassis.id', 'lldp.chassis.id.mac', 'lldp.chassis.id.ip4',
+              'lldp.chassis.id.ip6', 'lldp.port.subtype', 'lldp.port.id', 'lldp.port.id.mac', 'lldp.port.id.ip4',
+              'lldp.port.id.ip6', 'lldp.port.desc', 'lldp.tlv.system.name', 'lldp.tlv.system.desc',
+              'lldp.tlv.system_cap', 'lldp.tlv.enable_system_cap', 'lldp.time_to_live', 'lldp.mgn.addr.ip4',
+              'lldp.mgn.addr.ip6', 'lldp.ieee.802_1.port_vlan.id', 'lldp.ieee.802_1.vlan.name',
+              'lldp.media.manufacturer', 'lldp.media.model', 'lldp.media.sn', 'lldp.media.hardware',
+              'lldp.media.firmware', 'lldp.media.software', 'lldp.media.asset')
+    _INVENTORY = (('manufacturer', 'lldp.media.manufacturer'), ('model', 'lldp.media.model'),
+                  ('serial_number', 'lldp.media.sn'), ('hardware_revision', 'lldp.media.hardware'),
+                  ('firmware_revision', 'lldp.media.firmware'), ('software_revision', 'lldp.media.software'),
+                  ('asset_id', 'lldp.media.asset'))
+
+    def feed(self, pkt, v):
+        def first(name):
+            return (v[name] or [''])[0]
+        chassis = (first('lldp.chassis.id.mac') or first('lldp.chassis.id.ip4') or first('lldp.chassis.id.ip6')
+                   or _lldp_id(first('lldp.chassis.id')))
+        port = (first('lldp.port.id') or first('lldp.port.id.mac') or first('lldp.port.id.ip4')
+                or first('lldp.port.id.ip6'))
+        if not chassis and not port:
+            return
+        body = self._record(pkt, chassis, port)
+        body['chassis_id'], body['port_id'] = chassis, port
+        for key, field in (('port_description', 'lldp.port.desc'), ('system_name', 'lldp.tlv.system.name'),
+                           ('system_description', 'lldp.tlv.system.desc')) + self._INVENTORY:
+            if first(field):
+                body[key] = first(field)
+        enabled = first('lldp.tlv.enable_system_cap') or first('lldp.tlv.system_cap')
+        if enabled:
+            body['capabilities'] = _capabilities(enabled, _LLDP_CAPABILITIES)
+        addresses = _addresses(v['lldp.mgn.addr.ip4'], v['lldp.mgn.addr.ip6'])
+        if addresses:
+            body['management_addresses'] = addresses
+        vlan = _int(first('lldp.ieee.802_1.port_vlan.id'))
+        if vlan:
+            body['vlan'] = vlan
+        if v['lldp.ieee.802_1.vlan.name']:
+            body['vlan_names'] = list(dict.fromkeys(v['lldp.ieee.802_1.vlan.name']))[:_LLDP_MAX_ADDRESSES]
+        ttl = _int(first('lldp.time_to_live'))
+        if ttl is not None:
+            body['ttl'] = ttl
+            if ttl == 0:
+                body['shutdowns'] = body.get('shutdowns', 0) + 1
+
+
+class CDP(_Neighbors):
+    """CDP - see the comment above."""
+    event_type = 'cdp'
+    app_protos = ('cdp',)
+    fields = ('cdp.version', 'cdp.ttl', 'cdp.deviceid', 'cdp.portid', 'cdp.platform', 'cdp.software_version',
+              'cdp.capabilities', 'cdp.nrgyz.ip_address', 'cdp.nrgyz.ipv6_address', 'cdp.native_vlan',
+              'cdp.voice_vlan', 'cdp.vtp_management_domain', 'cdp.duplex', 'cdp.system_name', 'cdp.location',
+              'cdp.model_number', 'cdp.system_serial_number')
+
+    def feed(self, pkt, v):
+        def first(name):
+            return (v[name] or [''])[0]
+        device, port = first('cdp.deviceid'), first('cdp.portid')
+        if not device and not port:
+            return
+        body = self._record(pkt, device, port)
+        body['device_id'], body['port_id'] = device, port
+        if v['cdp.software_version']:
+            body['software_version'] = '\n'.join(v['cdp.software_version'])
+        for key, field in (('platform', 'cdp.platform'), ('vtp_domain', 'cdp.vtp_management_domain'),
+                           ('system_name', 'cdp.system_name'), ('location', 'cdp.location'),
+                           ('model', 'cdp.model_number'), ('serial_number', 'cdp.system_serial_number')):
+            if first(field):
+                body[key] = first(field)
+        if first('cdp.capabilities'):
+            body['capabilities'] = _capabilities(first('cdp.capabilities'), _CDP_CAPABILITIES)
+        addresses = _addresses(v['cdp.nrgyz.ip_address'], v['cdp.nrgyz.ipv6_address'])
+        if addresses:
+            body['addresses'] = addresses
+        for key, field in (('native_vlan', 'cdp.native_vlan'), ('voice_vlan', 'cdp.voice_vlan'),
+                           ('version', 'cdp.version'), ('ttl', 'cdp.ttl')):
+            number = _int(first(field))
+            if number is not None:
+                body[key] = number
+        if first('cdp.duplex'):
+            body['duplex'] = 'full' if first('cdp.duplex') in ('1', 'True') else 'half'
+
+
 # ---------------------------------------------------------------- GOOSE
 #
 # IEC 61850 GOOSE: a protection relay publishes its dataset's values by
@@ -1592,7 +1751,7 @@ def _pdus(layer):
 
 # Every protocol with records here, from tshark's fields, in the order their
 # fields follow the base fields in tshark's output.
-PROTOCOLS = (LLMNR, NBNS, SSDP, S7comm, Telnet, IEC104, BACnet, GOOSE, Browser)
+PROTOCOLS = (LLMNR, NBNS, SSDP, S7comm, Telnet, IEC104, BACnet, GOOSE, Browser, LLDP, CDP)
 # ... and from the structured pass (shark_analyzer._structured_pass): none
 # yet - it's for a protocol whose messages nest, which flat fields can't
 # keep apart (several commands per packet, a token inside a command).

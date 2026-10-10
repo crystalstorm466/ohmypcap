@@ -708,6 +708,68 @@ class TestGOOSE(unittest.TestCase):
 
 
 @unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
+class TestNeighbors(unittest.TestCase):
+    """tests/protocol_fixtures.write_neighbor_pcap: LLDP and CDP
+    announcements, one record per sending MAC, device and port - with
+    what Suricata 8.0.7 logged for the capture
+    (tests/data/neighbor_fixture.eve.json): only 'Ethertype unknown'
+    decoder alerts, since it doesn't decode either."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests.protocol_fixtures import write_neighbor_pcap
+        cls.tmpdir = tempfile.mkdtemp()
+        cls.pcap = os.path.join(cls.tmpdir, 'neighbor.pcap')
+        write_neighbor_pcap(cls.pcap)
+        cls.records = shark_analyzer.run_tshark(cls.pcap)
+        cls.lldp = {r['src_ip']: r['lldp'] for r in cls.records if r['event_type'] == 'lldp'}
+        cls.cdp = [r['cdp'] for r in cls.records if r['event_type'] == 'cdp']
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    def test_an_lldp_switch_says_what_it_is(self):
+        from tests.protocol_fixtures import NEIGHBOR_SWITCH
+        switch = self.lldp[NEIGHBOR_SWITCH]
+        self.assertEqual((switch['count'], switch['chassis_id'], switch['port_id'], switch['system_name']),
+                         (2, NEIGHBOR_SWITCH, 'Gi1/0/1', 'sw1.example'), 'the repeated announcement counted')
+        self.assertEqual(switch['system_description'], 'Fixture Switch OS 1.0\nBuilt 2026-01-01')
+        self.assertEqual((switch['capabilities'], switch['management_addresses'], switch['vlan']),
+                         (['bridge', 'router'], ['10.1.0.1'], 10))
+
+    def test_a_local_chassis_id_is_text_and_lldp_med_inventory_is_kept(self):
+        from tests.protocol_fixtures import NEIGHBOR_PLC
+        plc = self.lldp[NEIGHBOR_PLC]
+        self.assertEqual((plc['chassis_id'], plc['port_id']), ('plc-1 line 2', 'port-001'))
+        self.assertEqual((plc['manufacturer'], plc['model'], plc['serial_number'], plc['hardware_revision'],
+                          plc['firmware_revision']), ('Fixture Automation', 'PLC-100', 'SN-0042', 'HW 3', 'FW 2.1'))
+        self.assertEqual((plc['ttl'], plc['shutdowns']), (0, 1), 'its port shut down')
+
+    def test_cdp(self):
+        self.assertEqual(len(self.cdp), 1)
+        sw = self.cdp[0]
+        self.assertEqual((sw['device_id'], sw['port_id'], sw['platform'], sw['software_version'], sw['capabilities']),
+                         ('sw1', 'GigabitEthernet1/0/1', 'cisco WS-C2960-24TT', 'Fixture IOS 15.2', ['switch', 'IGMP']))
+        self.assertEqual((sw['addresses'], sw['native_vlan'], sw['vtp_domain'], sw['duplex']),
+                         (['10.1.0.1'], 10, 'PLANT', 'full'))
+
+    def test_the_merge_adds_the_records(self):
+        d = os.path.join(self.tmpdir, 'analysis')
+        os.makedirs(d)
+        shutil.copy(self.pcap, d)
+        events_db = os.path.join(d, 'events.db')
+        db.create_sqlite_db(events_db, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data',
+                                                    'neighbor_fixture.eve.json'))
+        self.assertTrue(shark_analyzer.build(d, os.path.join(d, 'neighbor.pcap')))
+        shark_analyzer.merge(d)
+        counts = db.get_event_types_sqlite(events_db)
+        self.assertEqual((counts.get('lldp'), counts.get('cdp')), (2, 1))
+        self.assertNotIn('conn_lldp', counts, 'records, not a connection card')
+        self.assertNotIn('conn_cdp', counts)
+
+
+@unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
 class TestBrowser(unittest.TestCase):
     """tests/protocol_fixtures.write_browser_pcap: Windows Browser messages,
     one record per host, name and kind of message - with what Suricata

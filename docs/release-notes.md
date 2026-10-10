@@ -38,6 +38,11 @@ each card marked with a dot:
   Windows machines on the network: each one's name, workgroup or domain,
   Windows version and roles (domain controller, SQL server, master
   browser...), with browser elections and announcement requests counted
+- **LLDP and CDP** (link-layer discovery) - a passive inventory of the
+  switches, routers, phones, PLCs and PCs on the captured link: each
+  device's name, the port it announced from, what it is, its management
+  address and VLAN, its platform and software (CDP) or maker, model and
+  serial number (LLDP-MED)
 - **A card for every other protocol tshark recognizes** - OpenVPN, PRP,
   RADIUS, MongoDB and so on - listing its connections
 - **Suricata stays in charge** of everything it parses: nothing from tshark

@@ -770,3 +770,66 @@ def browser_packets():
 
 def write_browser_pcap(path):
     write_pcap(path, browser_packets())
+
+
+# ---------------------------------------------------------------- LLDP and CDP
+#
+# A switch (NEIGHBOR_SWITCH) announcing its port Gi1/0/1 by LLDP twice and
+# by CDP once, and a PLC (NEIGHBOR_PLC) announcing itself by LLDP - with
+# a locally assigned chassis ID (its station name) and LLDP-MED inventory
+# - then shutting its port down (time to live 0).
+
+NEIGHBOR_SWITCH, NEIGHBOR_PLC = '00:1b:21:00:00:01', '00:1b:21:00:00:02'
+
+
+def _mac(text):
+    return bytes.fromhex(text.replace(':', ''))
+
+
+def _lldp_tlv(kind, value):
+    return struct.pack('!H', kind << 9 | len(value)) + value
+
+
+def _lldp(src, tlvs):
+    return _mac('01:80:c2:00:00:0e') + _mac(src) + struct.pack('!H', 0x88cc) + b''.join(tlvs) + _lldp_tlv(0, b'')
+
+
+def _lldp_switch():
+    return _lldp(NEIGHBOR_SWITCH, [
+        _lldp_tlv(1, b'\x04' + _mac(NEIGHBOR_SWITCH)), _lldp_tlv(2, b'\x05Gi1/0/1'), _lldp_tlv(3, b'\x00\x78'),
+        _lldp_tlv(4, b'Uplink to plant floor'), _lldp_tlv(5, b'sw1.example'),
+        _lldp_tlv(6, b'Fixture Switch OS 1.0\nBuilt 2026-01-01'),
+        _lldp_tlv(7, struct.pack('!HH', 0x14, 0x14)),                                 # bridge, router
+        _lldp_tlv(8, b'\x05\x01' + socket.inet_aton('10.1.0.1') + b'\x02\x00\x00\x00\x01\x00'),
+        _lldp_tlv(127, b'\x00\x80\xc2\x01' + struct.pack('!H', 10))])                 # port VLAN 10
+
+
+def _lldp_plc(ttl):
+    med = [_lldp_tlv(127, b'\x00\x12\xbb' + bytes([subtype]) + text) for subtype, text in
+           ((5, b'HW 3'), (6, b'FW 2.1'), (8, b'SN-0042'), (9, b'Fixture Automation'), (10, b'PLC-100'))]
+    return _lldp(NEIGHBOR_PLC, [
+        _lldp_tlv(1, b'\x07plc-1   line 2'), _lldp_tlv(2, b'\x07port-001'), _lldp_tlv(3, struct.pack('!H', ttl)),
+        _lldp_tlv(7, struct.pack('!HH', 0x80, 0x80))] + med)                          # station only
+
+
+def _cdp_tlv(kind, value):
+    return struct.pack('!HH', kind, 4 + len(value)) + value
+
+
+def _cdp_switch():
+    address = struct.pack('!I', 1) + b'\x01\x01\xcc' + struct.pack('!H', 4) + socket.inet_aton('10.1.0.1')
+    tlvs = (_cdp_tlv(1, b'sw1') + _cdp_tlv(5, b'Fixture IOS 15.2') + _cdp_tlv(6, b'cisco WS-C2960-24TT')
+            + _cdp_tlv(2, address) + _cdp_tlv(3, b'GigabitEthernet1/0/1') + _cdp_tlv(4, struct.pack('!I', 0x28))
+            + _cdp_tlv(9, b'PLANT') + _cdp_tlv(0x0a, struct.pack('!H', 10)) + _cdp_tlv(0x0b, b'\x01'))
+    header = bytes([2, 180]) + b'\x00\x00' + tlvs
+    cdp = header[:2] + struct.pack('!H', _checksum(header)) + header[4:]
+    llc = b'\xaa\xaa\x03\x00\x00\x0c\x20\x00' + cdp
+    return _mac('01:00:0c:cc:cc:cc') + _mac(NEIGHBOR_SWITCH) + struct.pack('!H', len(llc)) + llc
+
+
+def neighbor_packets():
+    return [_lldp_switch(), _lldp_plc(20), _cdp_switch(), _lldp_switch(), _lldp_plc(0)]
+
+
+def write_neighbor_pcap(path):
+    write_pcap(path, neighbor_packets())
