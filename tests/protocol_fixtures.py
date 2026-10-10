@@ -725,3 +725,48 @@ def goose_packets():
 
 def write_goose_pcap(path):
     write_pcap(path, goose_packets())
+
+
+# ---------------------------------------------------------------- Windows Browser
+#
+# NetBIOS datagrams to UDP 138 in workgroup/domain FIXTUREDOM: a workstation
+# (BROWSER_WORKSTATION, WS1) announcing itself twice, a domain controller
+# (BROWSER_DC, DC1) as local master browser, WS1 calling an election, and
+# WS1 asking for announcements.
+
+BROWSER_WORKSTATION, BROWSER_DC = '10.1.0.31', '10.1.0.32'
+_BROWSER_BROADCAST = '10.1.255.255'
+
+
+def _browser_datagram(src, source_name, payload, dgram_id):
+    name = b'\\MAILSLOT\\BROWSE\x00'
+    data_offset = 32 + 1 + 34 + 2 + len(name)
+    words = struct.pack('<HHHHBBHIHHHHHBB', 0, len(payload), 0, 0, 0, 0, 0, 0, 0, 0, 0, len(payload), data_offset,
+                        3, 0) + struct.pack('<HHH', 1, 1, 2)
+    smb = b'\xffSMB\x25' + b'\x00' * 27 + bytes([len(words) // 2]) + words \
+        + struct.pack('<H', len(name) + len(payload)) + name + payload
+    body = _nbns_name(source_name, 0x00) + _nbns_name('FIXTUREDOM', 0x1d) + smb
+    header = struct.pack('!BBH4sHHH', 0x11, 0x02, dgram_id, socket.inet_aton(src), 138, len(body), 0)
+    return _udp_packet(src, _BROWSER_BROADCAST, 138, 138, header + body)
+
+
+def _announcement(command, name, server_type, comment):
+    return (bytes([command, 1]) + struct.pack('<I', 720000) + name.encode().ljust(16, b'\x00')
+            + bytes([10, 0]) + struct.pack('<I', server_type) + bytes([15, 1]) + struct.pack('<H', 0xaa55)
+            + comment.encode() + b'\x00')
+
+
+def browser_packets():
+    workstation = _announcement(0x01, 'WS1', 0x1003, 'Accounting PC')            # workstation, server, NT workstation
+    master = _announcement(0x0f, 'DC1', 0x4802b, '')                            # ... domain controller, master browser
+    election = bytes([0x08, 1]) + struct.pack('<III', 0x20010f03, 60000, 0) + b'WS1\x00'
+    request = bytes([0x02, 0]) + b'WS1\x00'
+    return [_browser_datagram(BROWSER_WORKSTATION, 'WS1', workstation, 1),
+            _browser_datagram(BROWSER_WORKSTATION, 'WS1', workstation, 2),
+            _browser_datagram(BROWSER_DC, 'DC1', master, 3),
+            _browser_datagram(BROWSER_WORKSTATION, 'WS1', election, 4),
+            _browser_datagram(BROWSER_WORKSTATION, 'WS1', request, 5)]
+
+
+def write_browser_pcap(path):
+    write_pcap(path, browser_packets())

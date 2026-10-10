@@ -1015,6 +1015,100 @@ class BACnet:
         return records
 
 
+# ---------------------------------------------------------------- Windows Browser
+#
+# NetBIOS datagrams (UDP 138) carrying the Windows Browser protocol: each
+# machine announces itself to its domain or workgroup every few minutes -
+# its name, Windows version and roles (domain controller, SQL server,
+# master browser...) - and the browsers hold elections and hand out backup
+# lists. A passive inventory of the Windows machines on a network. The
+# messages repeat, so one record per sending host, name and kind of
+# message, counted; a datagram to another mailslot (NETLOGON...) is
+# counted the same way under its mailslot's name.
+
+_BROWSER_ROLES = (
+    (0x1, 'workstation'), (0x2, 'server'), (0x4, 'SQL server'), (0x8, 'domain controller'),
+    (0x10, 'backup controller'), (0x20, 'time source'), (0x40, 'Apple'), (0x80, 'Novell'),
+    (0x100, 'domain member'), (0x200, 'print server'), (0x400, 'dial-in'), (0x800, 'Xenix'),
+    (0x1000, 'NT workstation'), (0x2000, 'WfW'), (0x8000, 'NT server'), (0x10000, 'potential browser'),
+    (0x20000, 'backup browser'), (0x40000, 'master browser'), (0x80000, 'domain master browser'),
+    (0x100000, 'OSF'), (0x200000, 'VMS'), (0x400000, 'Windows 95+'), (0x800000, 'DFS'))
+
+
+def _netbios_name(name):
+    """'DUALRUNNING<1d>' -> 'DUALRUNNING'."""
+    return name.split('<', 1)[0].strip() if name else ''
+
+
+class Browser:
+    """Windows Browser - see the comment above."""
+    event_type = 'browser'
+    app_protos = ('nbdgm',)
+    fields = ('nbdgm.source_name', 'nbdgm.destination_name', 'mailslot.name', 'vals(browser.command)',
+              'browser.server', 'browser.mb_server', 'browser.os_major', 'browser.os_minor', 'browser.server_type',
+              'browser.comment', 'browser.proto_major', 'browser.proto_minor', 'browser.response_computer_name',
+              'browser.backup.server', 'browser.browser_to_promote')
+
+    def __init__(self):
+        self.summaries = {}    # (source address, source name, message) -> [flow, first seen, body]
+
+    def feed(self, pkt, v):
+        def first(name):
+            return (v[name] or [''])[0]
+        source = _netbios_name(first('nbdgm.source_name'))
+        if not source and not first('mailslot.name'):
+            return
+        command = first('vals(browser.command)')
+        message = command or f"mailslot {first('mailslot.name') or '?'}"
+        key = (pkt.src, source, message)
+        summary = self.summaries.get(key)
+        if summary is None:
+            body = {'message': message, 'source_name': source, 'count': 0}
+            destination = _netbios_name(first('nbdgm.destination_name'))
+            if destination:
+                body['destination_name'] = destination
+            summary = self.summaries[key] = [pkt.flow, pkt.when, body]
+        body = summary[2]
+        body['count'] += 1
+        body['last_seen'] = pkt.when
+        if command:
+            self._details(body, v, first)
+
+    @staticmethod
+    def _details(body, v, first):
+        """What a browser message says, kept from its latest copy."""
+        if first('browser.server'):
+            body['name'] = first('browser.server')
+        if first('browser.os_major'):
+            body['os_version'] = f"{first('browser.os_major')}.{first('browser.os_minor') or 0}"
+        types = first('browser.server_type')
+        if types:
+            try:
+                bits = int(types, 16) if types.startswith('0x') else int(types)
+            except ValueError:
+                bits = 0
+            body['roles'] = [name for bit, name in _BROWSER_ROLES if bits & bit]
+        if first('browser.comment'):
+            body['comment'] = first('browser.comment')
+        if first('browser.mb_server'):
+            body['master_browser'] = first('browser.mb_server')
+        if first('browser.proto_major'):
+            body['browser_version'] = f"{first('browser.proto_major')}.{first('browser.proto_minor') or 0}"
+        if first('browser.response_computer_name'):
+            body['reply_to'] = first('browser.response_computer_name')
+        if v['browser.backup.server']:
+            body['backup_servers'] = list(dict.fromkeys(v['browser.backup.server']))[:20]
+        if first('browser.browser_to_promote'):
+            body['promote'] = first('browser.browser_to_promote')
+
+    def finish(self):
+        records = []
+        for flow, when, body in self.summaries.values():
+            body['last_seen'] = _iso_utc(body['last_seen'])
+            records.append((flow, when, 'browser', body))
+        return records
+
+
 # ---------------------------------------------------------------- GOOSE
 #
 # IEC 61850 GOOSE: a protection relay publishes its dataset's values by
@@ -1498,7 +1592,7 @@ def _pdus(layer):
 
 # Every protocol with records here, from tshark's fields, in the order their
 # fields follow the base fields in tshark's output.
-PROTOCOLS = (LLMNR, NBNS, SSDP, S7comm, Telnet, IEC104, BACnet, GOOSE)
+PROTOCOLS = (LLMNR, NBNS, SSDP, S7comm, Telnet, IEC104, BACnet, GOOSE, Browser)
 # ... and from the structured pass (shark_analyzer._structured_pass): none
 # yet - it's for a protocol whose messages nest, which flat fields can't
 # keep apart (several commands per packet, a token inside a command).

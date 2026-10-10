@@ -34,6 +34,10 @@ each card marked with a dot:
   change a protection relay publishes: its values and which ones changed,
   how many times it was repeated, and a jump or reset in its state number,
   which is what a forged message looks like
+- **Windows Browser** (NetBIOS datagrams) - a passive inventory of the
+  Windows machines on the network: each one's name, workgroup or domain,
+  Windows version and roles (domain controller, SQL server, master
+  browser...), with browser elections and announcement requests counted
 - **A card for every other protocol tshark recognizes** - OpenVPN, PRP,
   RADIUS, MongoDB and so on - listing its connections
 - **Suricata stays in charge** of everything it parses: nothing from tshark

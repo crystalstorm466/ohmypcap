@@ -223,6 +223,7 @@ class TestFieldParsing(unittest.TestCase):
         self.assertEqual(shark_analyzer.app_protocol('eth:ethertype:ip:tcp:mbtcp:modbus'), 'modbus')
         self.assertEqual(shark_analyzer.app_protocol('eth:ethertype:ip:tcp:nbss:smb2'), 'smb')
         self.assertEqual(shark_analyzer.app_protocol('eth:ethertype:ip:udp:kerberos'), 'krb5')
+        self.assertEqual(shark_analyzer.app_protocol('eth:ethertype:ip:udp:cldap'), 'ldap')
 
     def test_rpc_is_the_protocol_only_when_nothing_follows_it(self):
         self.assertEqual(shark_analyzer.app_protocol('eth:ethertype:ip:tcp:rpc:nfs'), 'nfs')
@@ -699,6 +700,57 @@ class TestGOOSE(unittest.TestCase):
         counts = db.get_event_types_sqlite(events_db)
         self.assertEqual(counts.get('goose'), 4)
         self.assertNotIn('conn_goose', counts, 'records, not a connection card')
+
+
+@unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
+class TestBrowser(unittest.TestCase):
+    """tests/protocol_fixtures.write_browser_pcap: Windows Browser messages,
+    one record per host, name and kind of message - with what Suricata
+    8.0.7 logged for the capture (tests/data/browser_fixture.eve.json):
+    flows it gives no protocol, since it doesn't parse NetBIOS datagrams."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests.protocol_fixtures import write_browser_pcap
+        cls.tmpdir = tempfile.mkdtemp()
+        cls.pcap = os.path.join(cls.tmpdir, 'browser.pcap')
+        write_browser_pcap(cls.pcap)
+        cls.records = shark_analyzer.run_tshark(cls.pcap)
+        cls.messages = {(b['source_name'], b['message']): b for b in
+                        (r['browser'] for r in cls.records if r['event_type'] == 'browser')}
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    def test_one_record_per_host_and_message(self):
+        self.assertEqual(sorted(self.messages), [('DC1', 'Local Master Announcement'), ('WS1', 'Browser Election Request'),
+                                                 ('WS1', 'Host Announcement'), ('WS1', 'Request Announcement')])
+        self.assertEqual(self.messages[('WS1', 'Host Announcement')]['count'], 2, 'the repeated announcement counted')
+
+    def test_announcements_say_what_the_host_is(self):
+        workstation = self.messages[('WS1', 'Host Announcement')]
+        self.assertEqual((workstation['destination_name'], workstation['os_version'], workstation['roles'],
+                          workstation['comment']),
+                         ('FIXTUREDOM', '10.0', ['workstation', 'server', 'NT workstation'], 'Accounting PC'))
+        self.assertIn('domain controller', self.messages[('DC1', 'Local Master Announcement')]['roles'])
+        self.assertIn('master browser', self.messages[('DC1', 'Local Master Announcement')]['roles'])
+
+    def test_flows_match_suricatas_and_the_merge_adds_the_records(self):
+        from scripts.compare_shark_suricata import compare
+        report = compare(_load_eve('browser_fixture.eve.json'), self.records)['flow']
+        self.assertEqual((report['matched'], report['named_by_tshark'], report['differences']), (2, 2, []))
+        d = os.path.join(self.tmpdir, 'analysis')
+        os.makedirs(d)
+        shutil.copy(self.pcap, d)
+        events_db = os.path.join(d, 'events.db')
+        db.create_sqlite_db(events_db, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data',
+                                                    'browser_fixture.eve.json'))
+        self.assertTrue(shark_analyzer.build(d, os.path.join(d, 'browser.pcap')))
+        shark_analyzer.merge(d)
+        counts = db.get_event_types_sqlite(events_db)
+        self.assertEqual(counts.get('browser'), 4)
+        self.assertNotIn('conn_nbdgm', counts, 'records, not a connection card')
 
 
 class _NbnsFromJson:

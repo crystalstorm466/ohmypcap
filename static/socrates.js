@@ -2153,6 +2153,7 @@
                 bacnet: '#ab47bc',
                 opcua: '#29b6f6',
                 goose: '#d4e157',
+                browser: '#78909c',
                 opcua_action: '#ff7043',
                 bacnet_property: '#5c6bc0',
                 bacnet_device: '#8d6e63',
@@ -3769,6 +3770,28 @@
             return html;
         }
 
+        // tshark's Windows Browser records (shark_protocols.Browser): one per
+        // host, name and kind of message.
+        function renderBrowserDetails(e) {
+            const b = e.browser || {};
+            let html = htmlSection('Windows Browser Details', COLORS.EVENT.browser);
+            html += htmlRowText('Message', b.message);
+            html += htmlRowText('NetBIOS Name', b.source_name, 'mono');
+            html += htmlRowText('Workgroup', b.destination_name, 'mono');
+            html += htmlRowText('Announced Name', b.name && b.name !== b.source_name ? b.name : '', 'mono');
+            html += htmlRowText('Windows', b.os_version);
+            html += htmlRowText('Roles', (b.roles || []).join(', '));
+            html += htmlRowText('Comment', b.comment);
+            html += htmlRowText('Master Browser', b.master_browser, 'mono');
+            html += htmlRowText('Reply To', b.reply_to, 'mono');
+            html += htmlRowText('Backup Browsers', (b.backup_servers || []).join(', '), 'mono');
+            html += htmlRowText('Promoted', b.promote, 'mono');
+            html += htmlRowText('Browser Version', b.browser_version);
+            html += htmlRowText('Count', b.count !== undefined ? b.count.toLocaleString() : '');
+            html += htmlRowText('Last Seen', (b.last_seen || '').slice(0, 23).replace('T', ' '));
+            return html;
+        }
+
         // tshark's GOOSE records (shark_protocols.GOOSE): one per state change.
         function renderGooseDetails(e) {
             const g = e.goose || {};
@@ -4286,6 +4309,7 @@
             bacnet: renderBacnetDetails,
             opcua: renderOpcuaDetails,
             goose: renderGooseDetails,
+            browser: renderBrowserDetails,
             opcua_action: renderOpcuaActionDetails,
             bacnet_property: renderBacnetPropertyDetails,
             bacnet_device: renderBacnetDeviceDetails,
@@ -6952,6 +6976,7 @@
             bacnet: 'BACnet',
             opcua: 'OPC UA',
             goose: 'GOOSE',
+            browser: 'Windows Browser',
             opcua_action: 'OPC UA Actions',
             bacnet_property: 'BACnet Properties',
             bacnet_device: 'BACnet Devices',
@@ -7338,6 +7363,8 @@
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Command', 'Station', 'IOA', 'Value', 'Result'];
                 case 'bacnet':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Service', 'Object', 'Property', 'Value', 'Password', 'Result'];
+                case 'browser':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Message', 'NetBIOS Name', 'Workgroup', 'Windows', 'Roles', 'Count'];
                 case 'goose':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Control Block', 'Dataset', 'stNum', 'Repeats', 'Anomaly'];
                 case 'opcua':
@@ -7819,7 +7846,8 @@
                 case 'bacnet_device':
                 case 'opcua':
                 case 'opcua_action':
-                case 'goose': {
+                case 'goose':
+                case 'browser': {
                     const cols = getColumnsForType(etype).slice(6);
                     colSpan = cols.length + 6;
                     row = rowPrefixCells(e) + cols.map(col => `<td${['Search Target', 'Location', 'User', 'Password'].includes(col) ? ' class="mono"' : ''}>${escapeHtml(extractValue(e, col))}</td>`).join('') + '</tr>';
@@ -10014,7 +10042,12 @@
                 // BACnet: an action's, a read/notification summary's, a device's
                 case 'Object': return e.bacnet?.object || e.bacnet_property?.object || '';
                 case 'Property': return e.bacnet?.property || e.bacnet_property?.property || '';
-                case 'Count': return e.bacnet_property?.count !== undefined ? String(e.bacnet_property.count) : '';
+                case 'Count': { const r = e.bacnet_property || e.browser; return r?.count !== undefined ? String(r.count) : ''; }
+                // Windows Browser: a host's announcements, elections...
+                case 'Message': return e.browser?.message || '';
+                case 'Workgroup': return e.browser?.destination_name || '';
+                case 'Windows': return e.browser?.os_version || '';
+                case 'Roles': return (e.browser?.roles || []).join(', ');
                 case 'Errors': return e.bacnet_property?.errors !== undefined ? String(e.bacnet_property.errors) : '';
                 case 'Device': return e.bacnet_device?.device !== undefined ? String(e.bacnet_device.device) : '';
                 case 'Vendor': { const d = e.bacnet_device; return d?.vendor || (d?.vendor_id !== undefined ? String(d.vendor_id) : ''); }
@@ -10165,7 +10198,7 @@
                 }
                 // The name alone, as the server aggregates it - the <suffix> is
                 // in the detail panel, and Service says what it means.
-                case 'NetBIOS Name': return e.nbns?.name || '';
+                case 'NetBIOS Name': return e.nbns?.name || e.browser?.source_name || '';
                 case 'Address': return e.nbns?.address || '';
                 case 'Realm': return e.krb5?.realm || '';
                 case 'Error Code': return e.krb5?.error_code || '';

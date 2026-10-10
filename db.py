@@ -1388,6 +1388,14 @@ AGGREGATION_JSON_PATHS = {
         'Area': ['$.s7comm.items[0].area'],
         'Error': ['$.s7comm.response.error_class'],
     },
+    'browser': {
+        'Message': ['$.browser.message'],
+        'NetBIOS Name': ['$.browser.source_name'],
+        'Workgroup': ['$.browser.destination_name'],
+        'Windows': ['$.browser.os_version'],
+        'Roles': ['$.browser.roles'],
+        'Count': ['$.browser.count'],
+    },
     'goose': {
         'Control Block': ['$.goose.gocb_ref'],
         'Dataset': ['$.goose.dataset'],
