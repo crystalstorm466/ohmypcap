@@ -1018,9 +1018,10 @@ class TestBrowser(unittest.TestCase):
 @unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
 class TestOnePassOrTwo(unittest.TestCase):
     """A capture mostly of protocols with records here gets one pass
-    asking for every field (_mostly_recorded, _combined_fields); any other,
-    a first pass for flows and a protocol pass over just the packets that
-    need it. The records are the same either way."""
+    asking for the fields of those the probe saw (_mostly_recorded,
+    _combined_fields) - and any other's flows the protocol pass; any other
+    capture, a first pass for flows and a protocol pass over just the
+    packets that need it. The records are the same either way."""
 
     @classmethod
     def setUpClass(cls):
@@ -1049,9 +1050,24 @@ class TestOnePassOrTwo(unittest.TestCase):
                 self.assertEqual(self._records(pcap, True), two)
                 self.assertTrue(any('"event_type": "flow"' not in r for r in two) or name == 'protocols')
 
+    def test_a_protocol_the_probe_missed_still_gets_its_records(self):
+        """REGRESSION GUARD: the combined pass asks only for the sampled
+        protocols' fields - here S7comm's, on a capture with NBNS, LLMNR
+        and SSDP too, whose flows get the protocol pass instead."""
+        two = self._records(self.pcaps['extra'], False)
+        self.assertEqual(self._records(self.pcaps['extra'], frozenset({'s7comm'})), two)
+        self.assertTrue(any('"event_type": "nbns"' in r for r in two))
+
+    def test_the_combined_pass_asks_only_for_the_sampled_protocols_fields(self):
+        from shark_protocols import DTLS, IEC104
+        fields = shark_analyzer._combined_fields((IEC104,))
+        self.assertTrue(set(IEC104.fields) <= set(fields))
+        self.assertFalse(set(DTLS.fields) & set(fields))
+
     def test_the_probe_tells_one_protocols_capture_from_a_mixed_one(self):
         with mock.patch.object(shark_analyzer, '_PROBE_MIN_PACKETS', 1):
-            self.assertTrue(shark_analyzer._mostly_recorded(self.pcaps['iec104']))
+            self.assertEqual(shark_analyzer._mostly_recorded(self.pcaps['iec104']), {'iec60870_104'},
+                             'the protocols it saw, for the combined pass to ask for')
             self.assertFalse(shark_analyzer._mostly_recorded(self.pcaps['protocols']), 'DNS, HTTP, TLS, Modbus, FTP')
 
     def test_a_small_capture_is_never_probed(self):

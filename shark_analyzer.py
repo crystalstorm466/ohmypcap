@@ -103,10 +103,10 @@ def _protocol_pass_fields(protocols):
     return _FIELDS + tuple(dict.fromkeys(f for proto in protocols for f in proto.fields if f not in _FIELDS))
 
 
-def _combined_fields():
+def _combined_fields(protocols=PROTOCOLS):
     """One pass's fields, for a capture mostly of protocols with records
-    here (_mostly_recorded): the first pass's, then every protocol's."""
-    return _FIRST_PASS_FIELDS + tuple(dict.fromkeys(f for proto in PROTOCOLS for f in proto.fields
+    here (_mostly_recorded): the first pass's, then these protocols'."""
+    return _FIRST_PASS_FIELDS + tuple(dict.fromkeys(f for proto in protocols for f in proto.fields
                                                     if f not in _FIRST_PASS_FIELDS))
 
 
@@ -432,21 +432,25 @@ def _packet_key(f, app):
     return ip_v, src, dst, proto, stream, sport, dport, key
 
 
-def iter_records(lines, pcap_path=None, deadline=None, combined=False):
+def iter_records(lines, pcap_path=None, deadline=None, combined=()):
     """build_records' records, one at a time: a flow's is built as it's
     handed out and the flow then let go, so a capture's flows - most of
     its records - never exist twice over, or all at once as records.
     Given the capture's path, shark_protocols' records too - for which
     tshark reads the packets they need again (_protocol_pass,
-    _structured_pass) - or, combined, from these same lines, which carry
-    every protocol's fields too (_combined_fields, for a capture
-    _mostly_recorded)."""
+    _structured_pass) - except the combined protocols' (True: all of
+    them), read from these same lines, which carry their fields too
+    (_combined_fields, for a capture _mostly_recorded)."""
     flows = {}
     last_frame = 0
     feeds = None
     if combined:
-        column = {field: i for i, field in enumerate(_combined_fields())}
-        feeds = [(proto(), [column[field] for field in proto.fields]) for proto in PROTOCOLS]
+        combined = PROTOCOLS if combined is True else tuple(combined)
+        column = {field: i for i, field in enumerate(_combined_fields(combined))}
+        feeds = [(proto(), [column[field] for field in proto.fields]) for proto in combined]
+    fed_apps = frozenset(app for proto in combined or () for app in proto.app_protos)
+    # The protocols the protocol pass reads packets again for: the rest
+    pass_apps = _RECORDED_FIELD_APPS - fed_apps
     # The frames the protocol pass reads, as runs of consecutive frame
     # numbers: once a flow carries a protocol with records here, all of it
     # - the frames before (a span: its start, which TCP reassembly needs)
@@ -495,24 +499,21 @@ def iter_records(lines, pcap_path=None, deadline=None, combined=False):
             is_reply = True if syn_ack else _is_reply(cols)
             if is_reply is not None:
                 flow.orient(src, sport, is_reply)
-        if feeds is not None:
-            if app in _RECORDED_FIELD_APPS:
-                _feed(cols, feeds, Packet(frame, when, flow, sport, dport, app, src, dst))
-        elif frame:
+        if app in fed_apps:
+            _feed(cols, feeds, Packet(frame, when, flow, sport, dport, app, src, dst))
+        if frame:
             if flow.recorded:
                 if runs and frame <= runs[-1][1] + 1:
                     runs[-1][1] = frame
                 else:
                     runs.append([frame, frame])
-            elif app in _RECORDED_FIELD_APPS:
+            elif app in pass_apps:
                 flow.recorded = True
                 spans.append((flow.first_frame, frame))
-    if feeds is not None:
-        protocols = [handler for handler, _ in feeds]
-    elif pcap_path and (spans or runs):
-        protocols = _protocol_pass(pcap_path, flows, spans + [tuple(r) for r in runs], last_frame, deadline)
-    else:
-        protocols = [proto() for proto in PROTOCOLS]
+    protocols = [handler for handler, _ in feeds or ()]
+    if pcap_path and (spans or runs):
+        protocols += _protocol_pass(pcap_path, flows, spans + [tuple(r) for r in runs], last_frame, deadline,
+                                    skip=combined or ())
     del spans, runs
     structured = [proto() for proto in STRUCTURED_PROTOCOLS] if pcap_path else []
     if structured:
@@ -711,12 +712,13 @@ def _structured_pass(pcap_path, flows, handlers, total_frames, deadline=None):
                                    ('timed out' if proc.returncode < 0 else f'exit code {proc.returncode}')))
 
 
-def _protocol_pass(pcap_path, flows, ranges, total_frames, deadline=None):
+def _protocol_pass(pcap_path, flows, ranges, total_frames, deadline=None, skip=()):
     """shark_protocols' records, from a second tshark run asking for their
     fields - over a copy of just the frames the first pass marked (each
     flow carrying one of their protocols, from its start), and asking only
-    for the fields of the protocols it found. Returns the protocols, fed."""
-    protocols = [proto() for proto in PROTOCOLS]
+    for the fields of the protocols it found. Returns the protocols, fed -
+    all but skip's, which the first pass fed."""
+    protocols = [proto() for proto in PROTOCOLS if proto not in skip]
     present = {app for fl in flows.values() if fl.recorded for app in fl.protocols}
     active = [p for p in protocols if present.intersection(p.app_protos)]
     if not active:
@@ -757,13 +759,14 @@ def _protocol_pass(pcap_path, flows, ranges, total_frames, deadline=None):
 def _mostly_recorded(pcap_path):
     """Whether most of a capture's packets are in flows of protocols with
     records here - a capture of one such protocol - so that the protocol
-    pass would read nearly all of it again, and one pass asking for every
-    field is quicker. Judged from windows of packets spread across it (a
+    pass would read nearly all of it again, and one pass asking for their
+    fields is quicker: the protocols with records seen, if so (an empty
+    set if not). Judged from windows of packets spread across it (a
     capture's start can be one busy conversation); a capture too small for
     two passes to cost much, or one that can't be sampled, isn't."""
     count = packet_count(pcap_path)
     if not count or count < _PROBE_MIN_PACKETS:
-        return False
+        return frozenset()
     step = (count - _PROBE_WINDOW) // (_PROBE_WINDOWS - 1)
     windows = [(1 + i * step, i * step + _PROBE_WINDOW) for i in range(_PROBE_WINDOWS)] \
         if count > _PROBE_WINDOWS * _PROBE_WINDOW else [(1, count)]
@@ -771,13 +774,13 @@ def _mostly_recorded(pcap_path):
         sample = os.path.join(tmp, 'sample')
         try:
             if not pcap_subset.copy_frames(pcap_path, sample, windows):
-                return False
+                return frozenset()
             out = subprocess.run(['tshark', '-n', '-r', sample, '-T', 'fields', '-e', 'frame.protocols',
                                   '-e', 'tcp.stream', '-e', 'udp.stream'], capture_output=True, text=True,
                                  errors='replace', timeout=120, preexec_fn=_low_priority).stdout
         except (OSError, subprocess.SubprocessError):
-            return False
-    keys, recorded = [], set()
+            return frozenset()
+    keys, recorded, apps = [], set(), set()
     for line in out.splitlines():
         protocols, tcp, udp = (line.split('\t') + ['', ''])[:3]
         app = app_protocol(protocols)
@@ -785,7 +788,9 @@ def _mostly_recorded(pcap_path):
         keys.append(key)
         if app in _RECORDED_FIELD_APPS:
             recorded.add(key)
-    return bool(keys) and sum(key in recorded for key in keys) >= _PROBE_SHARE * len(keys)
+            apps.add(app)
+    mostly = bool(keys) and sum(key in recorded for key in keys) >= _PROBE_SHARE * len(keys)
+    return frozenset(apps) if mostly else frozenset()
 
 
 def _feed_protocols(cols, index, feeds):
@@ -851,8 +856,12 @@ def run_tshark(pcap_path, timeout=None, on_start=None, consume=list):
     tshark process as soon as it starts."""
     if not shutil.which('tshark'):
         raise RuntimeError('tshark is not installed')
-    combined = _mostly_recorded(pcap_path)
-    cmd = tshark_command(pcap_path, _combined_fields() if combined else _FIRST_PASS_FIELDS)
+    # A capture mostly of protocols with records: one pass asking for the
+    # fields of those the probe saw - any other's flows still get the
+    # protocol pass, over just their packets
+    seen = _mostly_recorded(pcap_path)
+    combined = PROTOCOLS if seen is True else tuple(p for p in PROTOCOLS if seen and seen & set(p.app_protos))
+    cmd = tshark_command(pcap_path, _combined_fields(combined) if combined else _FIRST_PASS_FIELDS)
     if shutil.which('ionice'):
         cmd = ['ionice', '-c', '3'] + cmd   # idle I/O class - allowed without privileges
     timeout = config.SHARK_RUN_TIMEOUT if timeout is None else timeout
