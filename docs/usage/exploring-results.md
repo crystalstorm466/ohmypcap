@@ -29,7 +29,7 @@ Suricata stays the source of truth for everything it parses. Nothing from tshark
 
 tshark starts with Suricata and usually finishes first; when it doesn't, Suricata's results open as usual and the line under the header says "tshark is parsing additional protocols…" with the seconds counting up. When tshark's protocols are ready, their cards join the others - once, and not while your pointer or keyboard focus is on the cards (the line offers **Show them** meanwhile); the open tab stays open. The line then says how many additional protocols tshark parsed and how long it took.
 
-A capture of more than 4 million packets isn't run through tshark until you ask, because tshark's memory grows with the number of packets (about 1 KB each) - click **Add tshark protocols** on the line. A run that needs more than 4 GB of memory is stopped. If a run fails, the reason is shown with a **Try again** link. To turn tshark off for every analysis, clear **Add protocols decoded by tshark** in Settings; analyses keep the protocols already added.
+A capture of more than 3 million packets isn't run through tshark until you ask, because tshark's memory grows with the number of packets (about 1 KB each) - click **Add tshark protocols** on the line. A run that needs more than 4 GB of memory is stopped. If a run fails, the reason is shown with a **Try again** link. To turn tshark off for every analysis, clear **Add protocols decoded by tshark** in Settings; analyses keep the protocols already added.
 
 **For log files (`.evtx`, `.json`, `.jsonl`, `.csv`, `.xml`, `.log`):**
 

@@ -48,7 +48,7 @@ each card marked with a dot:
   a line under the header counts the seconds while it works
 
 tshark runs at low priority with a 4 GB memory limit; captures of more
-than 4 million packets wait until you click **Add tshark protocols**, and
+than 3 million packets wait until you click **Add tshark protocols**, and
 Settings can turn tshark off.
 
 ### Suricata 8.0.7 and tshark 4.4.19
