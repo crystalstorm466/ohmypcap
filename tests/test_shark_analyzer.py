@@ -1354,7 +1354,8 @@ class TestSharkAPI(unittest.TestCase):
         self.assertIn(body['status'], ('queued', 'running', 'ready'))
         body = self._wait_ready()
         self.assertIsInstance(body.pop('seconds'), int)
-        self.assertEqual(body, {'status': 'ready', 'merged': True})
+        self.assertEqual(body, {'status': 'ready', 'merged': True, 'types': []},
+                         'types: what it added - nothing, so the page has nothing to reload')
         _, stats = self._get(f'/api/stats?md5={self.md5}')
         self.assertEqual(stats['tshark_types'], [], 'nothing here Suricata lacks - but the stats say so')
 

@@ -2609,6 +2609,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 # Built before tshark's rows joined Suricata's in events.db
                 # (or the merge was missed): add them now, in the background
                 shark_analyzer.merge_soon(dir_path)
+            else:
+                # The types it added - so the page knows, before reloading
+                # anything, whether there's anything new to show
+                status['types'] = tshark_types(os.path.join(dir_path, 'events.db'))
         return status
 
     def handle_get_shark_status(self, params):

@@ -12039,7 +12039,10 @@
             // tshark's rows have joined, but the cards haven't reloaded yet:
             // held while the analyst is on the cards, or loading now
             if (st === 'ready' && tsharkRowsPending === 'held') {
-                return `${dot}tshark parsed additional protocols \u2013 <a href="#" data-action="show-tshark-rows">Show them</a>`;
+                const n = (status.types || []).length;
+                return n
+                    ? `${dot}tshark parsed ${n} additional protocol${n === 1 ? '' : 's'} \u2013 <a href="#" data-action="show-tshark-rows">Show them</a>`
+                    : 'tshark found no additional protocols \u2013 <a href="#" data-action="show-tshark-rows">Update the cards</a>';
             }
             if (st === 'ready' && tsharkRowsPending) return 'tshark is parsing additional protocols\u2026';
             if (st === 'ready' && status.merged !== false) {
@@ -12116,7 +12119,10 @@
             if (sharkIsBusy(status)) {
                 sharkPollTimer = setTimeout(() => refreshSharkStatus(md5), SHARK_POLL_MS);
             } else if (wasBusy && status.status === 'ready') {
-                refreshForTsharkRows(md5);
+                // Nothing to reload when tshark added nothing, and the page
+                // shows nothing it added before (a rebuild that found the same)
+                const addsNothing = Array.isArray(status.types) && !status.types.length && !tsharkTypes.size;
+                if (!addsNothing) refreshForTsharkRows(md5);
             }
         }
 

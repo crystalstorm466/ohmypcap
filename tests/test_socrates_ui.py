@@ -21487,7 +21487,7 @@ class TestTsharkUI(unittest.TestCase):
             var grid = document.querySelector('.stats-grid');
             var card = document.createElement('button'); grid.appendChild(card);
             card.focus();
-            sharkStatus = {status: 'ready', merged: true};
+            sharkStatus = {status: 'ready', merged: true, types: ['s7comm']};
             refreshForTsharkRows(currentMd5);
             var held = {refreshed: refreshed, text: document.getElementById('tsharkLineStatus').textContent,
                         link: document.querySelector('#tsharkLineStatus a').dataset.action};
@@ -21498,10 +21498,33 @@ class TestTsharkUI(unittest.TestCase):
             var d = document.createElement('div'); d.innerHTML = sharkStatusHtml(sharkStatus);
             window.__jsdom_result = {held: held, refreshed: refreshed, pending: tsharkRowsPending, text: d.textContent};
         """)
-        self.assertEqual(result['held'], {'refreshed': 0, 'text': 'tshark parsed additional protocols \u2013 Show them',
+        self.assertEqual(result['held'], {'refreshed': 0, 'text': 'tshark parsed 1 additional protocol \u2013 Show them',
                                           'link': 'show-tshark-rows'})
         self.assertEqual((result['refreshed'], result['pending']), (1, False))
         self.assertEqual(result['text'], 'tshark parsed 1 additional protocol')
+
+    def test_a_run_that_adds_nothing_reloads_nothing(self):
+        """REGRESSION: a run that found nothing to add, finishing while the
+        analyst was on the cards, said 'tshark parsed additional protocols -
+        Show them' - the page reloaded to find out - and then 'tshark found
+        no additional protocols'. The status says which types it added."""
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""
+            document.getElementById('tsharkLineContainer').innerHTML = tsharkLineHtml();
+            var refreshed = 0;
+            refreshAnalysisData = async function() { refreshed++; };
+            currentMd5 = 'a'.repeat(32);
+            var grid = document.querySelector('.stats-grid');
+            var card = document.createElement('button'); grid.appendChild(card);
+            card.focus();
+            tsharkTypes = new Set();
+            sharkStatus = {status: 'running', elapsed: 1};
+            window.fetch = () => Promise.resolve({json: () => Promise.resolve({status: 'ready', merged: true, seconds: 1, types: []})});
+            await refreshSharkStatus(currentMd5);
+            var d = document.createElement('div'); d.innerHTML = sharkStatusHtml(sharkStatus);
+            window.__jsdom_result = {refreshed: refreshed, pending: tsharkRowsPending, text: d.textContent};
+        """)
+        self.assertEqual(result, {'refreshed': 0, 'pending': False, 'text': 'tshark found no additional protocols in 1s'})
 
     def test_tshark_line_sits_between_the_header_and_search_and_is_cleared_with_the_page(self):
         html = HTML_CONTENT

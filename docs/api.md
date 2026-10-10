@@ -429,7 +429,7 @@ Where tshark stands for a PCAP analysis. Alongside Suricata, tshark decodes the 
 
 | Status | Meaning |
 |---|---|
-| `ready` | Done. Adds `seconds` (how long the run took - absent for a `shark.db` built before runs recorded it) and `merged` (whether its rows have joined Suricata's in the analysis's `events.db`; a status request that finds them not yet merged starts the merge) |
+| `ready` | Done. Adds `seconds` (how long the run took - absent for a `shark.db` built before runs recorded it) and `merged` (whether its rows have joined Suricata's in the analysis's `events.db`; a status request that finds them not yet merged starts the merge) - and, once merged, `types`: the event types tshark added, as `GET /api/stats`'s `tshark_types` lists them (`[]` when it added nothing) |
 | `queued` | Waiting for another analysis's run to finish. Adds `position` (1 = next) |
 | `running` | tshark is analyzing the capture. Adds `elapsed` (whole seconds since the run started) |
 | `waiting` | Suricata hasn't finished yet (tshark, which starts alongside it, has finished or not started); while both run, the status is tshark's own - `queued` or `running` |
