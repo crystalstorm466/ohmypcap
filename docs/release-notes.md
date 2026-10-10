@@ -48,7 +48,9 @@ each card marked with a dot:
   address and VLAN, its platform and software (CDP) or maker, model and
   serial number (LLDP-MED)
 - **A card for every other protocol tshark recognizes** - OpenVPN, PRP,
-  RADIUS, MongoDB and so on - listing its connections
+  RADIUS, MongoDB and so on - listing its connections, each marked with
+  whether the server answered (yes, no, or only with an ICMP error - a
+  scanner's probe of a closed port)
 - **Suricata stays in charge** of everything it parses: nothing from tshark
   is added on a connection Suricata identified, so a scanner's HTTP request
   to an rsh port stays HTTP, the way Suricata logged it

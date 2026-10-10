@@ -61,7 +61,7 @@ SHARK_ARTIFACTS = (SHARK_DB, SHARK_DB + '-wal', SHARK_DB + '-shm', SHARK_DB + '.
 # change here or in shark_protocols changes what a run produces: a
 # shark.db stamped with an older version is rebuilt the next time its
 # status is asked for, so existing analyses pick up the change.
-SHARK_FORMAT_VERSION = 16
+SHARK_FORMAT_VERSION = 17
 
 # The fields every packet is read for, one per column of tshark's
 # tab-separated output, in this order - then each of shark_protocols'
@@ -249,13 +249,15 @@ def _is_reply(cols):
 class _Flow:
     __slots__ = ('key', 'proto', 'ip_v', 'client', 'server', 'cport', 'sport', 'first', 'last',
                  'pkts_ts', 'pkts_tc', 'bytes_ts', 'bytes_tc', 'protocols', 'app_proto', 'community_id',
-                 'stream', 'client_set_by_syn', 'client_set_by_message', 'first_frame', 'last_frame', 'recorded')
+                 'stream', 'client_set_by_syn', 'client_set_by_message', 'first_frame', 'last_frame', 'recorded',
+                 'icmp_ts', 'icmp_tc')
 
     def __init__(self, key, proto, ip_v, src, dst, sport, dport, when, stream):
         self.key, self.proto, self.ip_v, self.stream = key, proto, ip_v, stream
         self.client, self.server, self.cport, self.sport = src, dst, sport, dport
         self.first = self.last = when
         self.pkts_ts = self.pkts_tc = self.bytes_ts = self.bytes_tc = 0
+        self.icmp_ts = self.icmp_tc = 0     # the ICMP errors among each direction's packets
         self.protocols = {}
         self.app_proto = ''
         self.community_id = ''
@@ -268,6 +270,7 @@ class _Flow:
         self.cport, self.sport = self.sport, self.cport
         self.pkts_ts, self.pkts_tc = self.pkts_tc, self.pkts_ts
         self.bytes_ts, self.bytes_tc = self.bytes_tc, self.bytes_ts
+        self.icmp_ts, self.icmp_tc = self.icmp_tc, self.icmp_ts
 
     def orient(self, src, sport, is_reply):
         """The flow's first request or reply (see _is_reply) settles which
@@ -296,8 +299,14 @@ class _Flow:
             if src != self.client or sport != self.cport:
                 self._swap()
             self.client_set_by_syn = True
+        icmp_error = from_client is not None
         if from_client is None:
             from_client = src == self.client and sport == self.cport
+        if icmp_error:
+            if from_client:
+                self.icmp_ts += 1
+            else:
+                self.icmp_tc += 1
         if from_client:
             self.pkts_ts += 1
             self.bytes_ts += length
@@ -345,9 +354,23 @@ class _Flow:
             event['src_port'], event['dest_port'] = self.cport, self.sport
         if self.stream is not None:
             event['shark']['stream'] = self.stream
+        answered = self.answered()
+        if answered:
+            event['shark']['answered'] = answered
         if self.community_id:
             event['community_id'] = self.community_id
         return event
+
+    def answered(self):
+        """Whether the server answered: 'yes', 'no', or 'ICMP error only' -
+        a probe of a closed UDP port, answered port unreachable, has
+        packets back but no reply. '' for a flow to a multicast or
+        broadcast address, whose replies come back on another flow."""
+        if _is_group_address(self.server):
+            return ''
+        if self.pkts_tc > self.icmp_tc:
+            return 'yes'
+        return 'ICMP error only' if self.icmp_tc else 'no'
 
 
 _ESCAPE = re.compile(r'\\(x[0-9a-fA-F]{2}|.)')

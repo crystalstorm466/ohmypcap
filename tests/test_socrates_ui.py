@@ -21658,16 +21658,18 @@ class TestTsharkUI(unittest.TestCase):
             var e = {id: 1, event_type: 'conn_rsh', source: 'tshark', proto: 'TCP', app_proto: 'rsh', src_ip: '10.0.0.1',
                      dest_ip: '10.0.0.2', src_port: 51877, dest_port: 514, timestamp: '2015-10-21T10:09:22',
                      flow: {pkts_toserver: 6, pkts_toclient: 3, bytes_toserver: 100, bytes_toclient: 200, age: 0},
-                     shark: {protocols: {rsh: 2}}};
+                     shark: {protocols: {rsh: 2}, answered: 'yes'}};
             var tb = document.createElement('tbody');
             tb.innerHTML = buildRowForEvent(e);
             var d = document.createElement('div'); d.innerHTML = formatEvent(e);
             window.__jsdom_result = {cols: getColumnsForType('conn_rsh'), cells: [...tb.querySelector('tr').children].map(td => td.textContent),
                                      detail: d.textContent};
         """)
-        self.assertEqual(result['cols'][6:8], ['App Proto', 'Pkts \u2192'])
+        self.assertEqual(result['cols'][6:9], ['App Proto', 'Answered', 'Pkts \u2192'])
         self.assertNotIn('State', result['cols'])
-        self.assertEqual(result['cells'][6:8], ['rsh', '6'])
+        self.assertEqual(result['cells'][6:9], ['rsh', 'yes', '6'])
+        self.assertEqual(len(result['cells']), len(result['cols']) + 1, 'a cell per column, and the note cell')
+        self.assertIn('Answeredyes', result['detail'])
         self.assertIn('Decoded bytshark', result['detail'])
         self.assertIn('rsh (2 packets)', result['detail'])
 

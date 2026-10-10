@@ -84,7 +84,7 @@
         const CONNECTION_TYPE_PREFIX = 'conn_';
         // A tshark flow's columns: no State or Alerted (Suricata's own flow
         // tracking and detection) - its protocol is the point.
-        const TSHARK_FLOW_COLUMNS = ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'App Proto', 'Pkts →', 'Pkts ←', 'Bytes →', 'Bytes ←'];
+        const TSHARK_FLOW_COLUMNS = ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'App Proto', 'Answered', 'Pkts →', 'Pkts ←', 'Bytes →', 'Bytes ←'];
         function isConnectionType(type) { return typeof type === 'string' && type.startsWith(CONNECTION_TYPE_PREFIX); }
         function eventTypeLabel(type) {
             if (isConnectionType(type)) {
@@ -4068,11 +4068,20 @@
             return html;
         }
 
+        // Whether a tshark flow's server answered (shark_analyzer._Flow.answered):
+        // 'ICMP error only' is a probe of a closed UDP port.
+        function answeredCell(answered) {
+            if (!answered) return '<td></td>';
+            const color = answered === 'yes' ? 'var(--badge-success-text)' : 'var(--text-muted)';
+            return `<td>${valueDotSpan(color)}${escapeHtml(answered)}</td>`;
+        }
+
         // A tshark flow (shark_analyzer.py): no Suricata state or
         // alerts, but every protocol tshark found in the flow, with how many
         // packets carried each.
         function renderSharkFlowDetails(e) {
             let html = htmlRowText('App Proto', e.app_proto, 'mono');
+            html += htmlRowText('Answered', e.shark?.answered);
             html += htmlRowText('Age', e.flow?.age == null ? '' : `${e.flow.age} seconds`);
             html += htmlRowText('Pkts to Server', (e.flow?.pkts_toserver || 0).toLocaleString());
             html += htmlRowText('Pkts to Client', (e.flow?.pkts_toclient || 0).toLocaleString());
@@ -7707,9 +7716,9 @@
                     // A flow from tshark (e.shark: a connection row) has
                     // its protocol where Suricata's has state and alerts.
                     const tsharkFlow = !!e.shark;
-                    colSpan = tsharkFlow ? 11 : 12;
+                    colSpan = 12;
                     row = tsharkFlow
-                        ? rowPrefixCells(e) + `<td class="mono">${escapeHtml(e.app_proto || '')}</td>` + countCells + '</tr>'
+                        ? rowPrefixCells(e) + `<td class="mono">${escapeHtml(e.app_proto || '')}</td>` + answeredCell(e.shark.answered) + countCells + '</tr>'
                         : rowPrefixCells(e) + countCells + `<td>${escapeHtml(state)}</td><td>${valueDotSpan(alertedColor)}${escapeHtml(alertedText)}</td></tr>`;
                     break;
                 case 'fileinfo':
@@ -10341,6 +10350,7 @@
                 case 'Reply': return e.dhcpv6 ? e.dhcpv6.reply || '' : (e.ftp?.reply || []).join(' | ');
                 case 'Event': return e.anomaly?.event || '';
                 case 'Layer': return e.anomaly?.layer || '';
+                case 'Answered': return e.shark?.answered || '';
                 case 'App Proto': return e.event_type === 'anomaly' ? (e.anomaly?.app_proto || '') : (e.app_proto || '');
                 case 'Stratum': return e.ntp?.stratum !== undefined ? String(e.ntp.stratum) : '';
                 case 'Reference ID': return e.ntp?.reference_id || '';

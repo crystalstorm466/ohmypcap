@@ -82,7 +82,7 @@ class TestBuildFlows(unittest.TestCase):
         self.assertEqual(flow['flow']['end'], '1970-01-01T00:00:01.500000+0000')
         self.assertEqual(flow['timestamp'], flow['flow']['start'])
         self.assertEqual(flow['community_id'], '1:abc=')
-        self.assertEqual(flow['shark'], {'protocols': {'http': 2}, 'stream': 0})
+        self.assertEqual(flow['shark'], {'protocols': {'http': 2}, 'stream': 0, 'answered': 'yes'})
 
     def test_syn_decides_the_client_when_the_capture_starts_mid_handshake(self):
         """A capture whose first packet is the server's SYN-ACK still names
@@ -989,6 +989,34 @@ class TestStructuredPass(unittest.TestCase):
         lines = ['[\n', '  {\n', '    "_source": {"layers": {"nbns": {"nbns.id": "5"}}}\n', '  },\n',
                  '  {\n', '    "_source": {"layers": {"nbns": {"nbns.id": "6"}}}\n', '  }\n', ']\n']
         self.assertEqual([p['nbns']['nbns.id'] for p in shark_analyzer._json_packets(lines)], ['5', '6'])
+
+@unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
+class TestAnswered(unittest.TestCase):
+    """A flow says whether its server answered: a scanner's UDP probes -
+    one answered, one answered only by an ICMP port unreachable (a closed
+    port), one not at all - and an announcement to a multicast group,
+    whose replies would come back on another flow."""
+
+    def test_answered_no_and_icmp_error_only(self):
+        from tests.pcap_fixtures import write_pcap
+        from tests.protocol_fixtures import _icmp_unreachable, _udp_packet
+        coap = b'\x40\x01\x00\x01\xbb.well-known\x04core'           # a CoAP GET /.well-known/core
+        probe = _udp_packet('10.9.0.1', '10.9.0.2', 40001, 5683, coap)
+        packets = [_udp_packet('10.9.0.1', '10.9.0.3', 40002, 5683, coap),
+                   _udp_packet('10.9.0.3', '10.9.0.1', 5683, 40002, b'\x60\x45\x00\x01'),
+                   probe, _icmp_unreachable('10.9.0.2', '10.9.0.1', probe),
+                   _udp_packet('10.9.0.1', '10.9.0.4', 40003, 5683, coap),
+                   _udp_packet('10.9.0.1', '224.0.1.187', 40004, 5683, coap)]
+        tmpdir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmpdir, ignore_errors=True)
+        pcap = os.path.join(tmpdir, 'probes.pcap')
+        write_pcap(pcap, packets)
+        flows = {r['dest_ip']: r for r in shark_analyzer.run_tshark(pcap) if r['event_type'] == 'flow'}
+        self.assertEqual({ip: (f['app_proto'], f['shark'].get('answered')) for ip, f in flows.items()},
+                         {'10.9.0.3': ('coap', 'yes'), '10.9.0.2': ('coap', 'ICMP error only'),
+                          '10.9.0.4': ('coap', 'no'), '224.0.1.187': ('coap', None)})
+        self.assertEqual(flows['10.9.0.2']['flow']['pkts_toclient'], 1, 'the ICMP error still counts as a packet back')
+
 
 class TestFlowOrientation(unittest.TestCase):
     def _flow(self):

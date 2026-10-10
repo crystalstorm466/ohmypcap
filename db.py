@@ -1207,6 +1207,8 @@ AGGREGATION_JSON_PATHS = {
         # tshark's flow table shows this in place of State/Alerted,
         # which only Suricata records.
         'App Proto': ['$.app_proto'],
+        # whether the server answered: yes, no, or ICMP error only
+        'Answered': ['$.shark.answered'],
     },
     'fileinfo': {
         'Filename': ['$.fileinfo.filename'],
@@ -1624,6 +1626,9 @@ _FLOW_JSON_INDEX_NAMES = {
     'Bytes →': 'idx_flow_bytes_toserver', 'Bytes ←': 'idx_flow_bytes_toclient',
     'State': 'idx_flow_state', 'Alerted': 'idx_flow_alerted',
     'App Proto': 'idx_flow_app_proto',
+    # No index for 'Answered': only tshark's connection rows have it, few
+    # enough that the event_type index finds them - one over every flow
+    # would only slow a big capture's import.
 }
 
 
@@ -1645,8 +1650,10 @@ def _ensure_flow_json_indexes(conn):
     query-planner stats need refreshing here too, not just after ingest.
     """
     for label, paths in AGGREGATION_JSON_PATHS['flow'].items():
+        name = _FLOW_JSON_INDEX_NAMES.get(label)
+        if name is None:
+            continue
         expr = _aggregation_expr('flow', label, paths)
-        name = _FLOW_JSON_INDEX_NAMES[label]
         try:
             conn.execute(f'CREATE INDEX IF NOT EXISTS {name} ON events(event_type, {expr})')
         except sqlite3.OperationalError:
