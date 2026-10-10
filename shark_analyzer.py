@@ -49,6 +49,7 @@ from datetime import datetime, timezone
 import sqlite3
 
 import config
+import pcap_subset
 from db import (create_shark_db, iter_events_json, replace_tshark_events, suricata_identified_flows,
                 tshark_merge_stamp, _iso_epoch)
 from shark_protocols import PROTOCOLS, RECORDED_APP_PROTOS, STRUCTURED_PROTOCOLS, Packet
@@ -85,10 +86,20 @@ _FIELDS = (
 # reply - requested whether or not any protocol here keeps records of them.
 _ORIENTATION_FIELDS = ('dns.flags.response', 'nbns.flags.response', 'http.response.code', 'http.request.method',
                        'ftp.response.code', 'ftp.request.command', 's7comm.header.rosctr', 'tls.handshake.type')
-_PROTOCOL_FIELDS = tuple(dict.fromkeys(f for f in [f for proto in PROTOCOLS for f in proto.fields] + list(_ORIENTATION_FIELDS)
-                                       if f not in _FIELDS))
-_ALL_FIELDS = _FIELDS + _PROTOCOL_FIELDS
-_COLUMN = {field: i for i, field in enumerate(_ALL_FIELDS)}
+# The first pass reads every packet, for its flow - so it asks for no more
+# than that: tshark's time grows with each field asked for, whether or not
+# a packet has it. shark_protocols' fields are asked for by a second pass
+# (_protocol_pass) over just the packets of the flows they keep records of.
+_FIRST_PASS_FIELDS = _FIELDS + tuple(f for f in _ORIENTATION_FIELDS if f not in _FIELDS)
+_COLUMN = {field: i for i, field in enumerate(_FIRST_PASS_FIELDS)}
+# The application protocols shark_protocols keeps records of from fields
+_RECORDED_FIELD_APPS = frozenset(p for proto in PROTOCOLS for p in proto.app_protos)
+
+
+def _protocol_pass_fields(protocols):
+    """The protocol pass's fields: the base fields (to find each packet's
+    flow), then each of these protocols' fields, each once."""
+    return _FIELDS + tuple(dict.fromkeys(f for proto in protocols for f in proto.fields if f not in _FIELDS))
 # Joins a repeated field's values. tshark escapes control characters
 # inside a value (a tab comes out as the two characters \t), so this can
 # never appear in one.
@@ -120,11 +131,12 @@ def shark_db_path(dir_path):
     return os.path.join(dir_path, SHARK_DB)
 
 
-def tshark_command(pcap_path):
-    """The tshark command that dumps _ALL_FIELDS for every packet."""
+def tshark_command(pcap_path, fields=_FIRST_PASS_FIELDS):
+    """The tshark command that dumps these fields (the first pass's by
+    default) for every packet."""
     cmd = ['tshark', '-n', '-r', pcap_path, '--enable-protocol', 'communityid',
            '-T', 'fields', '-E', 'separator=\t', '-E', 'occurrence=a', '-E', 'aggregator=' + _AGGREGATOR]
-    for field in _ALL_FIELDS:
+    for field in fields:
         cmd += ['-e', field]
     return cmd
 
@@ -224,7 +236,7 @@ def _is_reply(cols):
 class _Flow:
     __slots__ = ('key', 'proto', 'ip_v', 'client', 'server', 'cport', 'sport', 'first', 'last',
                  'pkts_ts', 'pkts_tc', 'bytes_ts', 'bytes_tc', 'protocols', 'app_proto', 'community_id',
-                 'stream', 'client_set_by_syn', 'client_set_by_message', 'first_frame', 'last_frame')
+                 'stream', 'client_set_by_syn', 'client_set_by_message', 'first_frame', 'last_frame', 'recorded')
 
     def __init__(self, key, proto, ip_v, src, dst, sport, dport, when, stream):
         self.key, self.proto, self.ip_v, self.stream = key, proto, ip_v, stream
@@ -236,6 +248,7 @@ class _Flow:
         self.community_id = ''
         self.client_set_by_syn = self.client_set_by_message = False
         self.first_frame = self.last_frame = 0     # its first and last packet's frame numbers
+        self.recorded = False      # whether it carries a protocol with records (iter_records)
 
     def _swap(self):
         self.client, self.server = self.server, self.client
@@ -347,15 +360,50 @@ def build_records(lines):
     return list(iter_records(lines))
 
 
+def _packet_key(f, app):
+    """A packet's IP version, addresses, transport, stream, ports and flow
+    key, from its base fields (f: each one's last occurrence - see
+    _FIELDS). A TCP or UDP flow is tshark's stream; any other is its
+    addresses (and, below IP, its protocol)."""
+    if f[_F_IP_SRC] or f[_F_IP6_SRC]:
+        ip_v = 4 if f[_F_IP_SRC] else 6
+        if ip_v == 4:
+            src, dst = f[_F_IP_SRC], f[_F_IP_DST]
+        else:
+            src, dst = ipv6_exploded(f[_F_IP6_SRC]), ipv6_exploded(f[_F_IP6_DST])
+    else:
+        ip_v, src, dst = 0, f[_F_ETH_SRC], f[_F_ETH_DST]
+    stream = None
+    if f[_F_TCP_STREAM]:
+        proto, stream = 'TCP', _int(f[_F_TCP_STREAM])
+        sport, dport = _int(f[_F_TCP_SPORT]), _int(f[_F_TCP_DPORT])
+        key = ('tcp', stream)
+    elif f[_F_UDP_STREAM]:
+        proto, stream = 'UDP', _int(f[_F_UDP_STREAM])
+        sport, dport = _int(f[_F_UDP_SPORT]), _int(f[_F_UDP_DPORT])
+        key = ('udp', stream)
+    else:
+        number = f[_F_IP_PROTO] or f[_F_IP6_NXT]
+        proto = _IP_PROTO_NAMES.get(number, number) if ip_v else (app.upper() or 'ETH')
+        sport = dport = 0
+        key = (proto, app if not ip_v else '') + tuple(sorted((src, dst)))
+    return ip_v, src, dst, proto, stream, sport, dport, key
+
+
 def iter_records(lines, pcap_path=None, deadline=None):
     """build_records' records, one at a time: a flow's is built as it's
     handed out and the flow then let go, so a capture's flows - most of
     its records - never exist twice over, or all at once as records.
-    Given the capture's path, the structured protocols' records too
-    (_structured_pass) - for which tshark reads it again."""
+    Given the capture's path, shark_protocols' records too - for which
+    tshark reads the packets they need again (_protocol_pass,
+    _structured_pass)."""
     flows = {}
     last_frame = 0
-    protocols = [(proto(), [_COLUMN[field] for field in proto.fields]) for proto in PROTOCOLS]
+    # The frames the protocol pass reads, as runs of consecutive frame
+    # numbers: once a flow carries a protocol with records here, all of it
+    # - the frames before (a span: its start, which TCP reassembly needs)
+    # and every one after.
+    spans, runs = [], []
     for line in lines:
         cols = line.rstrip('\n').split('\t')
         if len(cols) < len(_FIELDS):
@@ -379,28 +427,7 @@ def iter_records(lines, pcap_path=None, deadline=None):
             app = ''
             outer_src = cols[_F_IP_SRC].split(_AGGREGATOR)[0] if f[_F_IP_SRC] else \
                 ipv6_exploded(cols[_F_IP6_SRC].split(_AGGREGATOR)[0])
-        if f[_F_IP_SRC] or f[_F_IP6_SRC]:
-            ip_v = 4 if f[_F_IP_SRC] else 6
-            if ip_v == 4:
-                src, dst = f[_F_IP_SRC], f[_F_IP_DST]
-            else:
-                src, dst = ipv6_exploded(f[_F_IP6_SRC]), ipv6_exploded(f[_F_IP6_DST])
-        else:
-            ip_v, src, dst = 0, f[_F_ETH_SRC], f[_F_ETH_DST]
-        stream = None
-        if f[_F_TCP_STREAM]:
-            proto, stream = 'TCP', _int(f[_F_TCP_STREAM])
-            sport, dport = _int(f[_F_TCP_SPORT]), _int(f[_F_TCP_DPORT])
-            key = ('tcp', stream)
-        elif f[_F_UDP_STREAM]:
-            proto, stream = 'UDP', _int(f[_F_UDP_STREAM])
-            sport, dport = _int(f[_F_UDP_SPORT]), _int(f[_F_UDP_DPORT])
-            key = ('udp', stream)
-        else:
-            number = f[_F_IP_PROTO] or f[_F_IP6_NXT]
-            proto = _IP_PROTO_NAMES.get(number, number) if ip_v else (app.upper() or 'ETH')
-            sport = dport = 0
-            key = (proto, app if not ip_v else '') + tuple(sorted((src, dst)))
+        ip_v, src, dst, proto, stream, sport, dport, key = _packet_key(f, app)
         syn_only = f[_F_SYN] in ('1', 'True') and f[_F_ACK] not in ('1', 'True')
         flow = flows.get(key)
         if flow is None:
@@ -420,21 +447,18 @@ def iter_records(lines, pcap_path=None, deadline=None):
             is_reply = True if syn_ack else _is_reply(cols)
             if is_reply is not None:
                 flow.orient(src, sport, is_reply)
-        packet = None
-        for handler, columns in protocols:
-            # A protocol only sees packets of its own protocols: tshark
-            # reuses one dissector's fields for others (mDNS and LLMNR carry
-            # dns.* fields, SSDP http.* ones), so fields alone can't say
-            # whose packet it is.
-            if app not in handler.app_protos:
-                continue
-            values = [cols[i] if i < len(cols) else '' for i in columns]
-            if not any(values):
-                continue
-            if packet is None:
-                packet = Packet(_int(f[_F_FRAME]), when, flow, sport, dport, app, src, dst)
-            handler.feed(packet, {name: [_unescape(x) for x in value.split(_AGGREGATOR)] if value else []
-                                  for name, value in zip(handler.fields, values)})
+        if frame:
+            if flow.recorded:
+                if runs and frame <= runs[-1][1] + 1:
+                    runs[-1][1] = frame
+                else:
+                    runs.append([frame, frame])
+            elif app in _RECORDED_FIELD_APPS:
+                flow.recorded = True
+                spans.append((flow.first_frame, frame))
+    protocols = _protocol_pass(pcap_path, flows, spans + [tuple(r) for r in runs], last_frame, deadline) \
+        if pcap_path and (spans or runs) else [proto() for proto in PROTOCOLS]
+    del spans, runs
     structured = [proto() for proto in STRUCTURED_PROTOCOLS] if pcap_path else []
     if structured:
         _structured_pass(pcap_path, flows, structured, last_frame, deadline)
@@ -444,7 +468,7 @@ def iter_records(lines, pcap_path=None, deadline=None):
         ordered[i] = None    # the transaction records below hold the flows they need
         yield flow.event()
     del ordered
-    for handler in [handler for handler, _ in protocols] + structured:
+    for handler in protocols + structured:
         for flow, when, event_type, body in handler.finish():
             yield flow.record(when, event_type, body)
 
@@ -459,21 +483,29 @@ _STRUCTURED_LINKS = ('eth', 'ethertype', 'vlan', 'null', 'loop', 'sll', 'raw', '
                      'gre', 'vxlan')
 _STRUCTURED_TRANSPORT = ('ip', 'ipv6', 'tcp', 'udp')
 _STRUCTURED_BASE = _STRUCTURED_LINKS + _STRUCTURED_TRANSPORT
-_STRUCTURED_MAX_RANGES = 500
+# editcap keeps at most 512 frame ranges - past that it warns and drops the
+# rest - so a second pass's copy is cut from no more than this many
+_EDITCAP_MAX_RANGES = 500
 
 
-def _frame_ranges(flows, max_ranges=_STRUCTURED_MAX_RANGES):
+def _frame_ranges(flows):
     """The frame number ranges covering these flows - each flow whole,
-    since TCP reassembly needs every segment - merged, and merged again
-    across the smallest gaps until there are at most max_ranges."""
-    ranges = sorted((fl.first_frame, fl.last_frame) for fl in flows if fl.first_frame)
+    since TCP reassembly needs every segment - merged (_merge_ranges)."""
+    return _merge_ranges([(fl.first_frame, fl.last_frame) for fl in flows if fl.first_frame])
+
+
+def _merge_ranges(ranges, max_ranges=None):
+    """Frame number ranges merged where they touch or overlap - and, given
+    max_ranges, merged again across the smallest gaps until there are at
+    most that many."""
+    ranges = sorted(ranges)
     merged = []
     for start, end in ranges:
         if merged and start <= merged[-1][1] + 1:
             merged[-1][1] = max(merged[-1][1], end)
         else:
             merged.append([start, end])
-    while len(merged) > max_ranges:
+    while max_ranges and len(merged) > max_ranges:
         gaps = sorted(range(len(merged) - 1), key=lambda i: merged[i + 1][0] - merged[i][1])[:len(merged) - max_ranges]
         for i in sorted(gaps, reverse=True):
             merged[i][1] = merged[i + 1][1]
@@ -539,8 +571,37 @@ def _structured_flow(layers, index):
         when = float(_last_layer(layers, 'frame').get('frame.time_epoch'))
     except (TypeError, ValueError, AttributeError):
         return candidates[0]
+    return _open_at(candidates, when)
+
+
+def _open_at(candidates, when):
+    """Of the flows with a packet's addresses and ports, the one open at
+    its time (or the nearest) - a second pass's tshark numbers the streams
+    of its copy its own way, so they can't be matched by number."""
     open_then = [fl for fl in candidates if fl.first - 1 <= when <= fl.last + 1]
     return open_then[0] if open_then else min(candidates, key=lambda fl: abs(fl.first - when))
+
+
+def _subset(pcap_path, ranges, total_frames, tmp, timeout):
+    """A copy of just these frames (sorted, merged ranges) - or the capture
+    itself when they're most of it, since tshark has to read every packet
+    of whatever it's given. pcap_subset copies any number of ranges
+    exactly; for a capture it can't read (a compressed one), editcap,
+    which takes no more than _EDITCAP_MAX_RANGES - so they're merged across
+    their smallest gaps first, and the copy holds more than asked for."""
+    if sum(end - start + 1 for start, end in ranges) >= 0.7 * max(total_frames, 1):
+        return pcap_path
+    source = os.path.join(tmp, 'subset')
+    if pcap_subset.copy_frames(pcap_path, source, ranges):
+        return source
+    if not shutil.which('editcap'):
+        return pcap_path
+    ranges = _merge_ranges(ranges, _EDITCAP_MAX_RANGES)
+    if sum(end - start + 1 for start, end in ranges) >= 0.7 * max(total_frames, 1):
+        return pcap_path
+    subprocess.run(['editcap', '-r', pcap_path, source] + [f'{a}-{b}' for a, b in ranges],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=timeout)
+    return source
 
 
 def _structured_pass(pcap_path, flows, handlers, total_frames, deadline=None):
@@ -561,11 +622,7 @@ def _structured_pass(pcap_path, flows, handlers, total_frames, deadline=None):
     ranges = _frame_ranges(relevant)
     remaining = None if deadline is None else max(1.0, deadline - time.monotonic())
     with tempfile.TemporaryDirectory(prefix='shark-') as tmp:
-        source = pcap_path
-        if sum(end - start + 1 for start, end in ranges) < 0.7 * max(total_frames, 1) and shutil.which('editcap'):
-            source = os.path.join(tmp, 'subset.pcapng')
-            subprocess.run(['editcap', '-r', pcap_path, source] + [f'{a}-{b}' for a, b in ranges],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=remaining)
+        source = _subset(pcap_path, ranges, total_frames, tmp, remaining)
         # TZ=UTC: tshark writes absolute times (SMB's file times) in local time
         with tempfile.TemporaryFile(mode='w+', errors='replace') as stderr_file, \
                 subprocess.Popen(_structured_command(source, active), stdout=subprocess.PIPE, stderr=stderr_file,
@@ -597,6 +654,88 @@ def _structured_pass(pcap_path, flows, handlers, total_frames, deadline=None):
                 lines = stderr_file.read(64 * 1024).strip().splitlines()
                 raise RuntimeError('tshark (structured pass) ' + (lines[-1] if lines else
                                    ('timed out' if proc.returncode < 0 else f'exit code {proc.returncode}')))
+
+
+def _protocol_pass(pcap_path, flows, ranges, total_frames, deadline=None):
+    """shark_protocols' records, from a second tshark run asking for their
+    fields - over a copy of just the frames the first pass marked (each
+    flow carrying one of their protocols, from its start), and asking only
+    for the fields of the protocols it found. Returns the protocols, fed."""
+    protocols = [proto() for proto in PROTOCOLS]
+    present = {app for fl in flows.values() if fl.recorded for app in fl.protocols}
+    active = [p for p in protocols if present.intersection(p.app_protos)]
+    if not active:
+        return protocols
+    fields = _protocol_pass_fields(active)
+    column = {field: i for i, field in enumerate(fields)}
+    feeds = [(p, [column[field] for field in p.fields]) for p in active]
+    index = {}
+    for fl in sorted((fl for fl in flows.values() if fl.recorded), key=lambda fl: fl.first):
+        key = (fl.proto, frozenset(((fl.client, fl.cport), (fl.server, fl.sport)))) \
+            if fl.proto in ('TCP', 'UDP') else fl.key
+        index.setdefault(key, []).append(fl)
+    ranges = _merge_ranges(ranges)
+    remaining = None if deadline is None else max(1.0, deadline - time.monotonic())
+    with tempfile.TemporaryDirectory(prefix='shark-') as tmp:
+        source = _subset(pcap_path, ranges, total_frames, tmp, remaining)
+        with tempfile.TemporaryFile(mode='w+', errors='replace') as stderr_file, \
+                subprocess.Popen(tshark_command(source, fields), stdout=subprocess.PIPE, stderr=stderr_file,
+                                 text=True, errors='replace', preexec_fn=_low_priority) as proc:
+            killer = threading.Timer(remaining, proc.kill) if remaining else None
+            if killer:
+                killer.start()
+            try:
+                for line in proc.stdout:
+                    _feed_protocols(line.rstrip('\n').split('\t'), index, feeds)
+                proc.wait()
+            finally:
+                if killer:
+                    killer.cancel()
+            if proc.returncode != 0:
+                stderr_file.seek(0)
+                lines = stderr_file.read(64 * 1024).strip().splitlines()
+                raise RuntimeError('tshark (protocol pass) ' + (lines[-1] if lines else
+                                   ('timed out' if proc.returncode < 0 else f'exit code {proc.returncode}')))
+    return protocols
+
+
+def _feed_protocols(cols, index, feeds):
+    """One protocol-pass packet to the protocols it's for, on the first
+    pass's flow it belongs to."""
+    if len(cols) < len(_FIELDS):
+        return
+    f = [_last(c) for c in cols[:len(_FIELDS)]]
+    try:
+        when = float(f[_F_TIME])
+    except ValueError:
+        return
+    # An ICMP error's copy of a packet is never a real message (see iter_records)
+    if ':icmp:ip:' in f[_F_PROTOS] or ':icmpv6:ipv6:' in f[_F_PROTOS]:
+        return
+    app = app_protocol(f[_F_PROTOS])
+    if app not in _RECORDED_FIELD_APPS:
+        return
+    _, src, dst, proto, _, sport, dport, key = _packet_key(f, app)
+    candidates = index.get((proto, frozenset(((src, sport), (dst, dport))))
+                           if proto in ('TCP', 'UDP') else key)
+    if not candidates:
+        return
+    flow = _open_at(candidates, when)
+    packet = None
+    for handler, columns in feeds:
+        # A protocol only sees packets of its own protocols: tshark reuses
+        # one dissector's fields for others (mDNS and LLMNR carry dns.*
+        # fields, SSDP http.* ones), so fields alone can't say whose packet
+        # it is.
+        if app not in handler.app_protos:
+            continue
+        values = [cols[i] if i < len(cols) else '' for i in columns]
+        if not any(values):
+            continue
+        if packet is None:
+            packet = Packet(_int(f[_F_FRAME]), when, flow, sport, dport, app, src, dst)
+        handler.feed(packet, {name: [_unescape(x) for x in value.split(_AGGREGATOR)] if value else []
+                              for name, value in zip(handler.fields, values)})
 
 
 def build_flows(lines):

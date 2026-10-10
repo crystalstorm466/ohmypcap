@@ -164,7 +164,7 @@ class TestTsharkCommand(unittest.TestCase):
         self.assertIn('--enable-protocol', cmd)
         self.assertEqual(cmd[cmd.index('--enable-protocol') + 1], 'communityid')
         self.assertEqual(cmd[cmd.index('-T') + 1], 'fields')
-        self.assertEqual([cmd[i + 1] for i, a in enumerate(cmd) if a == '-e'], list(shark_analyzer._ALL_FIELDS))
+        self.assertEqual([cmd[i + 1] for i, a in enumerate(cmd) if a == '-e'], list(shark_analyzer._FIRST_PASS_FIELDS))
 
     def test_shark_artifacts_are_removed_on_reanalyze(self):
         for name in shark_analyzer.SHARK_ARTIFACTS:
@@ -241,8 +241,13 @@ class TestFieldParsing(unittest.TestCase):
         self.assertIn('aggregator=\x1f', cmd)
         fields = [cmd[i + 1] for i, a in enumerate(cmd) if a == '-e']
         self.assertEqual(fields[:len(shark_analyzer._FIELDS)], list(shark_analyzer._FIELDS))
-        self.assertIn('dns.response_to', fields)
         self.assertIn('tls.handshake.type', fields, 'flow orientation reads it, though no records here do')
+        self.assertNotIn('dns.response_to', fields, "a protocol's fields are the protocol pass's")
+        from shark_protocols import PROTOCOLS
+        cmd = shark_analyzer.tshark_command('/x.pcap', shark_analyzer._protocol_pass_fields(PROTOCOLS))
+        fields = [cmd[i + 1] for i, a in enumerate(cmd) if a == '-e']
+        self.assertEqual(fields[:len(shark_analyzer._FIELDS)], list(shark_analyzer._FIELDS))
+        self.assertIn('dns.response_to', fields)
 
 
 def _load_eve(name):
@@ -786,16 +791,18 @@ class TestStructuredPass(unittest.TestCase):
             write_pcap(pcap, dns_packets() * 40 + extra_packets())     # mostly DNS, then the NBNS
             proto = _NbnsFromJson()
             calls = []
-            real_run = subprocess.run
+            real_copy = shark_analyzer.pcap_subset.copy_frames
 
-            def spy(cmd, *args, **kwargs):
-                calls.append(cmd)
-                return real_run(cmd, *args, **kwargs)
+            def spy(src, dst, ranges):
+                calls.append(ranges)
+                return real_copy(src, dst, ranges)
+            # (no field protocols, so the protocol pass cuts no copy of its own)
             with mock.patch.object(shark_analyzer, 'STRUCTURED_PROTOCOLS', (lambda: proto,)), \
-                    mock.patch.object(shark_analyzer.subprocess, 'run', side_effect=spy):
+                    mock.patch.object(shark_analyzer, 'PROTOCOLS', ()), \
+                    mock.patch.object(shark_analyzer.pcap_subset, 'copy_frames', side_effect=spy):
                 shark_analyzer.run_tshark(pcap)
-        [editcap] = [c for c in calls if c[0] == 'editcap']
-        self.assertLess(len(editcap) - 3, 5, 'a few frame ranges, not the whole capture')
+        [ranges] = calls
+        self.assertLess(len(ranges), 5, 'a few frame ranges, not the whole capture')
         self.assertEqual(sorted({(port, name.split('<')[0]) for port, name in proto.seen}),
                          [(137, 'DESKTOP-TEST01'), (137, 'FILESERVER')], 'each packet matched to its first-pass flow')
 
@@ -811,7 +818,8 @@ class TestStructuredPass(unittest.TestCase):
     def test_frame_ranges(self):
         flows = [mock.Mock(first_frame=a, last_frame=b) for a, b in ((10, 20), (15, 30), (40, 41), (100, 200), (0, 0))]
         self.assertEqual(shark_analyzer._frame_ranges(flows), [(10, 30), (40, 41), (100, 200)])
-        self.assertEqual(shark_analyzer._frame_ranges(flows, max_ranges=2), [(10, 41), (100, 200)], 'closing the smallest gap')
+        self.assertEqual(shark_analyzer._merge_ranges([(10, 30), (40, 41), (100, 200)], max_ranges=2),
+                         [(10, 41), (100, 200)], 'closing the smallest gap')
 
     def test_json_packets_one_at_a_time(self):
         lines = ['[\n', '  {\n', '    "_source": {"layers": {"nbns": {"nbns.id": "5"}}}\n', '  },\n',
@@ -855,7 +863,7 @@ class TestFlowOrientation(unittest.TestCase):
 
     def test_what_marks_a_reply(self):
         def cols(**values):
-            out = [''] * len(shark_analyzer._ALL_FIELDS)
+            out = [''] * len(shark_analyzer._FIRST_PASS_FIELDS)
             for name, value in values.items():
                 out[shark_analyzer._COLUMN[name.replace('__', '.')]] = value
             return out
@@ -865,7 +873,7 @@ class TestFlowOrientation(unittest.TestCase):
                  ({'ftp__request__command': 'USER'}, False), ({'s7comm__header__rosctr': '3'}, True),
                  ({'s7comm__header__rosctr': '1'}, False), ({'s7comm__header__rosctr': '7'}, None),
                  ({'tls__handshake__type': '2'}, True), ({'tls__handshake__type': '1\x1f16'}, False),   # the first of a packet's handshakes
-                 ({'tls__handshake__type': '11'}, None), ({'nbns__name': 'X'}, None), ({}, None)]
+                 ({'tls__handshake__type': '11'}, None), ({'ip__src': '10.0.0.1'}, None), ({}, None)]
         for values, expected in cases:
             with self.subTest(values=values):
                 self.assertIs(shark_analyzer._is_reply(cols(**values)), expected)
@@ -880,8 +888,9 @@ class TestProtocolDetails(unittest.TestCase):
     def test_each_field_is_asked_of_tshark_once(self):
         """REGRESSION: tshark fills only one column of a field asked for
         twice - SSDP reads http.* fields that flow orientation reads too."""
-        self.assertEqual(len(shark_analyzer._ALL_FIELDS), len(set(shark_analyzer._ALL_FIELDS)))
-        from shark_protocols import SSDP
+        from shark_protocols import PROTOCOLS, SSDP
+        for fields in (shark_analyzer._FIRST_PASS_FIELDS, shark_analyzer._protocol_pass_fields(PROTOCOLS)):
+            self.assertEqual(len(fields), len(set(fields)))
         self.assertTrue(set(SSDP.fields) & set(shark_analyzer._ORIENTATION_FIELDS), 'the case this guards')
 
 
