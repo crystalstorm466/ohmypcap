@@ -1015,6 +1015,91 @@ class BACnet:
         return records
 
 
+# ---------------------------------------------------------------- GOOSE
+#
+# IEC 61850 GOOSE: a protection relay publishes its dataset's values by
+# Ethernet multicast - repeated as a heartbeat, and in a burst when one
+# changes, stNum counting the changes and sqNum the repeats. Interlocks
+# and trips travel this way. One record per state change of each
+# publisher's control block: its values (and which changed), how often it
+# was repeated, and any gap or reset in stNum.
+
+# goose.Data's types, in the order a message lists its values
+_GOOSE_VALUE_FIELDS = {3: 'goose.boolean', 4: 'goose.bit_string', 5: 'goose.integer', 6: 'goose.unsigned',
+                       7: 'goose.floating_point', 9: 'goose.octet_string', 10: 'goose.visible_string',
+                       17: 'goose.utc_time'}
+_GOOSE_MAX_VALUES = 64
+
+
+class GOOSE:
+    """GOOSE - see the comment above."""
+    event_type = 'goose'
+    app_protos = ('goose',)
+    fields = ('goose.appid', 'goose.gocbRef', 'goose.datSet', 'goose.goID', 'goose.stNum', 'goose.sqNum',
+              'goose.simulation', 'goose.confRev', 'goose.ndsCom', 'goose.t', 'goose.Data') \
+        + tuple(_GOOSE_VALUE_FIELDS.values())
+
+    def __init__(self):
+        self.records = []
+        self.streams = {}      # (publisher, gocbRef) -> its current state's body
+
+    @staticmethod
+    def _values(v):
+        """The message's values in order: goose.Data lists each one's type,
+        and each type's field its values."""
+        pending = {field: list(v[field]) for field in _GOOSE_VALUE_FIELDS.values()}
+        values = []
+        for kind in v['goose.Data']:
+            field = _GOOSE_VALUE_FIELDS.get(_int(kind))
+            if field is None:
+                continue        # a structure or array: its members follow it
+            value = pending[field].pop(0) if pending[field] else ''
+            if field == 'goose.boolean':
+                value = value in ('1', 'True')
+            elif field in ('goose.integer', 'goose.unsigned'):
+                value = _int(value, value)
+            values.append(value)
+        return values
+
+    def feed(self, pkt, v):
+        def first(name):
+            return (v[name] or [''])[0]
+        stnum = _int(first('goose.stNum'))
+        if stnum is None:
+            return
+        key = (pkt.src, first('goose.gocbRef'))
+        previous = self.streams.get(key)
+        if previous is not None and previous['stnum'] == stnum:
+            previous['repeats'] += 1
+            return
+        values = self._values(v)
+        body = {'gocb_ref': first('goose.gocbRef'), 'dataset': first('goose.datSet'), 'go_id': first('goose.goID'),
+                'appid': _int(first('goose.appid'), first('goose.appid')), 'stnum': stnum,
+                'sqnum': _int(first('goose.sqNum')), 'conf_rev': _int(first('goose.confRev')), 'repeats': 0,
+                'values': values[:_GOOSE_MAX_VALUES]}
+        if first('goose.t'):
+            body['event_time'] = first('goose.t')
+        if first('goose.simulation') in ('1', 'True'):
+            body['simulation'] = True
+        if first('goose.ndsCom') in ('1', 'True'):
+            body['needs_commissioning'] = True
+        if previous is not None:
+            changed = [i for i, (a, b) in enumerate(zip(previous['values'], body['values'])) if a != b]
+            if changed:
+                body['changed'] = changed
+            if stnum < previous['stnum']:
+                body['stnum_reset_from'] = previous['stnum']
+                body['anomaly'] = f"stNum reset from {previous['stnum']}"
+            elif stnum > previous['stnum'] + 1:
+                body['stnum_gap'] = stnum - previous['stnum'] - 1
+                body['anomaly'] = f"stNum skipped {body['stnum_gap']}"
+        self.streams[key] = body
+        self.records.append((pkt.flow, pkt.when, 'goose', body))
+
+    def finish(self):
+        return list(self.records)
+
+
 # ---------------------------------------------------------------- OPC UA
 #
 # OPC UA binary (opc.tcp, port 4840), industrial automation's
@@ -1413,7 +1498,7 @@ def _pdus(layer):
 
 # Every protocol with records here, from tshark's fields, in the order their
 # fields follow the base fields in tshark's output.
-PROTOCOLS = (LLMNR, NBNS, SSDP, S7comm, Telnet, IEC104, BACnet)
+PROTOCOLS = (LLMNR, NBNS, SSDP, S7comm, Telnet, IEC104, BACnet, GOOSE)
 # ... and from the structured pass (shark_analyzer._structured_pass): none
 # yet - it's for a protocol whose messages nest, which flat fields can't
 # keep apart (several commands per packet, a token inside a command).

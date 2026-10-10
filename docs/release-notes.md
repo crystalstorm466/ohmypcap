@@ -30,6 +30,10 @@ each card marked with a dot:
   (and the password, when it was sent unencrypted) and the services it
   called; and one for each change - a node written, a method called, a
   node added or deleted - with that operation's result
+- **GOOSE** (IEC 61850 substation messaging) - a record for each state
+  change a protection relay publishes: its values and which ones changed,
+  how many times it was repeated, and a jump or reset in its state number,
+  which is what a forged message looks like
 - **A card for every other protocol tshark recognizes** - OpenVPN, PRP,
   RADIUS, MongoDB and so on - listing its connections
 - **Suricata stays in charge** of everything it parses: nothing from tshark

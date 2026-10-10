@@ -60,7 +60,7 @@ SHARK_ARTIFACTS = (SHARK_DB, SHARK_DB + '-wal', SHARK_DB + '-shm', SHARK_DB + '.
 # change here or in shark_protocols changes what a run produces: a
 # shark.db stamped with an older version is rebuilt the next time its
 # status is asked for, so existing analyses pick up the change.
-SHARK_FORMAT_VERSION = 12
+SHARK_FORMAT_VERSION = 13
 
 # The fields every packet is read for, one per column of tshark's
 # tab-separated output, in this order - then each of shark_protocols'
@@ -111,8 +111,9 @@ _TRANSPORT_LAYERS = {'tcp', 'udp', 'sctp'}
 # reassembly bookkeeping.
 _CARRIER_LAYERS = {'tpkt', 'cotp', 'nbss', 'tcp.segments', 'data', 'data-text-lines', 'media'}
 # Layers that are the application protocol unless another follows them:
-# ONC RPC on its own (portmapper) is the protocol, but carries NFS.
-_WRAPPER_LAYERS = {'rpc'}
+# ONC RPC on its own (portmapper) is the protocol, but carries NFS; the
+# OSI session, presentation and association layers carry MMS.
+_WRAPPER_LAYERS = {'rpc', 'ses', 'pres', 'acse'}
 
 
 def shark_db_path(dir_path):

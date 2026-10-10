@@ -690,3 +690,38 @@ def opcua_packets():
 
 def write_opcua_pcap(path):
     write_pcap(path, opcua_packets())
+
+
+# ---------------------------------------------------------------- GOOSE
+#
+# One relay (GOOSE_PUBLISHER) publishing control block LD0/LLN0$GO$gcb1:
+# state 1 sent three times (heartbeat), state 2 with its trip value turned
+# true, then stNum jumping to 10 and falling back to 1 - what a forged
+# publisher looks like next to the real one.
+
+GOOSE_PUBLISHER = '00:30:a7:00:00:01'
+_GOOSE_DEST = bytes.fromhex('010ccd010001')
+
+
+def _ber(tag, value):
+    return bytes([tag, len(value)]) + value
+
+
+def _goose(stnum, sqnum, trip):
+    data = _ber(0x83, b'\x01' if trip else b'\x00') + _ber(0x84, b'\x06\x40') + _ber(0x85, b'\x07')
+    pdu = (_ber(0x80, b'IED1LD0/LLN0$GO$gcb1') + _ber(0x81, b'\x07\xd0') + _ber(0x82, b'IED1LD0/LLN0$Trips')
+           + _ber(0x83, b'Trips') + _ber(0x84, b'\x65\x53\xf1\x00\x00\x00\x00\x0a')
+           + _ber(0x85, bytes([stnum])) + _ber(0x86, bytes([sqnum])) + _ber(0x87, b'\x00')
+           + _ber(0x88, b'\x01') + _ber(0x89, b'\x00') + _ber(0x8a, b'\x03') + _ber(0xab, data))
+    apdu = _ber(0x61, pdu)
+    header = struct.pack('!HHHH', 0x0001, 8 + len(apdu), 0, 0)
+    return _GOOSE_DEST + bytes.fromhex(GOOSE_PUBLISHER.replace(':', '')) + struct.pack('!H', 0x88b8) + header + apdu
+
+
+def goose_packets():
+    return [_goose(1, 0, False), _goose(1, 1, False), _goose(1, 2, False), _goose(2, 0, True),
+            _goose(10, 0, True), _goose(1, 0, False)]
+
+
+def write_goose_pcap(path):
+    write_pcap(path, goose_packets())

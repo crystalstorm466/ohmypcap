@@ -2152,6 +2152,7 @@
                 iec104: '#ef5350',
                 bacnet: '#ab47bc',
                 opcua: '#29b6f6',
+                goose: '#d4e157',
                 opcua_action: '#ff7043',
                 bacnet_property: '#5c6bc0',
                 bacnet_device: '#8d6e63',
@@ -3768,6 +3769,27 @@
             return html;
         }
 
+        // tshark's GOOSE records (shark_protocols.GOOSE): one per state change.
+        function renderGooseDetails(e) {
+            const g = e.goose || {};
+            let html = htmlSection('GOOSE Details', COLORS.EVENT.goose);
+            html += htmlRowText('Control Block', g.gocb_ref, 'mono');
+            html += htmlRowText('Dataset', g.dataset, 'mono');
+            html += htmlRowText('GOOSE ID', g.go_id);
+            html += htmlRowText('APPID', g.appid !== undefined ? String(g.appid) : '');
+            html += htmlRowText('stNum', g.stnum !== undefined ? String(g.stnum) : '');
+            html += htmlRowText('Repeats', g.repeats !== undefined ? g.repeats.toLocaleString() : '');
+            html += htmlRowText('Anomaly', g.anomaly);
+            html += htmlRowText('Event Time', g.event_time);
+            html += htmlRowText('Config Revision', g.conf_rev !== undefined ? String(g.conf_rev) : '');
+            if (g.simulation) html += htmlRowText('Simulation', 'yes');
+            if (g.needs_commissioning) html += htmlRowText('Needs Commissioning', 'yes');
+            const changed = new Set(g.changed || []);
+            html += htmlRowText('Values', (g.values || []).map((v, i) => `${changed.has(i) ? '*' : ''}${v}`).join(', '), 'mono');
+            if (changed.size) html += htmlRowText('Changed', [...changed].map(i => `#${i + 1}`).join(', '));
+            return html;
+        }
+
         // tshark's OPC UA records (shark_protocols.OPCUA): a connection's
         // session, and a change (write, call, node added...).
         function renderOpcuaDetails(e) {
@@ -4263,6 +4285,7 @@
             iec104: renderIec104Details,
             bacnet: renderBacnetDetails,
             opcua: renderOpcuaDetails,
+            goose: renderGooseDetails,
             opcua_action: renderOpcuaActionDetails,
             bacnet_property: renderBacnetPropertyDetails,
             bacnet_device: renderBacnetDeviceDetails,
@@ -6928,6 +6951,7 @@
             iec104: 'IEC 104',
             bacnet: 'BACnet',
             opcua: 'OPC UA',
+            goose: 'GOOSE',
             opcua_action: 'OPC UA Actions',
             bacnet_property: 'BACnet Properties',
             bacnet_device: 'BACnet Devices',
@@ -7314,6 +7338,8 @@
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Command', 'Station', 'IOA', 'Value', 'Result'];
                 case 'bacnet':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Service', 'Object', 'Property', 'Value', 'Password', 'Result'];
+                case 'goose':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Control Block', 'Dataset', 'stNum', 'Repeats', 'Anomaly'];
                 case 'opcua':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Endpoint', 'Security', 'Application', 'User', 'Password', 'Activation'];
                 case 'opcua_action':
@@ -7792,7 +7818,8 @@
                 case 'bacnet_property':
                 case 'bacnet_device':
                 case 'opcua':
-                case 'opcua_action': {
+                case 'opcua_action':
+                case 'goose': {
                     const cols = getColumnsForType(etype).slice(6);
                     colSpan = cols.length + 6;
                     row = rowPrefixCells(e) + cols.map(col => `<td${['Search Target', 'Location', 'User', 'Password'].includes(col) ? ' class="mono"' : ''}>${escapeHtml(extractValue(e, col))}</td>`).join('') + '</tr>';
@@ -9993,6 +10020,12 @@
                 case 'Vendor': { const d = e.bacnet_device; return d?.vendor || (d?.vendor_id !== undefined ? String(d.vendor_id) : ''); }
                 case 'Announcements': return e.bacnet_device?.announcements !== undefined ? String(e.bacnet_device.announcements) : '';
                 case 'User': return e.telnet?.username || e.opcua?.username || '';
+                // GOOSE: a state change's
+                case 'Control Block': return e.goose?.gocb_ref || '';
+                case 'Dataset': return e.goose?.dataset || '';
+                case 'stNum': return e.goose?.stnum !== undefined ? String(e.goose.stnum) : '';
+                case 'Repeats': return e.goose?.repeats !== undefined ? String(e.goose.repeats) : '';
+                case 'Anomaly': return e.goose?.anomaly || '';
                 // OPC UA: a connection's, an action's
                 case 'Endpoint': return e.opcua?.endpoint || '';
                 case 'Security': return e.opcua?.security_policy || '';

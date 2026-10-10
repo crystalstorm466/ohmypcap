@@ -21764,6 +21764,9 @@ class TestTsharkUI(unittest.TestCase):
         's7comm': {'event_type': 's7comm', 's7comm': {'type': 'job', 'function': 'Read Var',
                                                       'items': [{'area': 'Data blocks', 'db': 1, 'address': '10.0'}],
                                                       'response': {'error_class': 'Error on supplies'}}},
+        'goose': {'event_type': 'goose', 'goose': {'gocb_ref': 'IED1LD0/LLN0$GO$gcb1', 'dataset': 'IED1LD0/LLN0$Trips', 'stnum': 10,
+                                                  'repeats': 0, 'values': [True, '40', 7], 'stnum_gap': 7,
+                                                  'anomaly': 'stNum skipped 7'}},
         'opcua': {'event_type': 'opcua', 'opcua': {'endpoint': 'opc.tcp://10.1.0.48:4840/fixture', 'security_policy': 'None',
                                                   'security_mode': 'None', 'client_application': 'Fixture Client',
                                                   'username': 'user1', 'password': 's3cret', 'activation': 'Good',
@@ -21794,6 +21797,7 @@ class TestTsharkUI(unittest.TestCase):
         'ssdp': ['M-SEARCH', 'upnp:rootdevice', 'http://10.1.0.60/d.xml', 'TestGateway/1.0'],
         'telnet': ['MOXA EtherDevice Switch EDS-508A', 'admin', 'admin', 'failed'],
         'iec104': ['Single command', '7', '2001', 'on', 'confirmed, terminated'],
+        'goose': ['IED1LD0/LLN0$GO$gcb1', 'IED1LD0/LLN0$Trips', '10', '0', 'stNum skipped 7'],
         'opcua': ['opc.tcp://10.1.0.48:4840/fixture', 'None', 'Fixture Client', 'user1', 's3cret', 'Good'],
         'opcua_action': ['Call', 'ns=1;i=62541', 'Hello', 'BadNodeIdUnknown'],
         'bacnet': ['reinitializeDevice', '', '', '', 'filister', 'error: services: password-failure'],
@@ -21871,7 +21875,7 @@ class TestTsharkUI(unittest.TestCase):
         import db
         from tests.jsdom_helper import js_statements
         cols = js_statements("""window.__jsdom_result = Object.fromEntries(
-            ['llmnr', 'nbns', 's7comm', 'ssdp', 'telnet', 'iec104', 'iec104_point', 'bacnet', 'bacnet_property', 'bacnet_device', 'opcua', 'opcua_action'].map(t => [t, getColumnsForType(t).slice(6)]));""")
+            ['llmnr', 'nbns', 's7comm', 'ssdp', 'telnet', 'iec104', 'iec104_point', 'bacnet', 'bacnet_property', 'bacnet_device', 'opcua', 'opcua_action', 'goose'].map(t => [t, getColumnsForType(t).slice(6)]));""")
         for t, columns in cols.items():
             self.assertEqual(list(db.AGGREGATION_JSON_PATHS[t]), columns, t)
 

@@ -229,6 +229,11 @@ class TestFieldParsing(unittest.TestCase):
         self.assertEqual(shark_analyzer.app_protocol('eth:ethertype:ip:udp:rpc:portmap'), 'portmap')
         self.assertEqual(shark_analyzer.app_protocol('eth:ethertype:ip:tcp:rpc'), 'rpc')
 
+    def test_the_osi_layers_carry_mms(self):
+        self.assertEqual(shark_analyzer.app_protocol('eth:ethertype:ip:tcp:tpkt:cotp:ses:pres:mms'), 'mms')
+        self.assertEqual(shark_analyzer.app_protocol('eth:ethertype:ip:tcp:tpkt:cotp:ses:pres:acse:mms'), 'mms')
+        self.assertEqual(shark_analyzer.app_protocol('eth:ethertype:ip:tcp:tpkt:cotp:ses'), 'ses')
+
     def test_command_outputs_every_occurrence_joined_by_the_aggregator(self):
         cmd = shark_analyzer.tshark_command('/x.pcap')
         self.assertIn('occurrence=a', cmd)
@@ -647,6 +652,53 @@ class TestOPCUA(unittest.TestCase):
                 f.write(struct.pack('<IIII', 1700000000 + i, 0, len(p), len(p)) + p)
         records = shark_analyzer.run_tshark(path)
         self.assertEqual(sum(r['event_type'] == 'opcua_action' for r in records), 2)
+
+
+@unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
+class TestGOOSE(unittest.TestCase):
+    """tests/protocol_fixtures.write_goose_pcap: one record per state
+    change, repeats counted, with what Suricata 8.0.7 logged for the
+    capture (tests/data/goose_fixture.eve.json) - only 'Ethertype unknown'
+    decoder alerts, since it doesn't decode GOOSE."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests.protocol_fixtures import write_goose_pcap
+        cls.tmpdir = tempfile.mkdtemp()
+        cls.pcap = os.path.join(cls.tmpdir, 'goose.pcap')
+        write_goose_pcap(cls.pcap)
+        cls.records = shark_analyzer.run_tshark(cls.pcap)
+        cls.states = [r['goose'] for r in cls.records if r['event_type'] == 'goose']
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    def test_one_record_per_state_change(self):
+        self.assertEqual([(s['stnum'], s['repeats'], s['values']) for s in self.states],
+                         [(1, 2, [False, '40', 7]), (2, 0, [True, '40', 7]), (10, 0, [True, '40', 7]),
+                          (1, 0, [False, '40', 7])])
+        self.assertEqual((self.states[0]['gocb_ref'], self.states[0]['dataset'], self.states[0]['go_id']),
+                         ('IED1LD0/LLN0$GO$gcb1', 'IED1LD0/LLN0$Trips', 'Trips'))
+        self.assertEqual(self.states[1]['changed'], [0], 'the trip value turned true')
+
+    def test_a_jump_or_reset_in_stnum_is_marked(self):
+        self.assertNotIn('anomaly', self.states[1])
+        self.assertEqual((self.states[2]['stnum_gap'], self.states[2]['anomaly']), (7, 'stNum skipped 7'))
+        self.assertEqual((self.states[3]['stnum_reset_from'], self.states[3]['anomaly']), (10, 'stNum reset from 10'))
+
+    def test_the_merge_adds_the_records(self):
+        d = os.path.join(self.tmpdir, 'analysis')
+        os.makedirs(d)
+        shutil.copy(self.pcap, d)
+        events_db = os.path.join(d, 'events.db')
+        db.create_sqlite_db(events_db, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data',
+                                                    'goose_fixture.eve.json'))
+        self.assertTrue(shark_analyzer.build(d, os.path.join(d, 'goose.pcap')))
+        shark_analyzer.merge(d)
+        counts = db.get_event_types_sqlite(events_db)
+        self.assertEqual(counts.get('goose'), 4)
+        self.assertNotIn('conn_goose', counts, 'records, not a connection card')
 
 
 class _NbnsFromJson:

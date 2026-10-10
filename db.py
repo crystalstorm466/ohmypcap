@@ -1388,6 +1388,13 @@ AGGREGATION_JSON_PATHS = {
         'Area': ['$.s7comm.items[0].area'],
         'Error': ['$.s7comm.response.error_class'],
     },
+    'goose': {
+        'Control Block': ['$.goose.gocb_ref'],
+        'Dataset': ['$.goose.dataset'],
+        'stNum': ['$.goose.stnum'],
+        'Repeats': ['$.goose.repeats'],
+        'Anomaly': ['$.goose.anomaly'],
+    },
     'opcua': {
         'Endpoint': ['$.opcua.endpoint'],
         'Security': ['$.opcua.security_policy'],
