@@ -758,6 +758,50 @@ class TestBrowser(unittest.TestCase):
         self.assertNotIn('conn_nbdgm', counts, 'records, not a connection card')
 
 
+@unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
+class TestOnePassOrTwo(unittest.TestCase):
+    """A capture mostly of protocols with records here gets one pass
+    asking for every field (_mostly_recorded, _combined_fields); any other,
+    a first pass for flows and a protocol pass over just the packets that
+    need it. The records are the same either way."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests.protocol_fixtures import (write_bacnet_pcap, write_browser_pcap, write_extra_pcap,
+                                             write_iec104_pcap, write_protocol_pcap, write_telnet_pcap)
+        cls.tmpdir = tempfile.mkdtemp()
+        cls.pcaps = {}
+        for name, write in (('iec104', write_iec104_pcap), ('bacnet', write_bacnet_pcap), ('telnet', write_telnet_pcap),
+                            ('extra', write_extra_pcap), ('browser', write_browser_pcap), ('protocols', write_protocol_pcap)):
+            cls.pcaps[name] = os.path.join(cls.tmpdir, name + '.pcap')
+            write(cls.pcaps[name])
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    @staticmethod
+    def _records(pcap, combined):
+        with mock.patch.object(shark_analyzer, '_mostly_recorded', return_value=combined):
+            return sorted(json.dumps(r, sort_keys=True) for r in shark_analyzer.run_tshark(pcap))
+
+    def test_the_same_records_either_way(self):
+        for name, pcap in self.pcaps.items():
+            with self.subTest(capture=name):
+                two = self._records(pcap, False)
+                self.assertEqual(self._records(pcap, True), two)
+                self.assertTrue(any('"event_type": "flow"' not in r for r in two) or name == 'protocols')
+
+    def test_the_probe_tells_one_protocols_capture_from_a_mixed_one(self):
+        with mock.patch.object(shark_analyzer, '_PROBE_MIN_PACKETS', 1):
+            self.assertTrue(shark_analyzer._mostly_recorded(self.pcaps['iec104']))
+            self.assertFalse(shark_analyzer._mostly_recorded(self.pcaps['protocols']), 'DNS, HTTP, TLS, Modbus, FTP')
+
+    def test_a_small_capture_is_never_probed(self):
+        with mock.patch.object(shark_analyzer.pcap_subset, 'copy_frames', side_effect=AssertionError('probed')):
+            self.assertFalse(shark_analyzer._mostly_recorded(self.pcaps['iec104']))
+
+
 class _NbnsFromJson:
     """A structured protocol for testing the structured pass on its own:
     NBNS names, read from each packet's JSON tree."""
