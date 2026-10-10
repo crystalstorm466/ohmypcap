@@ -62,7 +62,7 @@ SHARK_ARTIFACTS = (SHARK_DB, SHARK_DB + '-wal', SHARK_DB + '-shm', SHARK_DB + '.
 # change here or in shark_protocols changes what a run produces: a
 # shark.db stamped with an older version is rebuilt the next time its
 # status is asked for, so existing analyses pick up the change.
-SHARK_FORMAT_VERSION = 19
+SHARK_FORMAT_VERSION = 20
 
 # The fields every packet is read for, one per column of tshark's
 # tab-separated output, in this order - then each of shark_protocols'
@@ -172,6 +172,10 @@ def app_protocol(protocols):
         candidates = [layer for layer in layers if layer not in _CARRIER_LAYERS and layer != 'ethertype']
         return candidates[-1] if candidates else ''
     above = [layer for layer in above if layer not in _CARRIER_LAYERS]
+    # A WebRTC flow's DTLS, once its handshake agreed on SRTP, comes out
+    # as rtp:dtls - tshark's RTP standing in for the demultiplexing.
+    if above[:2] == ['rtp', 'dtls']:
+        return 'dtls'
     for i, layer in enumerate(above):
         if layer not in _WRAPPER_LAYERS or i == len(above) - 1:
             return SURICATA_APP_PROTO_NAMES.get(layer, layer)

@@ -42,6 +42,10 @@ each card marked with a dot:
   a device sent its log collector: severity, facility, host, program and
   PID, and the message, in either format (RFC 3164 or RFC 5424, with its
   structured data)
+- **DTLS** (TLS over UDP - Suricata parses TLS over TCP only) - a record
+  for each handshake, named like Suricata's TLS records: SNI, version,
+  the certificate, JA3/JA3S/JA4, the cipher suite, WebRTC's SRTP
+  profile, and how far the handshake got
 - **Windows Browser** (NetBIOS datagrams) - a passive inventory of the
   Windows machines on the network: each one's name, workgroup or domain,
   Windows version and roles (domain controller, SQL server, master

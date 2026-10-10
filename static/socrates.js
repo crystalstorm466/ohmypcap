@@ -2164,6 +2164,7 @@
                 cdp: '#8d6e63',
                 dhcpv6: '#9ccc65',
                 syslog: '#ffca28',
+                dtls: '#4dd0e1',
                 opcua_action: '#ff7043',
                 bacnet_property: '#5c6bc0',
                 bacnet_device: '#8d6e63',
@@ -3802,6 +3803,35 @@
             return html;
         }
 
+        // tshark's DTLS records (shark_protocols.DTLS): one per connection's
+        // handshake, with the fields Suricata's tls records have.
+        function renderDtlsDetails(e) {
+            const d = e.dtls || {};
+            let html = htmlSection('DTLS Details', COLORS.EVENT.dtls);
+            html += htmlRowText('SNI', d.sni, 'mono');
+            html += htmlRow('Version', `${valueDotSpan(tlsVersionColor(d.version))}${escapeHtml(d.version || '')}`);
+            html += htmlRowText('Client Version', d.client_version && d.client_version !== d.version ? d.client_version : '');
+            html += htmlRowText('Handshake', d.handshake);
+            html += htmlRowText('Cipher Suite', d.cipher_suite, 'mono');
+            html += htmlRowText('Client ALPNs', (d.client_alpns || []).join(', '), 'mono');
+            html += htmlRowText('Server ALPNs', (d.server_alpns || []).join(', '), 'mono');
+            html += htmlRowText('SRTP Profile', d.srtp_profile || (d.srtp_profiles || []).join(', '), 'mono');
+            if (d.ja3?.hash) html += htmlRowText('JA3', d.ja3.hash, 'mono');
+            if (d.ja3s?.hash) html += htmlRowText('JA3S', d.ja3s.hash, 'mono');
+            if (d.ja4) html += htmlRowText('JA4', d.ja4, 'mono');
+            html += htmlRowText('Subject', d.subject, 'mono');
+            html += htmlRowText('Issuer', d.issuerdn, 'mono');
+            html += htmlRowText('Serial', d.serial, 'mono');
+            html += htmlRowText('SANs', (d.san || []).join(', '), 'mono');
+            html += htmlRowText('Not Before', d.notbefore);
+            html += htmlRowText('Not After', d.notafter);
+            html += htmlRowText('Fingerprint', d.fingerprint, 'mono');
+            html += htmlRowText('Cookie Exchange', d.cookie_exchange ? 'yes' : '');
+            html += htmlRowText('Alerts', (d.alerts || []).join(', '));
+            html += htmlRowText('Client Hellos', d.client_hellos ? d.client_hellos.toLocaleString() : '');
+            return html;
+        }
+
         // tshark's syslog records (shark_protocols.Syslog): one per message.
         function renderSyslogDetails(e) {
             const l = e.syslog || {};
@@ -4415,6 +4445,7 @@
             browser: renderBrowserDetails,
             dhcpv6: renderDhcpv6Details,
             syslog: renderSyslogDetails,
+            dtls: renderDtlsDetails,
             lldp: renderNeighborDetails,
             cdp: renderNeighborDetails,
             opcua_action: renderOpcuaActionDetails,
@@ -7086,6 +7117,7 @@
             browser: 'Windows Browser',
             dhcpv6: 'DHCPv6',
             syslog: 'Syslog',
+            dtls: 'DTLS',
             lldp: 'LLDP',
             cdp: 'CDP',
             opcua_action: 'OPC UA Actions',
@@ -7476,6 +7508,8 @@
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Service', 'Object', 'Property', 'Value', 'Password', 'Result'];
                 case 'browser':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Message', 'NetBIOS Name', 'Workgroup', 'Windows', 'Roles', 'Count'];
+                case 'dtls':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'SNI / Host', 'Version', 'Handshake', 'Subject', 'JA4'];
                 case 'syslog':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Severity', 'Facility', 'Host', 'Program', 'Message'];
                 case 'dhcpv6':
@@ -7970,10 +8004,11 @@
                 case 'lldp':
                 case 'cdp':
                 case 'dhcpv6':
-                case 'syslog': {
+                case 'syslog':
+                case 'dtls': {
                     const cols = getColumnsForType(etype).slice(6);
                     colSpan = cols.length + 6;
-                    row = rowPrefixCells(e) + cols.map(col => `<td${['Search Target', 'Location', 'User', 'Password', 'Chassis ID', 'Port ID', 'Device ID', 'Management IP', 'Hostname', 'Client MAC', 'Assigned IP', 'Host', 'Program', 'Message'].includes(col) ? ' class="mono"' : ''}>${escapeHtml(extractValue(e, col))}</td>`).join('') + '</tr>';
+                    row = rowPrefixCells(e) + cols.map(col => `<td${['Search Target', 'Location', 'User', 'Password', 'Chassis ID', 'Port ID', 'Device ID', 'Management IP', 'Hostname', 'Client MAC', 'Assigned IP', 'Host', 'Program', 'Message', 'SNI / Host', 'Subject', 'JA4'].includes(col) ? ' class="mono"' : ''}>${escapeHtml(extractValue(e, col))}</td>`).join('') + '</tr>';
                     break;
                 }
                 case 'nbns': {
@@ -10234,9 +10269,13 @@
                     return String(e.http?.status || '');
                 }
                 case 'User-Agent': return (e.http?.http_user_agent || '').slice(0, CONFIG.USER_AGENT_MAX_LENGTH);
-                case 'SNI / Host': return e.tls?.sni || '-';
+                case 'SNI / Host': return e.dtls ? e.dtls.sni || '' : e.tls?.sni || '-';
+                // DTLS: how far the handshake got, and the client's fingerprint
+                case 'Handshake': return e.dtls?.handshake || '';
+                case 'JA4': return e.dtls?.ja4 || '';
                 case 'Version': {
                     if (e.event_type === 'ntp') return e.ntp?.version !== undefined ? String(e.ntp.version) : '';
+                    if (e.dtls) return e.dtls.version || '';
                     return e.tls?.version || '-';
                 }
                 case 'Issuer': return (e.tls?.issuerdn || '-').slice(0, CONFIG.TLS_SUBJECT_MAX_LENGTH);
@@ -10258,6 +10297,7 @@
                 case 'To': return (e.email?.to || []).join(', ');
                 case 'Subject': {
                     if (e.event_type === 'email') return e.email?.subject || '';
+                    if (e.dtls) return (e.dtls.subject || '').slice(0, CONFIG.TLS_SUBJECT_MAX_LENGTH);
                     return (e.tls?.subject || '-').slice(0, CONFIG.TLS_SUBJECT_MAX_LENGTH);
                 }
                 case 'SPF': return e.email?.spf || '';

@@ -224,6 +224,7 @@ class TestFieldParsing(unittest.TestCase):
         self.assertEqual(shark_analyzer.app_protocol('eth:ethertype:ip:tcp:nbss:smb2'), 'smb')
         self.assertEqual(shark_analyzer.app_protocol('eth:ethertype:ip:udp:kerberos'), 'krb5')
         self.assertEqual(shark_analyzer.app_protocol('eth:ethertype:ip:udp:cldap'), 'ldap')
+        self.assertEqual(shark_analyzer.app_protocol('eth:ethertype:ip:udp:rtp:dtls'), 'dtls', 'WebRTC: RTP demultiplexing DTLS')
 
     def test_rpc_is_the_protocol_only_when_nothing_follows_it(self):
         self.assertEqual(shark_analyzer.app_protocol('eth:ethertype:ip:tcp:rpc:nfs'), 'nfs')
@@ -705,6 +706,74 @@ class TestGOOSE(unittest.TestCase):
         counts = db.get_event_types_sqlite(events_db)
         self.assertEqual(counts.get('goose'), 4)
         self.assertNotIn('conn_goose', counts, 'records, not a connection card')
+
+
+@unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
+class TestDTLS(unittest.TestCase):
+    """tests/protocol_fixtures.write_dtls_pcap: one record per connection's
+    handshake, named like Suricata's tls records - with what Suricata
+    8.0.7 logged for the capture (tests/data/dtls_fixture.eve.json):
+    flows it gives no protocol, since it parses TLS over TCP only."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests.protocol_fixtures import write_dtls_pcap
+        cls.tmpdir = tempfile.mkdtemp()
+        cls.pcap = os.path.join(cls.tmpdir, 'dtls.pcap')
+        write_dtls_pcap(cls.pcap)
+        cls.records = shark_analyzer.run_tshark(cls.pcap)
+        cls.handshakes = {r['src_ip']: r['dtls'] for r in cls.records if r['event_type'] == 'dtls'}
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    def test_a_completed_webrtc_handshake(self):
+        from tests.protocol_fixtures import DTLS_CLIENT
+        d = self.handshakes[DTLS_CLIENT]
+        self.assertEqual({k: d[k] for k in ('version', 'sni', 'cipher_suite', 'client_alpns', 'server_alpns', 'srtp_profile',
+                                            'cookie_exchange', 'client_hellos', 'handshake')},
+                         {'version': 'DTLS 1.2', 'sni': 'dtls.example', 'cipher_suite': 'TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256',
+                          'client_alpns': ['webrtc'], 'server_alpns': ['webrtc'], 'srtp_profile': 'SRTP_AES128_CM_HMAC_SHA1_80',
+                          'cookie_exchange': True, 'client_hellos': 2, 'handshake': 'completed'},
+                         'completed once both sides changed cipher spec - after SRTP, tshark calls those packets rtp:dtls')
+        self.assertTrue(d['ja3']['hash'] and d['ja3s']['hash'] and d['ja4'].startswith('dd2d'))
+
+    def test_the_certificate_as_suricata_names_it(self):
+        from tests.protocol_fixtures import DTLS_CLIENT
+        d = self.handshakes[DTLS_CLIENT]
+        self.assertEqual({k: d[k] for k in ('subject', 'issuerdn', 'serial', 'fingerprint', 'notbefore', 'notafter', 'san')},
+                         {'subject': 'C=US, O=Fixture Ltd, CN=dtls.example', 'issuerdn': 'C=US, O=Fixture Ltd, CN=dtls.example',
+                          'serial': '12:34:AB:CD', 'fingerprint': '0b:a9:85:77:db:22:9e:e7:a6:fe:09:ca:65:2c:38:52:2b:c4:04:66',
+                          'notbefore': '2026-10-10T20:40:09', 'notafter': '2036-10-07T20:40:09',
+                          'san': ['dtls.example', 'vpn.example']}, 'as openssl x509 reads it')
+
+    def test_a_scanners_unanswered_client_hello(self):
+        from tests.protocol_fixtures import DTLS_SCANNER
+        d = self.handshakes[DTLS_SCANNER]
+        self.assertEqual((d['handshake'], d['version']), ('client hello only', 'DTLS 1.2'))
+        self.assertNotIn('subject', d)
+        self.assertTrue(d['ja4'], 'its JA4 names the tool')
+
+    def test_an_unreadable_certificate_is_left_out(self):
+        from shark_protocols import _x509
+        self.assertEqual(_x509('30:82:ff'), {})
+
+    def test_flows_match_suricatas_and_the_merge_adds_the_records(self):
+        from scripts.compare_shark_suricata import compare
+        report = compare(_load_eve('dtls_fixture.eve.json'), self.records)['flow']
+        self.assertEqual((report['matched'], report['named_by_tshark'], report['differences']), (2, 2, []))
+        d = os.path.join(self.tmpdir, 'analysis')
+        os.makedirs(d)
+        shutil.copy(self.pcap, d)
+        events_db = os.path.join(d, 'events.db')
+        db.create_sqlite_db(events_db, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data',
+                                                    'dtls_fixture.eve.json'))
+        self.assertTrue(shark_analyzer.build(d, os.path.join(d, 'dtls.pcap')))
+        shark_analyzer.merge(d)
+        counts = db.get_event_types_sqlite(events_db)
+        self.assertEqual(counts.get('dtls'), 2)
+        self.assertNotIn('conn_dtls', counts, 'records, not a connection card')
 
 
 @unittest.skipUnless(HAS_TSHARK, 'tshark not installed')

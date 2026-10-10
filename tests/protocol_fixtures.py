@@ -915,3 +915,82 @@ def syslog_packets():
 
 def write_syslog_pcap(path):
     write_pcap(path, syslog_packets())
+
+
+# ---------------------------------------------------------------- DTLS
+#
+# A WebRTC-style DTLS 1.2 handshake (DTLS_CLIENT to DTLS_SERVER, port
+# 4433): ClientHello with SNI dtls.example, ALPN webrtc and two SRTP
+# profiles; the server's cookie challenge; the ClientHello again with the
+# cookie; ServerHello (ECDHE-ECDSA AES-128-GCM, one SRTP profile), the
+# certificate below and ServerHelloDone; then both sides' ChangeCipherSpec
+# and encrypted Finished. And a scanner's ClientHello nobody answered.
+
+DTLS_CLIENT, DTLS_SERVER, DTLS_SCANNER = '10.1.0.30', '10.1.0.40', '198.51.100.7'
+# Self-signed, C=US, O=Fixture Ltd, CN=dtls.example, serial 1234ABCD, SANs
+# dtls.example and vpn.example (openssl req -x509, prime256v1)
+DTLS_CERTIFICATE = bytes.fromhex(
+    '308201df30820185a00302010202041234abcd300a06082a8648ce3d040302303a310b300906035504061302555331143012'
+    '060355040a0c0b46697874757265204c74643115301306035504030c0c64746c732e6578616d706c65301e170d3236313031'
+    '303230343030395a170d3336313030373230343030395a303a310b300906035504061302555331143012060355040a0c0b46'
+    '697874757265204c74643115301306035504030c0c64746c732e6578616d706c653059301306072a8648ce3d020106082a86'
+    '48ce3d03010703420004f96f4b948da619acb865e5ee2880723128ebdd0e92ae2481d5ba52d0f46f7bc0af3c7c5e46973e3b'
+    '0e4741806201562644cfe6e37ac4ddda5d77092ce87aac63a3793077301d0603551d0e041604147bbe8a66bb3c46c5d27bfc'
+    'eae8dc43d7edb8cf9f301f0603551d230418301680147bbe8a66bb3c46c5d27bfceae8dc43d7edb8cf9f300f0603551d1301'
+    '01ff040530030101ff30240603551d11041d301b820c64746c732e6578616d706c65820b76706e2e6578616d706c65300a06'
+    '082a8648ce3d0403020348003045022079292eecf5aff6a3fca1b6e016f0802a72600585c00abf4af5c940fbea6d63300221'
+    '00e53ec5406887ca9133d90f82166b0d8570a9b59fc564f78d6062815aae1aacac')
+_DTLS_COOKIE = bytes(range(16))
+
+
+def _dtls_record(content_type, payload, epoch=0, seq=0):
+    return struct.pack('!BHH', content_type, 0xfefd, epoch) + seq.to_bytes(6, 'big') + struct.pack('!H', len(payload)) + payload
+
+
+def _dtls_handshake(kind, body, message_seq):
+    length = len(body).to_bytes(3, 'big')
+    return bytes([kind]) + length + struct.pack('!H', message_seq) + b'\x00\x00\x00' + length + body
+
+
+def _tls_extension(kind, data):
+    return struct.pack('!HH', kind, len(data)) + data
+
+
+def _client_hello(cookie=b''):
+    name = b'dtls.example'
+    sni = _tls_extension(0, struct.pack('!HBH', len(name) + 3, 0, len(name)) + name)
+    alpn = _tls_extension(16, struct.pack('!H', 7) + b'\x06webrtc')
+    srtp = _tls_extension(14, struct.pack('!HHH', 4, 0x0001, 0x0007) + b'\x00')
+    groups = _tls_extension(10, struct.pack('!HH', 2, 0x0017)) + _tls_extension(11, b'\x01\x00')
+    extensions = sni + alpn + srtp + groups
+    return (struct.pack('!H', 0xfefd) + b'\x11' * 32 + b'\x00' + bytes([len(cookie)]) + cookie
+            + struct.pack('!HHBB', 2, 0xc02b, 1, 0) + struct.pack('!H', len(extensions)) + extensions)
+
+
+def dtls_packets():
+    srtp = _tls_extension(14, struct.pack('!HH', 2, 0x0001) + b'\x00')
+    alpn = _tls_extension(16, struct.pack('!H', 7) + b'\x06webrtc')
+    server_hello = (struct.pack('!H', 0xfefd) + b'\x22' * 32 + b'\x00' + struct.pack('!HB', 0xc02b, 0)
+                    + struct.pack('!H', len(srtp + alpn)) + srtp + alpn)
+    certificate = (len(DTLS_CERTIFICATE) + 3).to_bytes(3, 'big') + len(DTLS_CERTIFICATE).to_bytes(3, 'big') + DTLS_CERTIFICATE
+    flight = (_dtls_record(22, _dtls_handshake(2, server_hello, 1), seq=1)
+              + _dtls_record(22, _dtls_handshake(11, certificate, 2), seq=2)
+              + _dtls_record(22, _dtls_handshake(14, b'', 3), seq=3))
+    finished = b'\x33' * 40
+
+    def client(payload):
+        return _udp_packet(DTLS_CLIENT, DTLS_SERVER, 50000, 4433, payload)
+
+    def server(payload):
+        return _udp_packet(DTLS_SERVER, DTLS_CLIENT, 4433, 50000, payload)
+    return [client(_dtls_record(22, _dtls_handshake(1, _client_hello(), 0))),
+            server(_dtls_record(22, _dtls_handshake(3, struct.pack('!HB', 0xfefd, 16) + _DTLS_COOKIE, 0))),
+            client(_dtls_record(22, _dtls_handshake(1, _client_hello(_DTLS_COOKIE), 1), seq=1)),
+            server(flight),
+            client(_dtls_record(20, b'\x01', seq=2) + _dtls_record(22, finished, epoch=1)),
+            server(_dtls_record(20, b'\x01', seq=4) + _dtls_record(22, finished, epoch=1)),
+            _udp_packet(DTLS_SCANNER, DTLS_SERVER, 41000, 4433, _dtls_record(22, _dtls_handshake(1, _client_hello(), 0)))]
+
+
+def write_dtls_pcap(path):
+    write_pcap(path, dtls_packets())

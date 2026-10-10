@@ -1402,6 +1402,13 @@ AGGREGATION_JSON_PATHS = {
         'Roles': ['$.browser.roles'],
         'Count': ['$.browser.count'],
     },
+    'dtls': {
+        'SNI / Host': ['$.dtls.sni'],
+        'Version': ['$.dtls.version'],
+        'Handshake': ['$.dtls.handshake'],
+        'Subject': ['$.dtls.subject'],
+        'JA4': ['$.dtls.ja4'],
+    },
     'syslog': {
         'Severity': ['$.syslog.severity'],
         'Facility': ['$.syslog.facility'],
@@ -1549,6 +1556,7 @@ AGGREGATION_TRUNCATE = {
     ('http', 'User-Agent'): 50,
     ('tls', 'Subject'): 40,
     ('tls', 'Issuer'): 40,
+    ('dtls', 'Subject'): 40,
 }
 
 # Value transforms beyond plain extraction, matching extractValue's own

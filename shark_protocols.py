@@ -414,6 +414,206 @@ class Syslog:
         return self.records
 
 
+# ---------------------------------------------------------------- DTLS
+#
+# TLS over UDP (VPNs, WebRTC, CoAP and IoT security, CAPWAP) - Suricata
+# parses TLS over TCP only. One record per connection's handshake, named
+# the way Suricata's tls records are: the version agreed, the SNI and
+# ALPNs the client asked for, the cipher suite the server picked, the
+# JA3/JA3S/JA4 fingerprints, the server's certificate (DTLS 1.2 and
+# before send it in the clear), WebRTC's SRTP profile, and how far the
+# handshake got - a scanner's ClientHello nobody answered is still a
+# record, its JA4 naming the tool.
+
+_DTLS_VERSIONS = {0xfeff: 'DTLS 1.0', 0xfefd: 'DTLS 1.2', 0xfefc: 'DTLS 1.3', 0x0100: 'DTLS 1.0 (OpenSSL pre-0.9.8f)'}
+_X509_NAMES = {'2.5.4.3': 'CN', '2.5.4.6': 'C', '2.5.4.7': 'L', '2.5.4.8': 'ST', '2.5.4.10': 'O', '2.5.4.11': 'OU',
+               '2.5.4.5': 'serialNumber', '1.2.840.113549.1.9.1': 'emailAddress', '0.9.2342.19200300.100.1.25': 'DC'}
+_X509_SAN = '2.5.29.17'
+_DTLS_MAX_SANS = 20
+
+
+def _dtls_version(value):
+    number = _int(value)
+    return _DTLS_VERSIONS.get(number, value) if number is not None else ''
+
+
+def _der(data, pos):
+    """A DER element at pos: (tag, start of its contents, end)."""
+    tag, length = data[pos], data[pos + 1]
+    pos += 2
+    if length & 0x80:
+        count = length & 0x7f
+        length = int.from_bytes(data[pos:pos + count], 'big')
+        pos += count
+    if pos + length > len(data):
+        raise ValueError('truncated')
+    return tag, pos, pos + length
+
+
+def _der_children(data, start, end):
+    while start < end:
+        tag, inner, start = _der(data, start)
+        yield tag, inner, start
+
+
+def _oid(raw):
+    parts, value = [], 0
+    for b in raw:
+        value = value << 7 | (b & 0x7f)
+        if not b & 0x80:
+            parts.append(value)
+            value = 0
+    first = min(parts[0] // 40, 2) if parts else 0
+    return '.'.join(str(n) for n in [first, parts[0] - 40 * first] + parts[1:]) if parts else ''
+
+
+def _x509_name(data, start, end):
+    """A Name as Suricata writes one: 'C=US, O=Example, CN=example.com'."""
+    out = []
+    for _, rdn, rdn_end in _der_children(data, start, end):
+        for _, atv, atv_end in _der_children(data, rdn, rdn_end):
+            (_, oid_start, oid_end), value = _der(data, atv), None
+            _, value_start, value_end = _der(data, oid_end)
+            oid = _oid(data[oid_start:oid_end])
+            text = data[value_start:value_end].decode('utf-8', 'replace')
+            out.append(f'{_X509_NAMES.get(oid, oid)}={text}')
+    return ', '.join(out)
+
+
+def _x509_time(raw):
+    text = raw.decode('ascii', 'replace').rstrip('Z')
+    if len(text) == 12:                  # UTCTime: YYMMDDHHMMSS
+        text = ('19' if text[:2] >= '50' else '20') + text
+    return f'{text[:4]}-{text[4:6]}-{text[6:8]}T{text[8:10]}:{text[10:12]}:{text[12:14]}' if len(text) >= 14 else text
+
+
+def _x509(hexbytes):
+    """What Suricata's tls record says about a certificate (DER, as tshark
+    shows its bytes), or {} if it can't be read."""
+    import hashlib
+    try:
+        data = bytes.fromhex(hexbytes.replace(':', ''))
+        _, cert, cert_end = _der(data, 0)
+        _, tbs, tbs_end = _der(data, cert)
+        fields = list(_der_children(data, tbs, tbs_end))
+        if fields and fields[0][0] == 0xa0:         # [0] version
+            fields = fields[1:]
+        (_, serial, serial_end), _, (_, issuer, issuer_end), (_, validity, validity_end), \
+            (_, subject, subject_end) = fields[:5]
+        times = [data[s:e] for _, s, e in _der_children(data, validity, validity_end)]
+        out = {'subject': _x509_name(data, subject, subject_end), 'issuerdn': _x509_name(data, issuer, issuer_end),
+               'serial': ':'.join(f'{b:02X}' for b in data[serial:serial_end].lstrip(b'\x00') or b'\x00'),
+               'fingerprint': ':'.join(f'{b:02x}' for b in hashlib.sha1(data[:cert_end]).digest())}
+        if len(times) == 2:
+            out['notbefore'], out['notafter'] = _x509_time(times[0]), _x509_time(times[1])
+        for tag, ext, ext_end in fields[5:]:
+            if tag != 0xa3:                          # [3] extensions
+                continue
+            _, seq, seq_end = _der(data, ext)
+            for _, item, item_end in _der_children(data, seq, seq_end):
+                parts = list(_der_children(data, item, item_end))
+                if parts and _oid(data[parts[0][1]:parts[0][2]]) == _X509_SAN:
+                    _, names, names_end = _der(data, parts[-1][1])
+                    sans = [data[s:e].decode('ascii', 'replace') for t, s, e in _der_children(data, names, names_end)
+                            if t == 0x82]            # dNSName
+                    if sans:
+                        out['san'] = sans[:_DTLS_MAX_SANS]
+        return out
+    except (ValueError, IndexError):
+        return {}
+
+
+class _DTLSConnection:
+    __slots__ = ('body', 'ccs', 'server_hello')
+
+    def __init__(self, body):
+        self.body, self.ccs, self.server_hello = body, set(), False
+
+
+class DTLS:
+    """DTLS - see the comment above."""
+    event_type = 'dtls'
+    app_protos = ('dtls',)
+    fields = ('dtls.record.version', 'dtls.handshake.type', 'dtls.handshake.version',
+              'dtls.handshake.extensions.supported_version', 'dtls.handshake.extensions_server_name',
+              'dtls.handshake.extensions_alpn_str', 'vals(dtls.handshake.ciphersuite)', 'dtls.handshake.ja3',
+              'dtls.handshake.ja3_full', 'dtls.handshake.ja3s', 'dtls.handshake.ja3s_full', 'dtls.handshake.ja4',
+              'vals(dtls.use_srtp.protection_profile)', 'dtls.handshake.certificate', 'dtls.record.content_type',
+              'vals(dtls.alert_message.desc)')
+
+    def __init__(self):
+        self.connections = {}       # flow key -> _DTLSConnection, in the order they began
+
+    def feed(self, pkt, v):
+        def first(name):
+            return (v[name] or [''])[0]
+        conn = self.connections.get(pkt.flow.key)
+        if conn is None:
+            conn = self.connections[pkt.flow.key] = _DTLSConnection({})
+            conn.body['_flow'], conn.body['_when'] = pkt.flow, pkt.when
+        body = conn.body
+        from_client = (pkt.src, pkt.sport) == (pkt.flow.client, pkt.flow.cport)
+        types = {_int(t) for t in v['dtls.handshake.type']}
+        if 1 in types:                                    # ClientHello
+            body['client_hellos'] = body.get('client_hellos', 0) + 1
+            body.setdefault('client_version', _dtls_version(first('dtls.handshake.version')))
+            if first('dtls.handshake.extensions_server_name'):
+                body['sni'] = first('dtls.handshake.extensions_server_name')
+            if v['dtls.handshake.extensions_alpn_str']:
+                body['client_alpns'] = list(dict.fromkeys(v['dtls.handshake.extensions_alpn_str']))
+            if first('dtls.handshake.ja3'):
+                body['ja3'] = {'hash': first('dtls.handshake.ja3'), 'string': first('dtls.handshake.ja3_full')}
+            if first('dtls.handshake.ja4'):
+                body['ja4'] = first('dtls.handshake.ja4')
+            if v['vals(dtls.use_srtp.protection_profile)']:
+                body['srtp_profiles'] = list(dict.fromkeys(v['vals(dtls.use_srtp.protection_profile)']))
+        if 3 in types:                                    # HelloVerifyRequest
+            body['cookie_exchange'] = True
+        if 2 in types:                                    # ServerHello
+            conn.server_hello = True
+            supported = [_dtls_version(x) for x in v['dtls.handshake.extensions.supported_version']]
+            body['version'] = supported[-1] if supported else _dtls_version(first('dtls.handshake.version'))
+            if v['vals(dtls.handshake.ciphersuite)']:
+                body['cipher_suite'] = v['vals(dtls.handshake.ciphersuite)'][-1]
+            if first('dtls.handshake.ja3s'):
+                body['ja3s'] = {'hash': first('dtls.handshake.ja3s'), 'string': first('dtls.handshake.ja3s_full')}
+            if v['dtls.handshake.extensions_alpn_str'] and 1 not in types:
+                body['server_alpns'] = list(dict.fromkeys(v['dtls.handshake.extensions_alpn_str']))
+            if v['vals(dtls.use_srtp.protection_profile)'] and 1 not in types:
+                body['srtp_profile'] = v['vals(dtls.use_srtp.protection_profile)'][0]
+        if 11 in types and v['dtls.handshake.certificate'] and 'subject' not in body:
+            body.update(_x509(v['dtls.handshake.certificate'][0]))
+        if 20 in {_int(t) for t in v['dtls.record.content_type']}:     # ChangeCipherSpec
+            conn.ccs.add(from_client)
+        for alert in v['vals(dtls.alert_message.desc)']:
+            alerts = body.setdefault('alerts', [])
+            if len(alerts) < 10:
+                alerts.append(f"{'client' if from_client else 'server'}: {alert}")
+        if 'version' not in body and first('dtls.record.version'):
+            body['record_version'] = _dtls_version(first('dtls.record.version'))
+
+    def finish(self):
+        records = []
+        for conn in self.connections.values():
+            body = conn.body
+            flow, when = body.pop('_flow'), body.pop('_when')
+            if 'version' not in body:
+                body['version'] = body.pop('record_version', '') or body.get('client_version', '')
+            body.pop('record_version', None)
+            if conn.ccs == {True, False}:
+                body['handshake'] = 'completed'
+            elif conn.server_hello:
+                body['handshake'] = 'server hello'
+            elif body.get('cookie_exchange'):
+                body['handshake'] = 'cookie exchange only'
+            elif body.get('client_hellos'):
+                body['handshake'] = 'client hello only'
+            else:
+                body['handshake'] = 'no handshake seen'
+            records.append((flow, when, self.event_type, body))
+        return records
+
+
 # ---------------------------------------------------------------- SSDP
 
 class SSDP:
@@ -1948,7 +2148,7 @@ def _pdus(layer):
 
 # Every protocol with records here, from tshark's fields, in the order their
 # fields follow the base fields in tshark's output.
-PROTOCOLS = (LLMNR, NBNS, DHCPv6, Syslog, SSDP, S7comm, Telnet, IEC104, BACnet, GOOSE, Browser, LLDP, CDP)
+PROTOCOLS = (LLMNR, NBNS, DHCPv6, Syslog, DTLS, SSDP, S7comm, Telnet, IEC104, BACnet, GOOSE, Browser, LLDP, CDP)
 # ... and from the structured pass (shark_analyzer._structured_pass): none
 # yet - it's for a protocol whose messages nest, which flat fields can't
 # keep apart (several commands per packet, a token inside a command).
