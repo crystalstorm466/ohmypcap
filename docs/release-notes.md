@@ -38,6 +38,10 @@ each card marked with a dot:
   transaction, the client's message paired with the server's reply: the
   client's hostname, MAC address and vendor class, and the addresses or
   prefixes, DNS servers and search domains it was given
+- **Syslog** (Suricata has no syslog parser) - a record for each message
+  a device sent its log collector: severity, facility, host, program and
+  PID, and the message, in either format (RFC 3164 or RFC 5424, with its
+  structured data)
 - **Windows Browser** (NetBIOS datagrams) - a passive inventory of the
   Windows machines on the network: each one's name, workgroup or domain,
   Windows version and roles (domain controller, SQL server, master

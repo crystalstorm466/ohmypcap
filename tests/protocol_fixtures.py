@@ -889,3 +889,29 @@ def dhcpv6_packets():
 
 def write_dhcpv6_pcap(path):
     write_pcap(path, dhcpv6_packets())
+
+
+# ---------------------------------------------------------------- Syslog
+#
+# Messages to a collector (SYSLOG_COLLECTOR) on UDP 514 in each form: RFC
+# 3164 with a program[pid] tag, RFC 3164 with no timestamp or host (a
+# Cisco ASA's), RFC 5424 with structured data, one with no <PRI>, and one
+# too long to keep whole.
+
+SYSLOG_SWITCH, SYSLOG_FIREWALL, SYSLOG_SERVER, SYSLOG_COLLECTOR = '10.1.0.2', '10.1.0.1', '10.1.0.3', '10.1.0.50'
+
+
+def syslog_packets():
+    messages = [
+        (SYSLOG_SWITCH, b'<38>Oct 10 14:02:15 sw-core sshd[812]: Failed password for admin from 10.1.0.77 port 51122 ssh2'),
+        (SYSLOG_FIREWALL, b'<190>%ASA-6-302013: Built inbound TCP connection 1 for outside:198.51.100.7/5 to inside:10.1.0.20/80'),
+        (SYSLOG_SERVER, b'<165>1 2026-10-10T14:02:15.003Z app1.example.com evntslog - ID47 '
+                        b'[exampleSDID@32473 iut="3" eventSource="Application" eventID="1011"] \xef\xbb\xbfAn application event'),
+        (SYSLOG_SERVER, b'no priority here at all'),
+        (SYSLOG_SWITCH, b'<14>Oct 10 14:03:00 sw-core logger: ' + b'x' * 3000),
+    ]
+    return [_udp_packet(src, SYSLOG_COLLECTOR, 51400 + i, 514, message) for i, (src, message) in enumerate(messages)]
+
+
+def write_syslog_pcap(path):
+    write_pcap(path, syslog_packets())

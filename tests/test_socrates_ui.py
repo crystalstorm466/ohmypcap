@@ -21824,6 +21824,9 @@ class TestTsharkUI(unittest.TestCase):
         'browser': {'event_type': 'browser', 'browser': {'message': 'Local Master Announcement', 'source_name': 'DC1',
                                                       'destination_name': 'FIXTUREDOM', 'os_version': '10.0',
                                                       'roles': ['workstation', 'domain controller'], 'count': 3}},
+        'syslog': {'event_type': 'syslog', 'syslog': {'severity': 'info', 'facility': 'auth', 'hostname': 'sw-core',
+                                                    'program': 'sshd', 'pid': '812', 'format': 'RFC 3164',
+                                                    'message': 'Failed password for admin from 10.1.0.77'}},
         'dhcpv6': {'event_type': 'dhcpv6', 'dhcpv6': {'message': 'Request', 'reply': 'Reply', 'hostname': 'LAPTOP.example.com',
                                                     'client_mac': '00:1b:21:00:00:10',
                                                     'assigned_addresses': ['2001:0db8:0000:0000:0000:0000:0000:0010'],
@@ -21868,6 +21871,7 @@ class TestTsharkUI(unittest.TestCase):
         'telnet': ['MOXA EtherDevice Switch EDS-508A', 'admin', 'admin', 'failed'],
         'iec104': ['Single command', '7', '2001', 'on', 'confirmed, terminated'],
         'browser': ['Local Master Announcement', 'DC1', 'FIXTUREDOM', '10.0', 'workstation, domain controller', '3'],
+        'syslog': ['info', 'auth', 'sw-core', 'sshd', 'Failed password for admin from 10.1.0.77'],
         'dhcpv6': ['Request', 'Reply', 'LAPTOP.example.com', '00:1b:21:00:00:10',
                    '2001:0db8:0000:0000:0000:0000:0000:0010', 'MSFT 5.0', 'Success'],
         'lldp': ['sw1.example', '00:1b:21:00:00:01', 'Gi1/0/1', 'bridge, router', '10.1.0.1', '10', '2'],
@@ -21950,7 +21954,7 @@ class TestTsharkUI(unittest.TestCase):
         import db
         from tests.jsdom_helper import js_statements
         cols = js_statements("""window.__jsdom_result = Object.fromEntries(
-            ['llmnr', 'nbns', 's7comm', 'ssdp', 'telnet', 'iec104', 'iec104_point', 'bacnet', 'bacnet_property', 'bacnet_device', 'opcua', 'opcua_action', 'goose', 'browser', 'lldp', 'cdp', 'dhcpv6'].map(t => [t, getColumnsForType(t).slice(6)]));""")
+            ['llmnr', 'nbns', 's7comm', 'ssdp', 'telnet', 'iec104', 'iec104_point', 'bacnet', 'bacnet_property', 'bacnet_device', 'opcua', 'opcua_action', 'goose', 'browser', 'lldp', 'cdp', 'dhcpv6', 'syslog'].map(t => [t, getColumnsForType(t).slice(6)]));""")
         for t, columns in cols.items():
             self.assertEqual(list(db.AGGREGATION_JSON_PATHS[t]), columns, t)
 

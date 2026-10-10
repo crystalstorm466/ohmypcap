@@ -708,6 +708,72 @@ class TestGOOSE(unittest.TestCase):
 
 
 @unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
+class TestSyslog(unittest.TestCase):
+    """tests/protocol_fixtures.write_syslog_pcap: one record per message,
+    in each format - with what Suricata 8.0.7 logged for the capture
+    (tests/data/syslog_fixture.eve.json): flows it gives no protocol,
+    since it has no syslog parser."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests.protocol_fixtures import write_syslog_pcap
+        cls.tmpdir = tempfile.mkdtemp()
+        cls.pcap = os.path.join(cls.tmpdir, 'syslog.pcap')
+        write_syslog_pcap(cls.pcap)
+        cls.records = shark_analyzer.run_tshark(cls.pcap)
+        cls.messages = [r['syslog'] for r in sorted(cls.records, key=lambda r: r.get('src_port', 0))
+                        if r['event_type'] == 'syslog']
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    def test_rfc_3164_program_and_pid_split_where_tshark_doesnt(self):
+        sshd = self.messages[0]
+        self.assertEqual({k: sshd[k] for k in ('facility', 'severity', 'format', 'timestamp', 'hostname', 'program', 'pid')},
+                         {'facility': 'auth', 'severity': 'info', 'format': 'RFC 3164', 'timestamp': 'Oct 10 14:02:15',
+                          'hostname': 'sw-core', 'program': 'sshd', 'pid': '812'})
+        self.assertEqual(sshd['message'], 'Failed password for admin from 10.1.0.77 port 51122 ssh2')
+
+    def test_a_message_with_no_timestamp_or_host_is_kept_whole(self):
+        asa = self.messages[1]
+        self.assertEqual((asa['facility'], asa['severity'], asa['format']), ('local7', 'info', 'RFC 3164'))
+        self.assertNotIn('hostname', asa)
+        self.assertTrue(asa['message'].startswith('%ASA-6-302013: Built inbound TCP connection'))
+
+    def test_rfc_5424_with_structured_data(self):
+        app = self.messages[2]
+        self.assertEqual({k: app.get(k) for k in ('facility', 'severity', 'format', 'timestamp', 'hostname', 'program',
+                                                  'pid', 'msgid', 'message')},
+                         {'facility': 'local4', 'severity': 'notice', 'format': 'RFC 5424',
+                          'timestamp': '2026-10-10T14:02:15.003Z', 'hostname': 'app1.example.com', 'program': 'evntslog',
+                          'pid': None, 'msgid': 'ID47', 'message': 'An application event'})
+        self.assertEqual(app['structured_data'],
+                         {'exampleSDID@32473': {'iut': '3', 'eventSource': 'Application', 'eventID': '1011'}})
+
+    def test_no_priority_and_a_long_message(self):
+        self.assertEqual(self.messages[3], {'format': 'no priority', 'message': 'no priority here at all'})
+        long = self.messages[4]
+        self.assertEqual((len(long['message']), long['truncated']), (2048, True))
+
+    def test_flows_match_suricatas_and_the_merge_adds_the_records(self):
+        from scripts.compare_shark_suricata import compare
+        report = compare(_load_eve('syslog_fixture.eve.json'), self.records)['flow']
+        self.assertEqual((report['matched'], report['named_by_tshark'], report['differences']), (5, 5, []))
+        d = os.path.join(self.tmpdir, 'analysis')
+        os.makedirs(d)
+        shutil.copy(self.pcap, d)
+        events_db = os.path.join(d, 'events.db')
+        db.create_sqlite_db(events_db, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data',
+                                                    'syslog_fixture.eve.json'))
+        self.assertTrue(shark_analyzer.build(d, os.path.join(d, 'syslog.pcap')))
+        shark_analyzer.merge(d)
+        counts = db.get_event_types_sqlite(events_db)
+        self.assertEqual(counts.get('syslog'), 5)
+        self.assertNotIn('conn_syslog', counts, 'records, not a connection card')
+
+
+@unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
 class TestDHCPv6(unittest.TestCase):
     """tests/protocol_fixtures.write_dhcpv6_pcap: one record per
     transaction, the server's reply (on another flow) paired with the
@@ -1215,11 +1281,11 @@ class TestMergeRows(unittest.TestCase):
                          [('s7comm', None), ('nbns', None), ('llmnr', None), ('ssdp', None)])
 
     def test_flows_become_connection_rows_only_for_protocols_with_nothing_else(self):
-        self.assertEqual(self._kept([_row('flow', app='openvpn'), _row('flow', app='syslog'),
+        self.assertEqual(self._kept([_row('flow', app='openvpn'), _row('flow', app='wol'),
                                      _row('flow', app='telnet'), _row('flow', app='http'), _row('flow', app='arp'),
-                                     _row('flow', app='s7comm'), _row('flow', app='')]),
-                         [('conn_openvpn', 'openvpn'), ('conn_syslog', 'syslog')],
-                         "telnet, http and arp are Suricata's; s7comm has records; '' is no protocol")
+                                     _row('flow', app='s7comm'), _row('flow', app='syslog'), _row('flow', app='')]),
+                         [('conn_openvpn', 'openvpn'), ('conn_wol', 'wol')],
+                         "telnet, http and arp are Suricata's; s7comm and syslog have records; '' is no protocol")
 
     def test_nothing_on_a_flow_suricata_gave_a_protocol(self):
         """The 4SICS case: a scanner's HTTP request to the rsh port is HTTP
@@ -1295,18 +1361,18 @@ class TestMerge(unittest.TestCase):
     def test_connection_rows_have_their_own_tab_but_stay_out_of_all_events(self):
         from tests.pcap_fixtures import write_pcap
         from tests.protocol_fixtures import _udp_packet
-        syslog = os.path.join(self.dir, 'syslog.pcap')
-        write_pcap(syslog, [_udp_packet('10.1.0.10', '10.1.0.99', 40514, 514, b'<34>Oct 11 22:14:15 host su: test')])
-        os.replace(syslog, self.pcap)
+        wake = os.path.join(self.dir, 'wol.pcap')        # a Wake-on-LAN magic packet
+        write_pcap(wake, [_udp_packet('10.1.0.10', '10.1.0.99', 40009, 40000, b'\xff' * 6 + bytes.fromhex('001b21000099') * 16)])
+        os.replace(wake, self.pcap)
         self.assertTrue(shark_analyzer.build(self.dir, self.pcap))
         shark_analyzer.merge(self.dir)
-        self.assertEqual(self._added(), {'conn_syslog': 1})
-        self.assertEqual([e['event_type'] for e in db.query_events_sqlite(self.events_db, 'conn_syslog')], ['conn_syslog'])
-        self.assertNotIn('conn_syslog', {e['event_type'] for e in db.query_events_sqlite(self.events_db, limit=100000)},
+        self.assertEqual(self._added(), {'conn_wol': 1})
+        self.assertEqual([e['event_type'] for e in db.query_events_sqlite(self.events_db, 'conn_wol')], ['conn_wol'])
+        self.assertNotIn('conn_wol', {e['event_type'] for e in db.query_events_sqlite(self.events_db, limit=100000)},
                          "it's a connection Suricata's own flow row already lists")
-        [row] = db.query_events_sqlite(self.events_db, 'conn_syslog')
+        [row] = db.query_events_sqlite(self.events_db, 'conn_wol')
         self.assertEqual(row['shark']['answered'], 'no',
-                         'unanswered, as syslog always is - which is why it keeps its card, not Probed Only')
+                         'unanswered, as a wake-up always is - which is why it keeps its card, not Probed Only')
 
 
 class TestSettingsSwitch(unittest.TestCase):

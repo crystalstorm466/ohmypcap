@@ -2163,6 +2163,7 @@
                 lldp: '#26a69a',
                 cdp: '#8d6e63',
                 dhcpv6: '#9ccc65',
+                syslog: '#ffca28',
                 opcua_action: '#ff7043',
                 bacnet_property: '#5c6bc0',
                 bacnet_device: '#8d6e63',
@@ -3801,6 +3802,25 @@
             return html;
         }
 
+        // tshark's syslog records (shark_protocols.Syslog): one per message.
+        function renderSyslogDetails(e) {
+            const l = e.syslog || {};
+            let html = htmlSection('Syslog Details', COLORS.EVENT.syslog);
+            html += htmlRowText('Severity', l.severity);
+            html += htmlRowText('Facility', l.facility);
+            html += htmlRowText('Host', l.hostname, 'mono');
+            html += htmlRowText('Program', l.program, 'mono');
+            html += htmlRowText('PID', l.pid, 'mono');
+            html += htmlRowText('Message ID', l.msgid, 'mono');
+            html += htmlRowText('Device Time', l.timestamp);
+            html += htmlRowText('Format', l.format);
+            html += htmlRowText('Message', l.message + (l.truncated ? ' …' : ''), 'mono', 'white-space: pre-wrap; word-break: break-word;');
+            for (const [element, params] of Object.entries(l.structured_data || {})) {
+                html += htmlRowText(element, Object.entries(params).map(([k, v]) => `${k}="${v}"`).join(' '), 'mono');
+            }
+            return html;
+        }
+
         // tshark's DHCPv6 records (shark_protocols.DHCPv6): one per
         // transaction - a client's message and the server's reply.
         function renderDhcpv6Details(e) {
@@ -4394,6 +4414,7 @@
             goose: renderGooseDetails,
             browser: renderBrowserDetails,
             dhcpv6: renderDhcpv6Details,
+            syslog: renderSyslogDetails,
             lldp: renderNeighborDetails,
             cdp: renderNeighborDetails,
             opcua_action: renderOpcuaActionDetails,
@@ -7064,6 +7085,7 @@
             goose: 'GOOSE',
             browser: 'Windows Browser',
             dhcpv6: 'DHCPv6',
+            syslog: 'Syslog',
             lldp: 'LLDP',
             cdp: 'CDP',
             opcua_action: 'OPC UA Actions',
@@ -7454,6 +7476,8 @@
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Service', 'Object', 'Property', 'Value', 'Password', 'Result'];
                 case 'browser':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Message', 'NetBIOS Name', 'Workgroup', 'Windows', 'Roles', 'Count'];
+                case 'syslog':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Severity', 'Facility', 'Host', 'Program', 'Message'];
                 case 'dhcpv6':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Message', 'Reply', 'Hostname', 'Client MAC', 'Assigned IP', 'Vendor Class', 'Result'];
                 case 'lldp':
@@ -7945,10 +7969,11 @@
                 case 'browser':
                 case 'lldp':
                 case 'cdp':
-                case 'dhcpv6': {
+                case 'dhcpv6':
+                case 'syslog': {
                     const cols = getColumnsForType(etype).slice(6);
                     colSpan = cols.length + 6;
-                    row = rowPrefixCells(e) + cols.map(col => `<td${['Search Target', 'Location', 'User', 'Password', 'Chassis ID', 'Port ID', 'Device ID', 'Management IP', 'Hostname', 'Client MAC', 'Assigned IP'].includes(col) ? ' class="mono"' : ''}>${escapeHtml(extractValue(e, col))}</td>`).join('') + '</tr>';
+                    row = rowPrefixCells(e) + cols.map(col => `<td${['Search Target', 'Location', 'User', 'Password', 'Chassis ID', 'Port ID', 'Device ID', 'Management IP', 'Hostname', 'Client MAC', 'Assigned IP', 'Host', 'Program', 'Message'].includes(col) ? ' class="mono"' : ''}>${escapeHtml(extractValue(e, col))}</td>`).join('') + '</tr>';
                     break;
                 }
                 case 'nbns': {
@@ -10124,7 +10149,7 @@
                     if (e.event_type === 'modbus') return e.modbus?.request?.category || '';
                     return e.alert?.category || '';
                 }
-                case 'Severity': return 'Sev ' + (e.alert?.severity || 0);
+                case 'Severity': return e.syslog ? e.syslog.severity || '' : 'Sev ' + (e.alert?.severity || 0);
                 case 'Ruleset': return classifyRuleset(e.alert?.signature_id);
                 case 'Type': {
                     if (e.event_type === 'iec104_point') return e.iec104_point?.type || '';
@@ -10170,7 +10195,10 @@
                 case 'VLAN': return e.lldp?.vlan !== undefined ? String(e.lldp.vlan) : '';
                 case 'Native VLAN': return e.cdp?.native_vlan !== undefined ? String(e.cdp.native_vlan) : '';
                 // Windows Browser: a host's announcements, elections...
-                case 'Message': return e.browser?.message || e.dhcpv6?.message || '';
+                case 'Message': return e.browser?.message || e.dhcpv6?.message || e.syslog?.message || '';
+                // Syslog: a message's
+                case 'Facility': return e.syslog?.facility || '';
+                case 'Program': return e.syslog?.program || '';
                 case 'Workgroup': return e.browser?.destination_name || '';
                 case 'Windows': return e.browser?.os_version || '';
                 case 'Roles': return (e.browser?.roles || []).join(', ');
@@ -10195,7 +10223,7 @@
                 case 'Login': return e.telnet?.login || '';
                 case 'Area': return e.s7comm?.items?.[0]?.area || '';
                 case 'Error': return e.s7comm?.response?.error_class || '';
-                case 'Host': return e.http?.hostname || '';
+                case 'Host': return e.http?.hostname || e.syslog?.hostname || '';
                 case 'URL': {
                     if (e.event_type === 'link') return e.link?.url || '';
                     return e.http?.url || '';

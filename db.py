@@ -1402,6 +1402,13 @@ AGGREGATION_JSON_PATHS = {
         'Roles': ['$.browser.roles'],
         'Count': ['$.browser.count'],
     },
+    'syslog': {
+        'Severity': ['$.syslog.severity'],
+        'Facility': ['$.syslog.facility'],
+        'Host': ['$.syslog.hostname'],
+        'Program': ['$.syslog.program'],
+        'Message': ['$.syslog.message'],
+    },
     'dhcpv6': {
         'Message': ['$.dhcpv6.message'],
         'Reply': ['$.dhcpv6.reply'],

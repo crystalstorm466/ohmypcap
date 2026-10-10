@@ -322,6 +322,98 @@ class DHCPv6:
         return self.records
 
 
+# ---------------------------------------------------------------- Syslog
+#
+# Suricata has no syslog parser. One record per message (UDP 514 - tshark
+# doesn't decode syslog over TCP): its facility and severity, from the
+# <PRI> that starts it, and the rest in either of the two formats - RFC
+# 3164's "Mmm dd hh:mm:ss host program[pid]: text" (most devices, many
+# leaving out the timestamp or host) or RFC 5424's "1 timestamp host app
+# procid msgid [structured data] text". It's parsed here from the
+# message's bytes: tshark reads "sshd[812]: Failed..." as program sshd and
+# message "812]: Failed...".
+
+_SYSLOG_FACILITIES = ('kern', 'user', 'mail', 'daemon', 'auth', 'syslog', 'lpr', 'news', 'uucp', 'cron', 'authpriv',
+                      'ftp', 'ntp', 'audit', 'alert', 'clock') + tuple(f'local{n}' for n in range(8))
+_SYSLOG_SEVERITIES = ('emerg', 'alert', 'crit', 'err', 'warning', 'notice', 'info', 'debug')
+_SYSLOG_MAX_MESSAGE = 2048
+_SYSLOG_PRI = re.compile(r'<(\d{1,3})>')
+_SYSLOG_5424 = re.compile(r'1 (\S+) (\S+) (\S+) (\S+) (\S+) (-|(?:\[(?:[^\]"\\]|\\.|"(?:[^"\\]|\\.)*")*\])+) ?(.*)', re.S)
+_SYSLOG_SD_ELEMENT = re.compile(r'\[([^\s\]=]+)((?:\s+[^\s=\]]+="(?:[^"\\]|\\.)*")*)\s*\]')
+_SYSLOG_SD_PARAM = re.compile(r'([^\s=\]]+)="((?:[^"\\]|\\.)*)"')
+_SYSLOG_3164_TIME = re.compile(r'([A-Z][a-z]{2} [ \d]\d \d\d:\d\d:\d\d(?:\.\d+)?(?: \d{4})?) ')
+_SYSLOG_TAG = r'([A-Za-z0-9_./-]+)(?:\[(\d+)\])?: ?'
+_SYSLOG_HOST_TAG = re.compile(r'([\w.:-]+) ' + _SYSLOG_TAG + r'(.*)', re.S)
+_SYSLOG_TAG_ONLY = re.compile(_SYSLOG_TAG + r'(.*)', re.S)
+
+
+def _syslog_nil(value):
+    return '' if value == '-' else value
+
+
+class Syslog:
+    """Syslog - see the comment above."""
+    event_type = 'syslog'
+    app_protos = ('syslog',)
+    fields = ('@syslog',)
+
+    def __init__(self):
+        self.records = []
+
+    def feed(self, pkt, v):
+        try:
+            text = bytes.fromhex(_first(v['@syslog']).replace(':', '')).decode('utf-8', 'replace')
+        except ValueError:
+            return
+        text = text.rstrip('\r\n\x00')
+        if not text:
+            return
+        body = {}
+        pri = _SYSLOG_PRI.match(text)
+        if pri and int(pri.group(1)) < 192:
+            value = int(pri.group(1))
+            body['facility'] = _SYSLOG_FACILITIES[value >> 3]
+            body['severity'] = _SYSLOG_SEVERITIES[value & 7]
+            text = text[pri.end():]
+            m = _SYSLOG_5424.match(text)
+            if m:
+                body['format'] = 'RFC 5424'
+                for key, value in zip(('timestamp', 'hostname', 'program', 'pid', 'msgid'), m.groups()[:5]):
+                    if _syslog_nil(value):
+                        body[key] = value
+                if m.group(6) != '-':
+                    body['structured_data'] = {
+                        element.group(1): {k: re.sub(r'\\(["\\\]])', r'\1', val)
+                                           for k, val in _SYSLOG_SD_PARAM.findall(element.group(2))}
+                        for element in _SYSLOG_SD_ELEMENT.finditer(m.group(6))}
+                text = m.group(7).lstrip('\ufeff')
+            else:
+                body['format'] = 'RFC 3164'
+                stamp = _SYSLOG_3164_TIME.match(text)
+                if stamp:
+                    body['timestamp'] = stamp.group(1)
+                    text = text[stamp.end():]
+                tagged = (_SYSLOG_HOST_TAG.match(text) if stamp else None) or _SYSLOG_TAG_ONLY.match(text)
+                if tagged:
+                    groups = tagged.groups()
+                    if len(groups) == 4:
+                        body['hostname'] = groups[0]
+                        groups = groups[1:]
+                    body['program'] = groups[0]
+                    if groups[1]:
+                        body['pid'] = groups[1]
+                    text = groups[2]
+        else:
+            body['format'] = 'no priority'
+        if len(text) > _SYSLOG_MAX_MESSAGE:
+            text, body['truncated'] = text[:_SYSLOG_MAX_MESSAGE], True
+        body['message'] = text
+        self.records.append((pkt.flow, pkt.when, self.event_type, body))
+
+    def finish(self):
+        return self.records
+
+
 # ---------------------------------------------------------------- SSDP
 
 class SSDP:
@@ -1856,7 +1948,7 @@ def _pdus(layer):
 
 # Every protocol with records here, from tshark's fields, in the order their
 # fields follow the base fields in tshark's output.
-PROTOCOLS = (LLMNR, NBNS, DHCPv6, SSDP, S7comm, Telnet, IEC104, BACnet, GOOSE, Browser, LLDP, CDP)
+PROTOCOLS = (LLMNR, NBNS, DHCPv6, Syslog, SSDP, S7comm, Telnet, IEC104, BACnet, GOOSE, Browser, LLDP, CDP)
 # ... and from the structured pass (shark_analyzer._structured_pass): none
 # yet - it's for a protocol whose messages nest, which flat fields can't
 # keep apart (several commands per packet, a token inside a command).
