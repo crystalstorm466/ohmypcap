@@ -980,6 +980,102 @@ class RADIUS:
         return self.records
 
 
+# ---------------------------------------------------------------- STUN
+#
+# How a host behind NAT learns its public address (a Binding: the server
+# answers with the address and port it saw the request come from), and,
+# with TURN, gets a relay. WebRTC calls, VoIP and games use it - and so
+# does malware, to find the address it's reachable at. Its Binding
+# checks repeat every few seconds through a call, so one record per flow
+# and method (Binding, Allocate...) rather than per message: the requests
+# and answers counted, the errors, the public (mapped) addresses the
+# server reported, a TURN relay's address, the client's and server's
+# software, and the user name and realm a TURN login gave (never its
+# password or integrity check). A scanner's Binding Request nobody
+# answered is still a record.
+
+_STUN_METHODS = {0x001: 'Binding', 0x002: 'Shared Secret', 0x003: 'Allocate', 0x004: 'Refresh', 0x006: 'Send',
+                 0x007: 'Data', 0x008: 'CreatePermission', 0x009: 'ChannelBind', 0x00a: 'Connect',
+                 0x00b: 'ConnectionBind', 0x00c: 'ConnectionAttempt'}
+_STUN_REQUEST, _STUN_INDICATION, _STUN_SUCCESS, _STUN_ERROR = 0x00, 0x01, 0x10, 0x11
+# Attributes holding an address, each with its family and port: what it's called in a record
+_STUN_ADDRESSES = {0x0001: 'mapped', 0x0020: 'mapped', 0x8020: 'mapped', 0x0016: 'relayed', 0x0012: 'peer',
+                   0x802b: 'response_origin', 0x802c: 'other', 0x0004: 'response', 0x0005: 'changed',
+                   0x000b: 'reflected_from'}
+_STUN_MAX_LIST = 20
+
+
+class STUN:
+    """STUN and TURN - see the comment above."""
+    event_type = 'stun'
+    app_protos = ('stun',)
+    fields = ('stun.type.class', 'stun.type.method', 'stun.att.type', 'stun.att.family', 'stun.att.ipv4',
+              'stun.att.ipv6', 'stun.att.port', 'stun.att.software', 'stun.att.username', 'stun.att.realm',
+              'stun.att.error.class', 'stun.att.error', 'stun.att.error.reason', 'stun.att.lifetime',
+              'stun.reqduplicate')
+
+    def __init__(self):
+        self.records = []
+        self.flows = {}          # (flow key, method) -> body
+
+    def feed(self, pkt, v):
+        def first(name):
+            return (v[name] or [''])[0]
+        kind, number = _int(first('stun.type.class')), _int(first('stun.type.method'))
+        if kind is None or number is None:
+            return               # TURN ChannelData: relayed bytes, not a message
+        method = _STUN_METHODS.get(number, f'method 0x{number:03x}')
+        key = (pkt.flow.key, method)
+        body = self.flows.get(key)
+        if body is None:
+            body = self.flows[key] = {'method': method}
+            self.records.append((pkt.flow, pkt.when, self.event_type, body))
+        counter = {_STUN_REQUEST: 'requests', _STUN_INDICATION: 'indications', _STUN_SUCCESS: 'successes',
+                   _STUN_ERROR: 'errors'}.get(kind, 'other')
+        if counter == 'requests' and first('stun.reqduplicate'):
+            counter = 'retransmissions'
+        body[counter] = body.get(counter, 0) + 1
+        side = 'client' if kind in (_STUN_REQUEST, _STUN_INDICATION) else 'server'
+        if first('stun.att.software'):
+            body.setdefault(f'{side}_software', first('stun.att.software'))
+        for name, field in (('username', 'stun.att.username'), ('realm', 'stun.att.realm')):
+            if first(field):
+                body.setdefault(name, first(field))
+        if kind == _STUN_ERROR and first('stun.att.error.class'):
+            code = (_int(first('stun.att.error.class')) or 0) * 100 + (_int(first('stun.att.error')) or 0)
+            error = f'{code} {first("stun.att.error.reason")}'.strip()
+            if error not in body.setdefault('error_codes', []):
+                body['error_codes'].append(error)
+        if _int(first('stun.att.lifetime')) is not None:
+            body['lifetime'] = _int(first('stun.att.lifetime'))
+        if kind != _STUN_SUCCESS:
+            return
+        ipv4, ipv6, ports = iter(v['stun.att.ipv4']), iter(v['stun.att.ipv6']), iter(v['stun.att.port'])
+        families = iter(v['stun.att.family'])
+        for att in v['stun.att.type']:
+            name = _STUN_ADDRESSES.get(_int(att))
+            if name is None:
+                continue
+            family, port = _int(next(families, '')), next(ports, '')
+            address = next(ipv6, '') if family == 2 else next(ipv4, '')
+            if not address:
+                continue
+            if family == 2:
+                address = f'[{ipv6_exploded(address)}]'
+            entry = f'{address}:{port}' if port else address
+            addresses = body.setdefault(f'{name}_addresses', [])
+            if entry not in addresses and len(addresses) < _STUN_MAX_LIST:
+                addresses.append(entry)
+
+    def finish(self):
+        for _, _, _, body in self.records:
+            if body.get('successes'):
+                body['result'] = 'success'
+            elif body.get('error_codes'):
+                body['result'] = 'error: ' + body['error_codes'][0]
+        return self.records
+
+
 # ---------------------------------------------------------------- SSDP
 
 class SSDP:
@@ -2514,7 +2610,7 @@ def _pdus(layer):
 
 # Every protocol with records here, from tshark's fields, in the order their
 # fields follow the base fields in tshark's output.
-PROTOCOLS = (LLMNR, NBNS, DHCPv6, Syslog, DTLS, RPC, SOCKS, RADIUS, SSDP, S7comm, Telnet, IEC104, BACnet, GOOSE, Browser, LLDP, CDP)
+PROTOCOLS = (LLMNR, NBNS, DHCPv6, Syslog, DTLS, RPC, SOCKS, RADIUS, STUN, SSDP, S7comm, Telnet, IEC104, BACnet, GOOSE, Browser, LLDP, CDP)
 # ... and from the structured pass (shark_analyzer._structured_pass): none
 # yet - it's for a protocol whose messages nest, which flat fields can't
 # keep apart (several commands per packet, a token inside a command).

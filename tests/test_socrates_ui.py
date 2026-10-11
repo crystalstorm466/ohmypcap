@@ -21824,6 +21824,11 @@ class TestTsharkUI(unittest.TestCase):
         'browser': {'event_type': 'browser', 'browser': {'message': 'Local Master Announcement', 'source_name': 'DC1',
                                                       'destination_name': 'FIXTUREDOM', 'os_version': '10.0',
                                                       'roles': ['workstation', 'domain controller'], 'count': 3}},
+        'stun': {'event_type': 'stun', 'stun': {'method': 'Allocate', 'result': 'success', 'requests': 2, 'successes': 1,
+                                                'errors': 1, 'error_codes': ['401 Unauthorized'],
+                                                'mapped_addresses': ['203.0.113.50:40002'],
+                                                'relayed_addresses': ['192.0.2.30:50000'],
+                                                'client_software': 'fixture-client 1.0', 'username': 'turnuser'}},
         'radius': {'event_type': 'radius', 'radius': {'message': 'Access-Request', 'user': 'alice', 'calling_station': 'AA-BB-CC-DD-EE-01',
                                                     'nas_identifier': 'wlc-1', 'nas_ip': '10.1.0.2', 'result': 'accepted',
                                                     'eap_methods': ['EAP-PEAP'], 'reply_message': 'Welcome, alice',
@@ -21885,6 +21890,7 @@ class TestTsharkUI(unittest.TestCase):
         'iec104': ['Single command', '7', '2001', 'on', 'confirmed, terminated'],
         'browser': ['Local Master Announcement', 'DC1', 'FIXTUREDOM', '10.0', 'workstation, domain controller', '3'],
         'rpc': ['mountd', '3', 'MNT', 'RPC executed successfully', 'client1'],
+        'stun': ['Allocate', 'success', '2', '203.0.113.50:40002', '192.0.2.30:50000', 'fixture-client 1.0', 'turnuser'],
         'radius': ['Access-Request', 'alice', 'AA-BB-CC-DD-EE-01', 'wlc-1', 'accepted', 'EAP-PEAP', 'Welcome, alice'],
         'socks': ['5', 'connect', 'files.example.net', '80', 'succeeded', 'proxyuser', 'http'],
         'dtls': ['dtls.example', 'DTLS 1.2', 'completed', 'C=US, O=Fixture Ltd, CN=dtls.example',
@@ -21972,7 +21978,7 @@ class TestTsharkUI(unittest.TestCase):
         import db
         from tests.jsdom_helper import js_statements
         cols = js_statements("""window.__jsdom_result = Object.fromEntries(
-            ['llmnr', 'nbns', 's7comm', 'ssdp', 'telnet', 'iec104', 'iec104_point', 'bacnet', 'bacnet_property', 'bacnet_device', 'opcua', 'opcua_action', 'goose', 'browser', 'lldp', 'cdp', 'dhcpv6', 'syslog', 'dtls', 'rpc', 'socks', 'radius'].map(t => [t, getColumnsForType(t).slice(6)]));""")
+            ['llmnr', 'nbns', 's7comm', 'ssdp', 'telnet', 'iec104', 'iec104_point', 'bacnet', 'bacnet_property', 'bacnet_device', 'opcua', 'opcua_action', 'goose', 'browser', 'lldp', 'cdp', 'dhcpv6', 'syslog', 'dtls', 'rpc', 'socks', 'radius', 'stun'].map(t => [t, getColumnsForType(t).slice(6)]));""")
         for t, columns in cols.items():
             self.assertEqual(list(db.AGGREGATION_JSON_PATHS[t]), columns, t)
 

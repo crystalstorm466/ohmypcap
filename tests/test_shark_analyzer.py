@@ -774,6 +774,65 @@ class TestRPC(unittest.TestCase):
 
 
 @unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
+class TestSTUN(unittest.TestCase):
+    """tests/protocol_fixtures.write_stun_pcap: one record per flow and
+    method - with what Suricata 8.0.7 logged for the capture
+    (tests/data/stun_fixture.eve.json): flows it gives no protocol, and
+    ET INFO alerts on the Bindings, which don't make them Suricata's."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests.protocol_fixtures import write_stun_pcap
+        cls.tmpdir = tempfile.mkdtemp()
+        cls.pcap = os.path.join(cls.tmpdir, 'stun.pcap')
+        write_stun_pcap(cls.pcap)
+        cls.records = shark_analyzer.run_tshark(cls.pcap)
+        cls.stun = {r['src_port']: r['stun'] for r in cls.records if r['event_type'] == 'stun'}
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    def test_bindings_on_one_flow_are_one_record_with_the_public_address(self):
+        self.assertEqual(self.stun[40001], {'method': 'Binding', 'requests': 2, 'successes': 2, 'result': 'success',
+                                            'mapped_addresses': ['203.0.113.50:40001'],
+                                            'client_software': 'fixture-client 1.0',
+                                            'server_software': 'fixture-stun 2.1'})
+
+    def test_a_turn_allocate_refused_then_made(self):
+        allocate = self.stun[40002]
+        self.assertEqual({k: allocate[k] for k in ('method', 'requests', 'errors', 'successes', 'error_codes', 'result',
+                                                    'relayed_addresses', 'mapped_addresses', 'username', 'realm',
+                                                    'lifetime')},
+                         {'method': 'Allocate', 'requests': 2, 'errors': 1, 'successes': 1,
+                          'error_codes': ['401 Unauthorized'], 'result': 'success',
+                          'relayed_addresses': ['192.0.2.30:50000'], 'mapped_addresses': ['203.0.113.50:40002'],
+                          'username': 'turnuser', 'realm': 'example.org', 'lifetime': 600})
+
+    def test_an_ipv6_mapped_address(self):
+        self.assertEqual(self.stun[40003]['mapped_addresses'], ['[2001:0db8:ffff:0000:0000:0000:0000:0050]:40003'])
+
+    def test_a_scanners_binding_request_nobody_answered(self):
+        self.assertEqual(self.stun[41000], {'method': 'Binding', 'requests': 1})
+
+    def test_flows_match_suricatas_and_the_merge_adds_the_records(self):
+        from scripts.compare_shark_suricata import compare
+        report = compare(_load_eve('stun_fixture.eve.json'), self.records)['flow']
+        self.assertEqual((report['matched'], report['named_by_tshark'], report['differences']), (4, 4, []))
+        d = os.path.join(self.tmpdir, 'analysis')
+        os.makedirs(d)
+        shutil.copy(self.pcap, d)
+        events_db = os.path.join(d, 'events.db')
+        db.create_sqlite_db(events_db, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data',
+                                                    'stun_fixture.eve.json'))
+        self.assertTrue(shark_analyzer.build(d, os.path.join(d, 'stun.pcap')))
+        shark_analyzer.merge(d)
+        counts = db.get_event_types_sqlite(events_db)
+        self.assertEqual(counts.get('stun'), 4)
+        self.assertFalse([t for t in counts if t.startswith('conn_')], 'records, not connection cards')
+
+
+@unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
 class TestRADIUS(unittest.TestCase):
     """tests/protocol_fixtures.write_radius_pcap: one record per login -
     its challenges and final answer - and per accounting message, with

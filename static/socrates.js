@@ -2168,6 +2168,7 @@
                 rpc: '#a1887f',
                 socks: '#ab47bc',
                 radius: '#ef5350',
+                stun: '#66bb6a',
                 opcua_action: '#ff7043',
                 bacnet_property: '#5c6bc0',
                 bacnet_device: '#8d6e63',
@@ -3833,6 +3834,32 @@
             return html;
         }
 
+        // tshark's STUN records (shark_protocols.STUN): one per flow and
+        // method - the public addresses the server reported, a TURN relay.
+        function renderStunDetails(e) {
+            const s = e.stun || {};
+            const count = n => n !== undefined ? n.toLocaleString() : '';
+            let html = htmlSection('STUN Details', COLORS.EVENT.stun);
+            html += htmlRowText('Method', s.method);
+            html += htmlRowText('Result', s.result || 'no answer');
+            html += htmlRow('Mapped Addresses', (s.mapped_addresses || []).map(escapeHtml).join('<br>'), 'mono');
+            html += htmlRow('Relayed Addresses', (s.relayed_addresses || []).map(escapeHtml).join('<br>'), 'mono');
+            html += htmlRow('Peer Addresses', (s.peer_addresses || []).map(escapeHtml).join('<br>'), 'mono');
+            html += htmlRowText('Other Addresses', (s.other_addresses || []).concat(s.response_origin_addresses || []).join(', '), 'mono');
+            html += htmlRowText('Requests', count(s.requests));
+            html += htmlRowText('Retransmissions', count(s.retransmissions));
+            html += htmlRowText('Indications', count(s.indications));
+            html += htmlRowText('Successes', count(s.successes));
+            html += htmlRowText('Errors', count(s.errors));
+            html += htmlRowText('Error Codes', (s.error_codes || []).join(', '));
+            html += htmlRowText('Client Software', s.client_software);
+            html += htmlRowText('Server Software', s.server_software);
+            html += htmlRowText('User', s.username, 'mono');
+            html += htmlRowText('Realm', s.realm);
+            html += htmlRowText('Lifetime', s.lifetime !== undefined ? `${s.lifetime.toLocaleString()} s` : '');
+            return html;
+        }
+
         // tshark's RADIUS records (shark_protocols.RADIUS): one per login -
         // its rounds of challenges and the final answer - and one per
         // accounting message.
@@ -4529,6 +4556,7 @@
             dtls: renderDtlsDetails,
             socks: renderSocksDetails,
             radius: renderRadiusDetails,
+            stun: renderStunDetails,
             rpc: renderRpcDetails,
             lldp: renderNeighborDetails,
             cdp: renderNeighborDetails,
@@ -7205,6 +7233,7 @@
             rpc: 'ONC RPC',
             socks: 'SOCKS',
             radius: 'RADIUS',
+            stun: 'STUN',
             lldp: 'LLDP',
             cdp: 'CDP',
             opcua_action: 'OPC UA Actions',
@@ -7599,6 +7628,8 @@
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Program', 'Version', 'Procedure', 'Reply', 'Machine Name'];
                 case 'dtls':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'SNI / Host', 'Version', 'Handshake', 'Subject', 'JA4'];
+                case 'stun':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Method', 'Result', 'Requests', 'Mapped Address', 'Relayed Address', 'Software', 'User'];
                 case 'radius':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Message', 'User', 'Calling Station', 'NAS', 'Result', 'EAP Method', 'Reply Message'];
                 case 'socks':
@@ -8101,10 +8132,11 @@
                 case 'dtls':
                 case 'rpc':
                 case 'socks':
-                case 'radius': {
+                case 'radius':
+                case 'stun': {
                     const cols = getColumnsForType(etype).slice(6);
                     colSpan = cols.length + 6;
-                    row = rowPrefixCells(e) + cols.map(col => `<td${['Search Target', 'Location', 'User', 'Password', 'Chassis ID', 'Port ID', 'Device ID', 'Management IP', 'Hostname', 'Client MAC', 'Assigned IP', 'Host', 'Program', 'Message', 'SNI / Host', 'Subject', 'JA4', 'Machine Name', 'Destination', 'Destination Port', 'Calling Station'].includes(col) ? ' class="mono"' : ''}>${escapeHtml(extractValue(e, col))}</td>`).join('') + '</tr>';
+                    row = rowPrefixCells(e) + cols.map(col => `<td${['Search Target', 'Location', 'User', 'Password', 'Chassis ID', 'Port ID', 'Device ID', 'Management IP', 'Hostname', 'Client MAC', 'Assigned IP', 'Host', 'Program', 'Message', 'SNI / Host', 'Subject', 'JA4', 'Machine Name', 'Destination', 'Destination Port', 'Calling Station', 'Mapped Address', 'Relayed Address'].includes(col) ? ' class="mono"' : ''}>${escapeHtml(extractValue(e, col))}</td>`).join('') + '</tr>';
                     break;
                 }
                 case 'nbns': {
@@ -10295,7 +10327,10 @@
                     return e.dns?.rrtype || e.dns?.queries?.[0]?.rrtype || '';
                 }
                 // An SSDP response has no method - its status stands in for it.
-                case 'Method': return e.event_type === 'ssdp' ? (e.ssdp?.method || (e.ssdp?.status ? String(e.ssdp.status) : '')) : (e.http?.http_method || '');
+                case 'Method': {
+                    if (e.stun) return e.stun.method || '';
+                    return e.event_type === 'ssdp' ? (e.ssdp?.method || (e.ssdp?.status ? String(e.ssdp.status) : '')) : (e.http?.http_method || '');
+                }
                 case 'Search Target': return e.ssdp?.search_target || e.ssdp?.notification_type || '';
                 case 'Location': return e.ssdp?.location || '';
                 case 'Server': return e.ssdp?.server || '';
@@ -10308,7 +10343,7 @@
                     if (r?.value !== undefined) return String(r.value);
                     return e.opcua_action?.arguments ? e.opcua_action.arguments.join(', ') : '';
                 }
-                case 'Result': return e.iec104?.result || e.bacnet?.result || e.opcua_action?.result || e.dhcpv6?.status || e.radius?.result || '';
+                case 'Result': return e.iec104?.result || e.bacnet?.result || e.opcua_action?.result || e.dhcpv6?.status || e.radius?.result || e.stun?.result || '';
                 case 'Updates': return e.iec104_point?.updates !== undefined ? String(e.iec104_point.updates) : '';
                 case 'Last Value': { const r = e.iec104_point || e.bacnet_property; return r?.last_value !== undefined ? String(r.last_value) : ''; }
                 // BACnet: an action's, a read/notification summary's, a device's
@@ -10339,7 +10374,7 @@
                 case 'Device': return e.bacnet_device?.device !== undefined ? String(e.bacnet_device.device) : '';
                 case 'Vendor': { const d = e.bacnet_device; return d?.vendor || (d?.vendor_id !== undefined ? String(d.vendor_id) : ''); }
                 case 'Announcements': return e.bacnet_device?.announcements !== undefined ? String(e.bacnet_device.announcements) : '';
-                case 'User': return e.telnet?.username || e.opcua?.username || e.socks?.user || e.radius?.user || '';
+                case 'User': return e.telnet?.username || e.opcua?.username || e.socks?.user || e.radius?.user || e.stun?.username || '';
                 // GOOSE: a state change's
                 case 'Control Block': return e.goose?.gocb_ref || '';
                 case 'Dataset': return e.goose?.dataset || '';
@@ -10381,6 +10416,11 @@
                 case 'NAS': return e.radius?.nas_identifier || e.radius?.nas_ip || '';
                 case 'EAP Method': return (e.radius?.eap_methods || [])[0] || '';
                 case 'Reply Message': return e.radius?.reply_message || '';
+                // STUN: a flow's exchanges of one method
+                case 'Requests': return e.stun?.requests !== undefined ? String(e.stun.requests) : '';
+                case 'Mapped Address': return (e.stun?.mapped_addresses || [])[0] || '';
+                case 'Relayed Address': return (e.stun?.relayed_addresses || [])[0] || '';
+                case 'Software': return e.stun?.client_software || e.stun?.server_software || '';
                 case 'Version': {
                     if (e.event_type === 'ntp') return e.ntp?.version !== undefined ? String(e.ntp.version) : '';
                     if (e.dtls) return e.dtls.version || '';

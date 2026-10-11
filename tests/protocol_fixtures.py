@@ -1153,3 +1153,74 @@ def radius_packets():
 
 def write_radius_pcap(path):
     write_pcap(path, radius_packets())
+
+
+# ---------------------------------------------------------------- STUN
+#
+# A client (STUN_CLIENT) asking a STUN server (STUN_SERVER, port 3478) its
+# public address twice; a TURN Allocate refused for want of a login, then
+# made with one (a relayed address, and the mapped one); a Binding over
+# IPv6; and a scanner's Binding Request nobody answered.
+
+STUN_CLIENT, STUN_SERVER, STUN_SCANNER = '10.1.0.34', '192.0.2.30', '198.51.100.12'
+STUN_CLIENT6, STUN_SERVER6 = '2001:db8::34', '2001:db8::30'
+_STUN_COOKIE = 0x2112A442
+
+
+def _stun_attr(kind, value):
+    return struct.pack('!HH', kind, len(value)) + value + b'\x00' * (-len(value) % 4)
+
+
+def _stun_xor_address(address, port, txid):
+    if ':' in address:
+        raw = socket.inet_pton(socket.AF_INET6, address)
+        key = struct.pack('!I', _STUN_COOKIE) + txid
+        return struct.pack('!BBH', 0, 2, port ^ 0x2112) + bytes(a ^ b for a, b in zip(raw, key))
+    raw = struct.unpack('!I', socket.inet_aton(address))[0]
+    return struct.pack('!BBHI', 0, 1, port ^ 0x2112, raw ^ _STUN_COOKIE)
+
+
+def _stun(kind, txid, attrs=()):
+    body = b''.join(_stun_attr(k, v) for k, v in attrs)
+    return struct.pack('!HHI', kind, len(body), _STUN_COOKIE) + txid + body
+
+
+def _stun_error(code, reason):
+    return struct.pack('!HBB', 0, code // 100, code % 100) + reason.encode()
+
+
+def stun_packets():
+    software, server_software = (0x8022, b'fixture-client 1.0'), (0x8022, b'fixture-stun 2.1')
+
+    def exchange(client, server, sport, request, reply=None, udp=_udp_packet):
+        pkts = [udp(client, server, sport, 3478, request)]
+        if reply:
+            pkts.append(udp(server, client, 3478, sport, reply))
+        return pkts
+    pkts = []
+    for n in (1, 2):
+        txid = bytes([n]) * 12
+        pkts += exchange(STUN_CLIENT, STUN_SERVER, 40001, _stun(0x0001, txid, (software,)),
+                         _stun(0x0101, txid, ((0x0020, _stun_xor_address('203.0.113.50', 40001, txid)),
+                                              server_software)))
+    refused, allowed = b'\x03' * 12, b'\x04' * 12
+    transport = (0x0019, bytes([17, 0, 0, 0]))
+    pkts += exchange(STUN_CLIENT, STUN_SERVER, 40002, _stun(0x0003, refused, (transport, software)),
+                     _stun(0x0113, refused, ((0x0009, _stun_error(401, 'Unauthorized')), (0x0014, b'example.org'),
+                                             (0x0015, b'nonce-1'), server_software)))
+    pkts += exchange(STUN_CLIENT, STUN_SERVER, 40002,
+                     _stun(0x0003, allowed, (transport, (0x0006, b'turnuser'), (0x0014, b'example.org'),
+                                             (0x0015, b'nonce-1'), (0x0008, bytes(20)), software)),
+                     _stun(0x0103, allowed, ((0x0016, _stun_xor_address('192.0.2.30', 50000, allowed)),
+                                             (0x0020, _stun_xor_address('203.0.113.50', 40002, allowed)),
+                                             (0x000d, struct.pack('!I', 600)), (0x0008, bytes(20)), server_software)))
+    six = b'\x05' * 12
+    pkts += exchange(STUN_CLIENT6, STUN_SERVER6, 40003, _stun(0x0001, six),
+                     _stun(0x0101, six, ((0x0020, _stun_xor_address('2001:db8:ffff::50', 40003, six)),)),
+                     udp=_udp6_packet)
+    pkts += exchange(STUN_SCANNER, STUN_SERVER, 41000, _stun(0x0001, b'\x06' * 12))
+    return pkts
+
+
+def write_stun_pcap(path):
+    write_pcap(path, stun_packets())

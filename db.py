@@ -1411,6 +1411,15 @@ AGGREGATION_JSON_PATHS = {
         'Reply': ['$.rpc.reply'],
         'Machine Name': ['$.rpc.machine_name'],
     },
+    'stun': {
+        'Method': ['$.stun.method'],
+        'Result': ['$.stun.result'],
+        'Requests': ['$.stun.requests'],
+        'Mapped Address': ['$.stun.mapped_addresses[0]'],
+        'Relayed Address': ['$.stun.relayed_addresses[0]'],
+        'Software': ['$.stun.client_software', '$.stun.server_software'],
+        'User': ['$.stun.username'],
+    },
     'radius': {
         'Message': ['$.radius.message'],
         'User': ['$.radius.user'],

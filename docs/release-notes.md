@@ -50,6 +50,11 @@ each card marked with a dot:
   record for each call and its reply: program, version, procedure and
   result, the AUTH_UNIX machine name and uid; the portmapper's list of
   the RPC services a host runs, and mountd's exports and mounts
+- **STUN** (NAT discovery and TURN relays, for WebRTC, VoIP and games -
+  and malware finding its public address) - a record for each flow's
+  exchanges of one kind: the public address and port the server
+  reported, a TURN relay's address, errors, the client's and server's
+  software and a TURN login's user name
 - **RADIUS** (how Wi-Fi, VPNs and network devices check logins -
   Suricata doesn't parse it) - a record for each login, its rounds of
   challenges and the final accept or reject: the user name (never the
