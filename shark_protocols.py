@@ -1524,6 +1524,117 @@ class IPMI:
         return self.records
 
 
+# ---------------------------------------------------------------- L2TP
+#
+# The Layer 2 Tunneling Protocol (UDP 1701): the tunnel of L2TP/IPsec
+# VPNs - Windows', routers' and phones' built-in VPN - and of ISPs'
+# broadband aggregation. Seen at all, it's outside IPsec: a VPN
+# endpoint answering in the clear, or a scanner looking for one. One
+# record per control connection: the control messages exchanged (the
+# start-control-connection request, reply and connected, calls, the
+# stop), each end's host name, vendor and firmware, how it ended - the
+# result and error codes and message - the calls, and how many data
+# messages crossed it. Scanners name themselves in their requests
+# (masscan, Censys, Xpanse...). The tunnel's authentication (a CHAP
+# challenge and response, from its shared secret) is only noted, never
+# kept, a LAC's proxied PPP login is never read, and neither is the PPP
+# inside the tunnel - the user's own login.
+
+_L2TP_MESSAGES = {1: 'SCCRQ', 2: 'SCCRP', 3: 'SCCCN', 4: 'StopCCN', 6: 'HELLO', 7: 'OCRQ', 8: 'OCRP', 9: 'OCCN',
+                  10: 'ICRQ', 11: 'ICRP', 12: 'ICCN', 14: 'CDN', 15: 'WEN', 16: 'SLI', 20: 'ACK'}
+_L2TP_STOP_RESULTS = {1: 'general request to clear control connection', 2: 'general error',
+                      3: 'control channel already exists', 4: 'requester is not authorized',
+                      5: 'protocol version not supported', 6: 'requester is being shut down',
+                      7: 'finite state machine error'}
+_L2TP_CALL_RESULTS = {1: 'lost carrier', 2: 'general error', 3: 'administrative reasons',
+                      4: 'temporary lack of facilities', 5: 'permanent lack of facilities', 6: 'invalid destination',
+                      7: 'no carrier', 8: 'busy', 9: 'no dial tone', 10: 'not established in time',
+                      11: 'no appropriate framing'}
+_L2TP_ERRORS = {1: 'no control connection exists yet', 2: 'length is wrong', 3: 'value out of range',
+                4: 'insufficient resources', 5: 'invalid session ID', 6: 'generic vendor error', 7: 'try another',
+                8: 'unknown mandatory AVP'}
+_L2TP_CALLS = {7, 10}         # OCRQ, ICRQ
+_L2TP_MAX_LIST = 20
+
+
+class L2TP:
+    """L2TP - see the comment above."""
+    event_type = 'l2tp'
+    app_protos = ('l2tp',)
+    fields = ('l2tp.version', 'l2tp.type', 'l2tp.avp.message_type', 'l2tp.avp.host_name', 'l2tp.avp.vendor_name',
+              'l2tp.avp.firmware_revision', 'l2tp.avp.protocol_version', 'l2tp.avp.protocol_revision',
+              'l2tp.avp.hidden', 'l2tp.avp.chap_challenge', 'l2tp.result_code', 'l2tp.avp.error_code',
+              'l2tp.avp.error_message', 'l2tp.avp.calling_number', 'l2tp.avp.called_number')
+
+    def __init__(self):
+        self.records = []
+        self.flows = {}          # flow key -> body
+
+    def feed(self, pkt, v):
+        def first(name):
+            return (v[name] or [''])[0]
+        body = self.flows.get(pkt.flow.key)
+        if first('l2tp.type') in ('0', 'False'):
+            if body is not None:
+                body['data_messages'] = body.get('data_messages', 0) + 1
+            return               # a data message: the tunnel's PPP, never read
+        number = _int(first('l2tp.avp.message_type'))
+        if number is None:
+            return               # a zero-length acknowledgement
+        if body is None:
+            version = _int(first('l2tp.version'))
+            body = self.flows[pkt.flow.key] = {'version': version} if version else {}
+            self.records.append((pkt.flow, pkt.when, self.event_type, body))
+        message = _L2TP_MESSAGES.get(number, f'message {number}')
+        messages = body.setdefault('messages', [])
+        if message not in messages and len(messages) < _L2TP_MAX_LIST:
+            messages.append(message)
+        if number in (1, 2):     # SCCRQ, SCCRP: each end saying who it is
+            side = 'client' if number == 1 else 'server'
+            for name, field in (('host_name', 'l2tp.avp.host_name'), ('vendor', 'l2tp.avp.vendor_name')):
+                if first(field):
+                    body.setdefault(f'{side}_{name}', first(field))
+            if _int(first('l2tp.avp.firmware_revision')) is not None:     # e.g. Windows' version, 0x0601
+                body.setdefault(f'{side}_firmware', f"0x{_int(first('l2tp.avp.firmware_revision')):04x}")
+            if first('l2tp.avp.protocol_version'):
+                body.setdefault('protocol_version',
+                                f"{first('l2tp.avp.protocol_version')}.{first('l2tp.avp.protocol_revision') or 0}")
+        if first('l2tp.avp.chap_challenge'):
+            body['tunnel_authentication'] = True
+        if any(h in ('1', 'True') for h in v['l2tp.avp.hidden']):
+            body['hidden_avps'] = True
+        if number in _L2TP_CALLS:
+            body['calls'] = body.get('calls', 0) + 1
+            for name, field in (('calling_number', 'l2tp.avp.calling_number'),
+                                ('called_number', 'l2tp.avp.called_number')):
+                if first(field):
+                    body.setdefault(name, first(field))
+        if number in (4, 14) and _int(first('l2tp.result_code')) is not None:
+            code = _int(first('l2tp.result_code'))
+            table = _L2TP_STOP_RESULTS if number == 4 else _L2TP_CALL_RESULTS
+            prefix = 'stop' if number == 4 else 'call'
+            body[f'{prefix}_result'] = table.get(code, f'result {code}')
+            error = _int(first('l2tp.avp.error_code'))
+            if error:
+                body[f'{prefix}_error'] = _L2TP_ERRORS.get(error, f'error {error}')
+            if first('l2tp.avp.error_message'):
+                body[f'{prefix}_message'] = first('l2tp.avp.error_message')
+
+    def finish(self):
+        for _, _, _, body in self.records:
+            messages = body.get('messages', ())
+            if 'SCCCN' in messages:
+                state = 'established'
+            elif 'SCCRP' in messages:
+                state = 'answered'
+            elif 'StopCCN' in messages:
+                state = 'refused'
+            else:
+                state = 'no answer'
+            body['state'] = state
+        return self.records
+
+
 # ---------------------------------------------------------------- SSDP
 
 class SSDP:
@@ -3058,7 +3169,7 @@ def _pdus(layer):
 
 # Every protocol with records here, from tshark's fields, in the order their
 # fields follow the base fields in tshark's output.
-PROTOCOLS = (LLMNR, NBNS, DHCPv6, Syslog, DTLS, RPC, SOCKS, RADIUS, STUN, CoAP, SLP, IPMI, SSDP, S7comm, Telnet, IEC104, BACnet, GOOSE, Browser, LLDP, CDP)
+PROTOCOLS = (LLMNR, NBNS, DHCPv6, Syslog, DTLS, RPC, SOCKS, RADIUS, STUN, CoAP, SLP, IPMI, L2TP, SSDP, S7comm, Telnet, IEC104, BACnet, GOOSE, Browser, LLDP, CDP)
 # ... and from the structured pass (shark_analyzer._structured_pass): none
 # yet - it's for a protocol whose messages nest, which flat fields can't
 # keep apart (several commands per packet, a token inside a command).

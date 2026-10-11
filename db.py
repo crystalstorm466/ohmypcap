@@ -1419,6 +1419,15 @@ AGGREGATION_JSON_PATHS = {
         'Content Format': ['$.coap.response_content_format', '$.coap.request_content_format'],
         'Type': ['$.coap.type'],
     },
+    'l2tp': {
+        'Client Host': ['$.l2tp.client_host_name'],
+        'Vendor': ['$.l2tp.client_vendor'],
+        'Firmware': ['$.l2tp.client_firmware'],
+        'Server Host': ['$.l2tp.server_host_name'],
+        'State': ['$.l2tp.state'],
+        'Result': ['$.l2tp.stop_result', '$.l2tp.call_result'],
+        'Calls': ['$.l2tp.calls'],
+    },
     'ipmi': {
         'Requests': ['$.ipmi.requests[0]'],
         'Result': ['$.ipmi.result'],

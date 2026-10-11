@@ -841,6 +841,69 @@ class TestCoAP(unittest.TestCase):
 
 
 @unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
+class TestL2TP(unittest.TestCase):
+    """tests/protocol_fixtures.write_l2tp_pcap: one record per control
+    connection - with what Suricata 8.0.7 logged for the capture
+    (tests/data/l2tp_fixture.eve.json): flows it gives no protocol."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests.protocol_fixtures import write_l2tp_pcap
+        cls.tmpdir = tempfile.mkdtemp()
+        cls.pcap = os.path.join(cls.tmpdir, 'l2tp.pcap')
+        write_l2tp_pcap(cls.pcap)
+        cls.records = shark_analyzer.run_tshark(cls.pcap)
+        cls.l2tp = {r['src_ip']: r['l2tp'] for r in cls.records if r['event_type'] == 'l2tp'}
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    def test_a_vpn_tunnel_its_call_and_its_end(self):
+        self.assertEqual(self.l2tp['10.1.0.39'], {
+            'version': 2, 'messages': ['SCCRQ', 'SCCRP', 'SCCCN', 'ICRQ', 'ICRP', 'ICCN', 'CDN', 'StopCCN'],
+            'client_host_name': 'WIN-CLIENT7', 'client_vendor': 'Microsoft', 'client_firmware': '0x0601',
+            'protocol_version': '1.0', 'tunnel_authentication': True, 'server_host_name': 'vpn-gw',
+            'server_vendor': 'xl2tpd', 'server_firmware': '0x0680', 'calls': 1, 'calling_number': '10.1.0.39',
+            'data_messages': 2, 'call_result': 'administrative reasons',
+            'stop_result': 'general request to clear control connection', 'state': 'established'})
+
+    def test_the_tunnels_challenge_and_response_are_never_kept(self):
+        from tests.protocol_fixtures import L2TP_CHALLENGE, L2TP_RESPONSE
+        text = json.dumps([r for r in self.records if r['event_type'] == 'l2tp'])
+        for secret in (L2TP_CHALLENGE, L2TP_CHALLENGE[::-1], L2TP_RESPONSE, L2TP_RESPONSE[::-1]):
+            self.assertNotIn(secret.hex(), text)
+            self.assertNotIn(secret.hex(':'), text)
+
+    def test_a_scanner_nobody_answered_and_one_refused(self):
+        self.assertEqual(self.l2tp['198.51.100.16'], {'version': 2, 'messages': ['SCCRQ'],
+                                                      'client_host_name': 'masscan1', 'protocol_version': '1.0',
+                                                      'state': 'no answer'})
+        refused = self.l2tp['198.51.100.17']
+        self.assertEqual({k: refused[k] for k in ('client_host_name', 'client_vendor', 'state', 'stop_result',
+                                                  'stop_error', 'stop_message')},
+                         {'client_host_name': 'l2tpscan', 'client_vendor': 'driftnet', 'state': 'refused',
+                          'stop_result': 'general error', 'stop_error': 'generic vendor error',
+                          'stop_message': 'not allowed'})
+
+    def test_flows_match_suricatas_and_the_merge_adds_the_records(self):
+        from scripts.compare_shark_suricata import compare
+        report = compare(_load_eve('l2tp_fixture.eve.json'), self.records)['flow']
+        self.assertEqual((report['matched'], report['named_by_tshark'], report['differences']), (3, 3, []))
+        d = os.path.join(self.tmpdir, 'analysis')
+        os.makedirs(d)
+        shutil.copy(self.pcap, d)
+        events_db = os.path.join(d, 'events.db')
+        db.create_sqlite_db(events_db, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data',
+                                                    'l2tp_fixture.eve.json'))
+        self.assertTrue(shark_analyzer.build(d, os.path.join(d, 'l2tp.pcap')))
+        shark_analyzer.merge(d)
+        counts = db.get_event_types_sqlite(events_db)
+        self.assertEqual(counts.get('l2tp'), 3)
+        self.assertFalse([t for t in counts if t.startswith('conn_')], 'records, not connection cards')
+
+
+@unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
 class TestIPMI(unittest.TestCase):
     """tests/protocol_fixtures.write_ipmi_pcap: one record per flow to a
     BMC, of what it said before any login - with what Suricata 8.0.7

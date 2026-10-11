@@ -2172,6 +2172,7 @@
                 coap: '#ffa726',
                 slp: '#7e57c2',
                 ipmi: '#ec407a',
+                l2tp: '#26c6da',
                 opcua_action: '#ff7043',
                 bacnet_property: '#5c6bc0',
                 bacnet_device: '#8d6e63',
@@ -3928,6 +3929,33 @@
             return html;
         }
 
+        // tshark's L2TP records (shark_protocols.L2TP): one per control
+        // connection - who each end said it was, and how it ended.
+        function renderL2tpDetails(e) {
+            const l = e.l2tp || {};
+            const count = n => n ? n.toLocaleString() : '';
+            let html = htmlSection('L2TP Details', COLORS.EVENT.l2tp);
+            html += htmlRowText('State', l.state);
+            html += htmlRowText('Messages', (l.messages || []).join(', '));
+            html += htmlRowText('Client Host', l.client_host_name, 'mono');
+            html += htmlRowText('Client Vendor', l.client_vendor);
+            html += htmlRowText('Client Firmware', l.client_firmware, 'mono');
+            html += htmlRowText('Server Host', l.server_host_name, 'mono');
+            html += htmlRowText('Server Vendor', l.server_vendor);
+            html += htmlRowText('Server Firmware', l.server_firmware, 'mono');
+            html += htmlRowText('L2TP Version', l.version !== undefined ? String(l.version) : '');
+            html += htmlRowText('Protocol Version', l.protocol_version);
+            html += htmlRowText('Tunnel Authentication', l.tunnel_authentication ? 'yes' : '');
+            html += htmlRowText('Hidden AVPs', l.hidden_avps ? 'yes' : '');
+            html += htmlRowText('Calls', count(l.calls));
+            html += htmlRowText('Calling Number', l.calling_number, 'mono');
+            html += htmlRowText('Called Number', l.called_number, 'mono');
+            html += htmlRowText('Data Messages', count(l.data_messages));
+            html += htmlRowText('Call Result', [l.call_result, l.call_error, l.call_message].filter(Boolean).join(' - '));
+            html += htmlRowText('Stop Result', [l.stop_result, l.stop_error, l.stop_message].filter(Boolean).join(' - '));
+            return html;
+        }
+
         // tshark's STUN records (shark_protocols.STUN): one per flow and
         // method - the public addresses the server reported, a TURN relay.
         function renderStunDetails(e) {
@@ -4654,6 +4682,7 @@
             coap: renderCoapDetails,
             slp: renderSlpDetails,
             ipmi: renderIpmiDetails,
+            l2tp: renderL2tpDetails,
             rpc: renderRpcDetails,
             lldp: renderNeighborDetails,
             cdp: renderNeighborDetails,
@@ -7334,6 +7363,7 @@
             coap: 'CoAP',
             slp: 'SLP',
             ipmi: 'IPMI',
+            l2tp: 'L2TP',
             lldp: 'LLDP',
             cdp: 'CDP',
             opcua_action: 'OPC UA Actions',
@@ -7730,6 +7760,8 @@
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'SNI / Host', 'Version', 'Handshake', 'Subject', 'JA4'];
                 case 'coap':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Method', 'URI', 'Query', 'Response Code', 'Content Format', 'Type'];
+                case 'l2tp':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Client Host', 'Vendor', 'Firmware', 'Server Host', 'State', 'Result', 'Calls'];
                 case 'ipmi':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Requests', 'Result', 'IPMI Versions', 'Auth Types', 'Privilege', 'Cipher', 'Weaknesses'];
                 case 'slp':
@@ -8242,10 +8274,11 @@
                 case 'stun':
                 case 'coap':
                 case 'slp':
-                case 'ipmi': {
+                case 'ipmi':
+                case 'l2tp': {
                     const cols = getColumnsForType(etype).slice(6);
                     colSpan = cols.length + 6;
-                    row = rowPrefixCells(e) + cols.map(col => `<td${['Search Target', 'Location', 'User', 'Password', 'Chassis ID', 'Port ID', 'Device ID', 'Management IP', 'Hostname', 'Client MAC', 'Assigned IP', 'Host', 'Program', 'Message', 'SNI / Host', 'Subject', 'JA4', 'Machine Name', 'Destination', 'Destination Port', 'Calling Station', 'Mapped Address', 'Relayed Address', 'URI', 'Query', 'Service Type', 'Scopes', 'URL'].includes(col) ? ' class="mono"' : ''}>${escapeHtml(extractValue(e, col))}</td>`).join('') + '</tr>';
+                    row = rowPrefixCells(e) + cols.map(col => `<td${['Search Target', 'Location', 'User', 'Password', 'Chassis ID', 'Port ID', 'Device ID', 'Management IP', 'Hostname', 'Client MAC', 'Assigned IP', 'Host', 'Program', 'Message', 'SNI / Host', 'Subject', 'JA4', 'Machine Name', 'Destination', 'Destination Port', 'Calling Station', 'Mapped Address', 'Relayed Address', 'URI', 'Query', 'Service Type', 'Scopes', 'URL', 'Client Host', 'Firmware', 'Server Host'].includes(col) ? ' class="mono"' : ''}>${escapeHtml(extractValue(e, col))}</td>`).join('') + '</tr>';
                     break;
                 }
                 case 'nbns': {
@@ -10454,7 +10487,7 @@
                     if (r?.value !== undefined) return String(r.value);
                     return e.opcua_action?.arguments ? e.opcua_action.arguments.join(', ') : '';
                 }
-                case 'Result': return e.iec104?.result || e.bacnet?.result || e.opcua_action?.result || e.dhcpv6?.status || e.radius?.result || e.stun?.result || e.ipmi?.result || '';
+                case 'Result': return e.iec104?.result || e.bacnet?.result || e.opcua_action?.result || e.dhcpv6?.status || e.radius?.result || e.stun?.result || e.ipmi?.result || e.l2tp?.stop_result || e.l2tp?.call_result || '';
                 case 'Updates': return e.iec104_point?.updates !== undefined ? String(e.iec104_point.updates) : '';
                 case 'Last Value': { const r = e.iec104_point || e.bacnet_property; return r?.last_value !== undefined ? String(r.last_value) : ''; }
                 // BACnet: an action's, a read/notification summary's, a device's
@@ -10483,7 +10516,11 @@
                 case 'Roles': return (e.browser?.roles || []).join(', ');
                 case 'Errors': return e.bacnet_property?.errors !== undefined ? String(e.bacnet_property.errors) : '';
                 case 'Device': return e.bacnet_device?.device !== undefined ? String(e.bacnet_device.device) : '';
-                case 'Vendor': { const d = e.bacnet_device; return d?.vendor || (d?.vendor_id !== undefined ? String(d.vendor_id) : ''); }
+                case 'Vendor': {
+                    if (e.l2tp) return e.l2tp.client_vendor || '';
+                    const d = e.bacnet_device;
+                    return d?.vendor || (d?.vendor_id !== undefined ? String(d.vendor_id) : '');
+                }
                 case 'Announcements': return e.bacnet_device?.announcements !== undefined ? String(e.bacnet_device.announcements) : '';
                 case 'User': return e.telnet?.username || e.opcua?.username || e.socks?.user || e.radius?.user || e.stun?.username || '';
                 // GOOSE: a state change's
@@ -10550,6 +10587,11 @@
                 case 'Privilege': return e.ipmi?.requested_privilege || '';
                 case 'Cipher': return e.ipmi?.cipher_accepted?.authentication || e.ipmi?.cipher_requested?.authentication || '';
                 case 'Weaknesses': return (e.ipmi?.weaknesses || []).join(', ');
+                // L2TP: who each end of a control connection said it was
+                case 'Client Host': return e.l2tp?.client_host_name || '';
+                case 'Firmware': return e.l2tp?.client_firmware || '';
+                case 'Server Host': return e.l2tp?.server_host_name || '';
+                case 'Calls': return e.l2tp?.calls ? String(e.l2tp.calls) : '';
                 case 'Version': {
                     if (e.event_type === 'ntp') return e.ntp?.version !== undefined ? String(e.ntp.version) : '';
                     if (e.dtls) return e.dtls.version || '';
@@ -10563,7 +10605,7 @@
                 case 'Pkts ←': return String(e.flow?.pkts_toclient || 0);
                 case 'Bytes →': return String(e.flow?.bytes_toserver || 0);
                 case 'Bytes ←': return String(e.flow?.bytes_toclient || 0);
-                case 'State': return e.flow?.state || '';
+                case 'State': return e.l2tp ? e.l2tp.state || '' : e.flow?.state || '';
                 case 'Alerted': return e.flow?.alerted ? 'Yes' : 'No';
                 case 'Filename': {
                     if (e.event_type === 'smb') return e.smb?.filename || '';

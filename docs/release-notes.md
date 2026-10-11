@@ -71,6 +71,14 @@ each card marked with a dot:
   weaknesses those show, such as cipher zero (CVE-2013-4782). The
   password hash a controller sends during an IPMI 2.0 login is never
   read, nor anything inside a session
+- **L2TP** (the tunnel of L2TP/IPsec VPNs, UDP 1701 - Suricata doesn't
+  parse it) - a record for each control connection, which seen at all
+  is outside IPsec: the messages exchanged, each end's host name,
+  vendor and firmware (scanners name themselves - masscan, Censys,
+  Xpanse), how far it got, how it ended (result, error and message),
+  the calls placed and how many data messages crossed it. The tunnel's
+  authentication is only noted, and the PPP inside it - the user's
+  login - is never read
 - **STUN** (NAT discovery and TURN relays, for WebRTC, VoIP and games -
   and malware finding its public address) - a record for each flow's
   exchanges of one kind: the public address and port the server

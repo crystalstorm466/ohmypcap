@@ -21827,6 +21827,10 @@ class TestTsharkUI(unittest.TestCase):
         'coap': {'event_type': 'coap', 'coap': {'method': 'GET', 'type': 'Confirmable', 'uri': '/sensors/temp', 'query': 'unit=c',
                                                 'response_code': '2.05 Content', 'response_content_format': 'application/json',
                                                 'response_length': 10, 'resources': ['/sensors/temp']}},
+        'l2tp': {'event_type': 'l2tp', 'l2tp': {'version': 2, 'messages': ['SCCRQ', 'StopCCN'], 'client_host_name': 'l2tpscan',
+                                                'client_vendor': 'driftnet', 'client_firmware': '0x0123',
+                                                'server_host_name': 'vpn-gw', 'state': 'refused',
+                                                'stop_result': 'general error', 'calls': 2}},
         'ipmi': {'event_type': 'ipmi', 'ipmi': {'requests': ['channel authentication capabilities'], 'result': 'answered',
                                                 'requested_privilege': 'administrator', 'ipmi_versions': ['1.5'],
                                                 'auth_types': ['none', 'MD5'], 'anonymous_login': True,
@@ -21903,6 +21907,7 @@ class TestTsharkUI(unittest.TestCase):
         'browser': ['Local Master Announcement', 'DC1', 'FIXTUREDOM', '10.0', 'workstation, domain controller', '3'],
         'rpc': ['mountd', '3', 'MNT', 'RPC executed successfully', 'client1'],
         'coap': ['GET', '/sensors/temp', 'unit=c', '2.05 Content', 'application/json', 'Confirmable'],
+        'l2tp': ['l2tpscan', 'driftnet', '0x0123', 'vpn-gw', 'refused', 'general error', '2'],
         'ipmi': ['channel authentication capabilities', 'answered', '1.5', 'none, MD5', 'administrator', 'RAKP-none',
                  'anonymous login, no authentication offered'],
         'slp': ['Service Request', 'service:VMwareInfrastructure', 'DEFAULT',
@@ -21995,7 +22000,7 @@ class TestTsharkUI(unittest.TestCase):
         import db
         from tests.jsdom_helper import js_statements
         cols = js_statements("""window.__jsdom_result = Object.fromEntries(
-            ['llmnr', 'nbns', 's7comm', 'ssdp', 'telnet', 'iec104', 'iec104_point', 'bacnet', 'bacnet_property', 'bacnet_device', 'opcua', 'opcua_action', 'goose', 'browser', 'lldp', 'cdp', 'dhcpv6', 'syslog', 'dtls', 'rpc', 'socks', 'radius', 'stun', 'coap', 'slp', 'ipmi'].map(t => [t, getColumnsForType(t).slice(6)]));""")
+            ['llmnr', 'nbns', 's7comm', 'ssdp', 'telnet', 'iec104', 'iec104_point', 'bacnet', 'bacnet_property', 'bacnet_device', 'opcua', 'opcua_action', 'goose', 'browser', 'lldp', 'cdp', 'dhcpv6', 'syslog', 'dtls', 'rpc', 'socks', 'radius', 'stun', 'coap', 'slp', 'ipmi', 'l2tp'].map(t => [t, getColumnsForType(t).slice(6)]));""")
         for t, columns in cols.items():
             self.assertEqual(list(db.AGGREGATION_JSON_PATHS[t]), columns, t)
 

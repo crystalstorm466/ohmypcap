@@ -1411,3 +1411,71 @@ def ipmi_packets():
 
 def write_ipmi_pcap(path):
     write_pcap(path, ipmi_packets())
+
+
+# ---------------------------------------------------------------- L2TP
+
+# A Windows client (L2TP_CLIENT) opening an authenticated control
+# connection to a VPN server (L2TP_SERVER, port 1701), placing a call
+# whose PPP crosses the tunnel, then clearing the call and the tunnel; a
+# scanner (L2TP_SCANNER) nobody answered; and another the server refused.
+# The tunnel's challenge and response, and the PPP, must never be kept.
+L2TP_CLIENT, L2TP_SERVER, L2TP_SCANNER, L2TP_REFUSED = '10.1.0.39', '10.1.0.61', '198.51.100.16', '198.51.100.17'
+L2TP_CHALLENGE = bytes(range(0x30, 0x40))
+L2TP_RESPONSE = bytes(range(0x60, 0x70))
+
+
+def _l2tp_avp(kind, value, hidden=False):
+    if isinstance(value, str):
+        value = value.encode()
+    return struct.pack('!HHH', 0x8000 | (0x4000 if hidden else 0) | (6 + len(value)), 0, kind) + value
+
+
+def _l2tp_control(tunnel, session, ns, nr, avps=()):
+    body = b''.join(avps)
+    return struct.pack('!HHHHHH', 0xc802, 12 + len(body), tunnel, session, ns, nr) + body
+
+
+def l2tp_packets():
+    u16, u32 = (lambda n: struct.pack('!H', n)), (lambda n: struct.pack('!I', n))
+    message = lambda n: _l2tp_avp(0, u16(n))
+
+    def sccrq(host, vendor=None, firmware=None, challenge=None):
+        avps = [message(1), _l2tp_avp(2, b'\x01\x00'), _l2tp_avp(3, u32(3)), _l2tp_avp(4, u32(0)),
+                _l2tp_avp(7, host), _l2tp_avp(9, u16(1)), _l2tp_avp(10, u16(8))]
+        if firmware is not None:
+            avps.append(_l2tp_avp(6, u16(firmware)))
+        if vendor:
+            avps.append(_l2tp_avp(8, vendor))
+        if challenge:
+            avps.append(_l2tp_avp(11, challenge))
+        return _l2tp_control(0, 0, 0, 0, avps)
+
+    def up(message_bytes, sport=1701):
+        return _udp_packet(L2TP_CLIENT, L2TP_SERVER, sport, 1701, message_bytes)
+
+    def down(message_bytes, dst=L2TP_CLIENT, dport=1701):
+        return _udp_packet(L2TP_SERVER, dst, 1701, dport, message_bytes)
+    ppp = lambda tunnel, session: struct.pack('!HHH', 0x0002, tunnel, session) + b'\xff\x03\xc0\x21\x01\x01\x00\x04'
+    return [up(sccrq('WIN-CLIENT7', 'Microsoft', 0x0601, L2TP_CHALLENGE)),
+            down(_l2tp_control(1, 0, 0, 1, [message(2), _l2tp_avp(2, b'\x01\x00'), _l2tp_avp(3, u32(3)),
+                                            _l2tp_avp(7, 'vpn-gw'), _l2tp_avp(8, 'xl2tpd'), _l2tp_avp(6, u16(0x0680)),
+                                            _l2tp_avp(9, u16(7)), _l2tp_avp(11, L2TP_CHALLENGE[::-1]),
+                                            _l2tp_avp(13, L2TP_RESPONSE)])),
+            up(_l2tp_control(7, 0, 1, 1, [message(3), _l2tp_avp(13, L2TP_RESPONSE[::-1])])),
+            down(_l2tp_control(1, 0, 1, 2)),
+            up(_l2tp_control(7, 0, 2, 1, [message(10), _l2tp_avp(14, u16(3)), _l2tp_avp(15, u32(1)),
+                                          _l2tp_avp(18, u32(0)), _l2tp_avp(22, '10.1.0.39')])),
+            down(_l2tp_control(1, 3, 1, 3, [message(11), _l2tp_avp(14, u16(9))])),
+            up(_l2tp_control(7, 9, 3, 2, [message(12), _l2tp_avp(24, u32(100000000)), _l2tp_avp(19, u32(1))])),
+            up(ppp(7, 9)), down(ppp(1, 3)),
+            up(_l2tp_control(7, 9, 4, 2, [message(14), _l2tp_avp(1, u16(3)), _l2tp_avp(14, u16(3))])),
+            up(_l2tp_control(7, 0, 5, 2, [message(4), _l2tp_avp(1, u16(1)), _l2tp_avp(9, u16(1))])),
+            _udp_packet(L2TP_SCANNER, L2TP_SERVER, 40000, 1701, sccrq('masscan1')),
+            _udp_packet(L2TP_REFUSED, L2TP_SERVER, 40001, 1701, sccrq('l2tpscan', 'driftnet', 0x0123)),
+            down(_l2tp_control(0, 0, 0, 1, [message(4), _l2tp_avp(1, u16(2) + u16(6) + b'not allowed'),
+                                            _l2tp_avp(9, u16(2))]), L2TP_REFUSED, 40001)]
+
+
+def write_l2tp_pcap(path):
+    write_pcap(path, l2tp_packets())
