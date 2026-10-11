@@ -2175,6 +2175,7 @@
                 l2tp: '#26c6da',
                 rip: '#9ccc65',
                 tunnel: '#8d6e63',
+                xdmcp: '#78909c',
                 opcua_action: '#ff7043',
                 bacnet_property: '#5c6bc0',
                 bacnet_device: '#8d6e63',
@@ -3998,6 +3999,28 @@
             return html;
         }
 
+        // tshark's XDMCP records (shark_protocols.XDMCP): one per client and
+        // login manager - whether it offered a login screen, and to whom.
+        function renderXdmcpDetails(e) {
+            const x = e.xdmcp || {};
+            let html = htmlSection('XDMCP Details', COLORS.EVENT.xdmcp);
+            html += htmlRowText('Result', x.result);
+            html += htmlRowText('Messages', (x.messages || []).join(', '));
+            html += htmlRowText('Server Host', x.server_host_name, 'mono');
+            html += htmlRowText('Server Status', x.server_status);
+            html += htmlRow('Answers', (x.answers || []).map(escapeHtml).join('<br>'), 'mono');
+            html += htmlRowText('Responders', (x.responders || []).join(', '), 'mono');
+            html += htmlRowText('Status', x.status);
+            html += htmlRowText('Authentication', (x.authentication_names || []).join(', '));
+            html += htmlRowText('Authorization', (x.authorization_names || []).join(', '));
+            html += htmlRowText('Display Number', x.display_number !== undefined ? String(x.display_number) : '');
+            html += htmlRowText('Display Addresses', (x.display_addresses || []).join(', '), 'mono');
+            html += htmlRowText('Manufacturer Display ID', x.manufacturer_display_id, 'mono');
+            html += htmlRowText('Display Class', x.display_class);
+            html += htmlRowText('Version', x.version !== undefined ? String(x.version) : '');
+            return html;
+        }
+
         // tshark's STUN records (shark_protocols.STUN): one per flow and
         // method - the public addresses the server reported, a TURN relay.
         function renderStunDetails(e) {
@@ -4727,6 +4750,7 @@
             l2tp: renderL2tpDetails,
             rip: renderRipDetails,
             tunnel: renderTunnelDetails,
+            xdmcp: renderXdmcpDetails,
             rpc: renderRpcDetails,
             lldp: renderNeighborDetails,
             cdp: renderNeighborDetails,
@@ -7410,6 +7434,7 @@
             l2tp: 'L2TP',
             rip: 'RIP',
             tunnel: 'Tunnel',
+            xdmcp: 'XDMCP',
             lldp: 'LLDP',
             cdp: 'CDP',
             opcua_action: 'OPC UA Actions',
@@ -7806,6 +7831,8 @@
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'SNI / Host', 'Version', 'Handshake', 'Subject', 'JA4'];
                 case 'coap':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Method', 'URI', 'Query', 'Response Code', 'Content Format', 'Type'];
+                case 'xdmcp':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Result', 'Server Host', 'Server Status', 'Messages', 'Display Address', 'Authentication', 'Authorization'];
                 case 'tunnel':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Tunnel Type', 'Tunnel Packets →', 'Tunnel Packets ←', 'Inner Flows', 'Inner Host', 'Returns to Sender'];
                 case 'rip':
@@ -8327,10 +8354,11 @@
                 case 'ipmi':
                 case 'l2tp':
                 case 'rip':
-                case 'tunnel': {
+                case 'tunnel':
+                case 'xdmcp': {
                     const cols = getColumnsForType(etype).slice(6);
                     colSpan = cols.length + 6;
-                    row = rowPrefixCells(e) + cols.map(col => `<td${['Search Target', 'Location', 'User', 'Password', 'Chassis ID', 'Port ID', 'Device ID', 'Management IP', 'Hostname', 'Client MAC', 'Assigned IP', 'Host', 'Program', 'Message', 'SNI / Host', 'Subject', 'JA4', 'Machine Name', 'Destination', 'Destination Port', 'Calling Station', 'Mapped Address', 'Relayed Address', 'URI', 'Query', 'Service Type', 'Scopes', 'URL', 'Client Host', 'Firmware', 'Server Host', 'Route', 'Inner Host'].includes(col) ? ' class="mono"' : ''}>${escapeHtml(extractValue(e, col))}</td>`).join('') + '</tr>';
+                    row = rowPrefixCells(e) + cols.map(col => `<td${['Search Target', 'Location', 'User', 'Password', 'Chassis ID', 'Port ID', 'Device ID', 'Management IP', 'Hostname', 'Client MAC', 'Assigned IP', 'Host', 'Program', 'Message', 'SNI / Host', 'Subject', 'JA4', 'Machine Name', 'Destination', 'Destination Port', 'Calling Station', 'Mapped Address', 'Relayed Address', 'URI', 'Query', 'Service Type', 'Scopes', 'URL', 'Client Host', 'Firmware', 'Server Host', 'Route', 'Inner Host', 'Display Address'].includes(col) ? ' class="mono"' : ''}>${escapeHtml(extractValue(e, col))}</td>`).join('') + '</tr>';
                     break;
                 }
                 case 'nbns': {
@@ -10539,7 +10567,7 @@
                     if (r?.value !== undefined) return String(r.value);
                     return e.opcua_action?.arguments ? e.opcua_action.arguments.join(', ') : '';
                 }
-                case 'Result': return e.iec104?.result || e.bacnet?.result || e.opcua_action?.result || e.dhcpv6?.status || e.radius?.result || e.stun?.result || e.ipmi?.result || e.l2tp?.stop_result || e.l2tp?.call_result || '';
+                case 'Result': return e.iec104?.result || e.bacnet?.result || e.opcua_action?.result || e.dhcpv6?.status || e.radius?.result || e.stun?.result || e.ipmi?.result || e.l2tp?.stop_result || e.l2tp?.call_result || e.xdmcp?.result || '';
                 case 'Updates': return e.iec104_point?.updates !== undefined ? String(e.iec104_point.updates) : '';
                 case 'Last Value': { const r = e.iec104_point || e.bacnet_property; return r?.last_value !== undefined ? String(r.last_value) : ''; }
                 // BACnet: an action's, a read/notification summary's, a device's
@@ -10642,14 +10670,14 @@
                 // L2TP: who each end of a control connection said it was
                 case 'Client Host': return e.l2tp?.client_host_name || '';
                 case 'Firmware': return e.l2tp?.client_firmware || '';
-                case 'Server Host': return e.l2tp?.server_host_name || '';
+                case 'Server Host': return e.l2tp?.server_host_name || e.xdmcp?.server_host_name || '';
                 case 'Calls': return e.l2tp?.calls ? String(e.l2tp.calls) : '';
                 // RIP: the routes a sender announced
                 case 'Route Count': return e.rip?.route_count ? String(e.rip.route_count) : '';
                 case 'Route': return e.rip?.whole_table ? 'whole table' : (e.rip?.routes || e.rip?.requested || [])[0] || '';
                 case 'Withdrawn': return e.rip?.withdrawn ? String(e.rip.withdrawn) : '';
                 case 'Metric Changes': return e.rip?.metric_changes ? String(e.rip.metric_changes) : '';
-                case 'Authentication': return e.rip?.authentication || '';
+                case 'Authentication': return e.rip?.authentication || (e.xdmcp?.authentication_names || []).join(', ');
                 // Tunnels: what carried packets inside others, and what crossed it
                 case 'Tunnel Type': return e.tunnel?.type || '';
                 case 'Tunnel Packets →': return e.tunnel ? String(e.tunnel.packets_toserver || 0) : '';
@@ -10657,6 +10685,11 @@
                 case 'Inner Flows': return e.tunnel?.inner_flows !== undefined ? String(e.tunnel.inner_flows) : '';
                 case 'Inner Host': return (e.tunnel?.inner_hosts || [])[0] || '';
                 case 'Returns to Sender': return e.tunnel?.returns_to_sender ? 'yes' : '';
+                // XDMCP: a login manager's answer, and the display that asked
+                case 'Server Status': return e.xdmcp?.server_status || '';
+                case 'Messages': return (e.xdmcp?.messages || []).join(', ');
+                case 'Display Address': return (e.xdmcp?.display_addresses || [])[0] || '';
+                case 'Authorization': return (e.xdmcp?.authorization_names || []).join(', ');
                 case 'Version': {
                     if (e.event_type === 'ntp') return e.ntp?.version !== undefined ? String(e.ntp.version) : '';
                     if (e.dtls) return e.dtls.version || '';

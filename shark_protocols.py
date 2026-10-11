@@ -1780,6 +1780,116 @@ class RIP:
         return self.records
 
 
+# ---------------------------------------------------------------- XDMCP
+#
+# XDMCP (UDP 177): how an X display finds a Unix login manager - GDM,
+# LightDM, XDM, CDE - and asks it for a graphical login screen, which it
+# then draws over X11 in the clear. A server that answers is offering
+# that login screen to whoever asked; internet scanners look for them,
+# and an old one (CDE) amplifies its answers. One record per client and
+# server: the messages exchanged, the server's host name and status
+# (often its OS and load), whether it was willing, the authentication
+# and authorization methods named, and for a session request, the
+# display, its addresses and its manufacturer's ID - and how it ended
+# (accepted, declined, refused, failed). A broadcast query's answers
+# come straight back from each server, so they join its record, with who
+# answered. Only methods' names are read: never their data - an Accept
+# carries the X authorization cookie that opens the display.
+
+_XDMCP_OPCODES = {1: 'BroadcastQuery', 2: 'Query', 3: 'IndirectQuery', 4: 'ForwardQuery', 5: 'Willing',
+                  6: 'Unwilling', 7: 'Request', 8: 'Accept', 9: 'Decline', 10: 'Manage', 11: 'Refuse',
+                  12: 'Failed', 13: 'KeepAlive', 14: 'Alive'}
+_XDMCP_QUERIES = {1, 2, 3, 4}
+# How far an exchange got, latest last: its result
+_XDMCP_RESULTS = (('Unwilling', 'unwilling'), ('Willing', 'willing'), ('Decline', 'declined'),
+                  ('Refuse', 'refused'), ('Failed', 'failed'), ('Accept', 'accepted'), ('Manage', 'managed'))
+_XDMCP_MAX_LIST = 20
+
+
+def _xdmcp_array8(hexbytes):
+    """An ARRAY8's text from tshark's bytes of it, its length first."""
+    raw = bytes.fromhex(hexbytes.replace(':', ''))[2:] if hexbytes else b''
+    return raw.decode('utf-8', 'replace')
+
+
+class XDMCP:
+    """XDMCP - see the comment above."""
+    event_type = 'xdmcp'
+    app_protos = ('xdmcp',)
+    fields = ('xdmcp.version', 'xdmcp.opcode', 'xdmcp.authentication_name', 'xdmcp.authorization_name',
+              'xdmcp.hostname', 'xdmcp.status', 'xdmcp.display_number', 'xdmcp.display_class',
+              'xdmcp.connection_address_ipv4', 'xdmcp.connection_address_ipv6', 'xdmcp.manufacturer_display_id')
+
+    def __init__(self):
+        self.records = []
+        self.flows = {}          # flow key / ('broadcast', client, client port) -> body
+
+    @staticmethod
+    def _add(body, name, values):
+        listed = body.setdefault(name, [])
+        for value in values:
+            if value and value not in listed and len(listed) < _XDMCP_MAX_LIST:
+                listed.append(value)
+        if not listed:
+            del body[name]
+
+    def feed(self, pkt, v):
+        def first(name):
+            return (v[name] or [''])[0]
+        try:
+            opcode = int(first('xdmcp.opcode'), 0)      # tshark gives it in hex: 0x0002
+        except ValueError:
+            return
+        message = _XDMCP_OPCODES.get(opcode, f'opcode {opcode}')
+        body = self.flows.get(pkt.flow.key)
+        if body is None and opcode not in _XDMCP_QUERIES:
+            body = self.flows.get(('broadcast', pkt.dst, pkt.dport))
+            if body is not None:
+                self._add(body, 'responders', [pkt.src])
+                if opcode in (5, 6):         # each server's answer to the broadcast
+                    answer = f"{pkt.src} {message.lower()}: {first('xdmcp.hostname')}"
+                    if first('xdmcp.status'):
+                        answer += f" ({first('xdmcp.status')})"
+                    self._add(body, 'answers', [answer])
+        if body is None:
+            version = _int(first('xdmcp.version'), None)
+            body = self.flows[pkt.flow.key] = {'version': version} if version is not None else {}
+            self.records.append((pkt.flow, pkt.when, self.event_type, body))
+            if opcode == 1 or _slp_group_address(pkt.dst):
+                self.flows[('broadcast', pkt.src, pkt.sport)] = body
+        self._add(body, 'messages', [message])
+        self._add(body, 'authentication_names', v['xdmcp.authentication_name'])
+        self._add(body, 'authorization_names', v['xdmcp.authorization_name'])
+        if opcode in (5, 6):                 # Willing, Unwilling: who the server is
+            if first('xdmcp.hostname'):
+                body.setdefault('server_host_name', first('xdmcp.hostname'))
+            if first('xdmcp.status'):
+                body.setdefault('server_status', first('xdmcp.status'))
+        elif opcode in (9, 12):              # Decline, Failed: why
+            if first('xdmcp.status'):
+                body['status'] = first('xdmcp.status')
+        elif opcode == 7:                    # Request: the display asking for a session
+            if _int(first('xdmcp.display_number'), None) is not None:
+                body['display_number'] = _int(first('xdmcp.display_number'))
+            self._add(body, 'display_addresses',
+                      v['xdmcp.connection_address_ipv4'] +
+                      [ipv6_exploded(a) for a in v['xdmcp.connection_address_ipv6'] if a])
+            if first('xdmcp.manufacturer_display_id'):
+                body['manufacturer_display_id'] = _xdmcp_array8(first('xdmcp.manufacturer_display_id'))
+        elif opcode == 10 and first('xdmcp.display_class'):      # Manage
+            body['display_class'] = _xdmcp_array8(first('xdmcp.display_class'))
+
+    def finish(self):
+        for _, _, _, body in self.records:
+            messages = body.get('messages', ())
+            result = 'no answer'
+            for message, name in _XDMCP_RESULTS:
+                if message in messages:
+                    result = name
+            body['result'] = result
+        return self.records
+
+
 # ---------------------------------------------------------------- SSDP
 
 class SSDP:
@@ -3314,7 +3424,7 @@ def _pdus(layer):
 
 # Every protocol with records here, from tshark's fields, in the order their
 # fields follow the base fields in tshark's output.
-PROTOCOLS = (LLMNR, NBNS, DHCPv6, Syslog, DTLS, RPC, SOCKS, RADIUS, STUN, CoAP, SLP, IPMI, L2TP, RIP, SSDP, S7comm, Telnet, IEC104, BACnet, GOOSE, Browser, LLDP, CDP)
+PROTOCOLS = (LLMNR, NBNS, DHCPv6, Syslog, DTLS, RPC, SOCKS, RADIUS, STUN, CoAP, SLP, IPMI, L2TP, RIP, XDMCP, SSDP, S7comm, Telnet, IEC104, BACnet, GOOSE, Browser, LLDP, CDP)
 # ... and from the structured pass (shark_analyzer._structured_pass): none
 # yet - it's for a protocol whose messages nest, which flat fields can't
 # keep apart (several commands per packet, a token inside a command).

@@ -97,6 +97,14 @@ each card marked with a dot:
   flow is addressed, named and counted from the inner packet on (an
   IPv6 packet over IPv4 was given its outer IPv4 addresses), and the
   tunnel's outer flow is there too
+- **XDMCP** (X display login managers, UDP 177 - Suricata doesn't parse
+  it) - a record for each client and login manager: whether the server
+  offered its graphical login screen (willing, unwilling, accepted,
+  declined), its host name and status (often its OS and load), the
+  authentication and authorization methods named, and the display that
+  asked for a session; a broadcast query lists every server that
+  answered. Only the methods' names are kept - never the X authorization
+  cookie a session is given
 - **STUN** (NAT discovery and TURN relays, for WebRTC, VoIP and games -
   and malware finding its public address) - a record for each flow's
   exchanges of one kind: the public address and port the server

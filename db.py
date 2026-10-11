@@ -1419,6 +1419,15 @@ AGGREGATION_JSON_PATHS = {
         'Content Format': ['$.coap.response_content_format', '$.coap.request_content_format'],
         'Type': ['$.coap.type'],
     },
+    'xdmcp': {
+        'Result': ['$.xdmcp.result'],
+        'Server Host': ['$.xdmcp.server_host_name'],
+        'Server Status': ['$.xdmcp.server_status'],
+        'Messages': ['$.xdmcp.messages[0]'],
+        'Display Address': ['$.xdmcp.display_addresses[0]'],
+        'Authentication': ['$.xdmcp.authentication_names[0]'],
+        'Authorization': ['$.xdmcp.authorization_names[0]'],
+    },
     'tunnel': {
         'Tunnel Type': ['$.tunnel.type'],
         'Tunnel Packets →': ['$.tunnel.packets_toserver'],

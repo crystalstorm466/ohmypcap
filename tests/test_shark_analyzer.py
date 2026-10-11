@@ -841,6 +841,69 @@ class TestCoAP(unittest.TestCase):
 
 
 @unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
+class TestXDMCP(unittest.TestCase):
+    """tests/protocol_fixtures.write_xdmcp_pcap: one record per client and
+    login manager - with what Suricata 8.0.7 logged for the capture
+    (tests/data/xdmcp_fixture.eve.json): flows it gives no protocol, and
+    an alert on the scanner's query, which doesn't make it Suricata's."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests.protocol_fixtures import write_xdmcp_pcap
+        cls.tmpdir = tempfile.mkdtemp()
+        cls.pcap = os.path.join(cls.tmpdir, 'xdmcp.pcap')
+        write_xdmcp_pcap(cls.pcap)
+        cls.records = shark_analyzer.run_tshark(cls.pcap)
+        cls.xdmcp = {r['src_port']: r['xdmcp'] for r in cls.records if r['event_type'] == 'xdmcp'}
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    def test_a_display_given_a_login_screen(self):
+        self.assertEqual(self.xdmcp[40177], {
+            'version': 1, 'messages': ['Query', 'Willing', 'Request', 'Accept', 'Manage'],
+            'server_host_name': 'labsrv', 'server_status': 'Linux 5.15.0-91-generic, load: 0.08',
+            'authorization_names': ['MIT-MAGIC-COOKIE-1'], 'display_number': 0, 'display_addresses': ['10.1.0.40'],
+            'manufacturer_display_id': 'Linux 1', 'display_class': 'MIT-unspecified', 'result': 'managed'})
+
+    def test_the_authorization_cookie_is_never_kept(self):
+        from tests.protocol_fixtures import XDMCP_COOKIE
+        text = json.dumps([r for r in self.records if r['event_type'] == 'xdmcp'])
+        self.assertNotIn(XDMCP_COOKIE.hex(), text)
+        self.assertNotIn(XDMCP_COOKIE.hex(':'), text)
+
+    def test_a_broadcast_answered_by_two_servers(self):
+        broadcast = self.xdmcp[40178]
+        self.assertEqual((broadcast['responders'], broadcast['result']), (['10.1.0.62', '10.1.0.63'], 'willing'))
+        self.assertEqual(broadcast['answers'], ['10.1.0.62 willing: labsrv (Linux 5.15.0-91-generic, load: 0.08)',
+                                                '10.1.0.63 unwilling: busybox (Too many sessions)'])
+
+    def test_a_scanner_nobody_answered_and_a_declined_request(self):
+        self.assertEqual(self.xdmcp[41000], {'version': 1, 'messages': ['Query'], 'result': 'no answer'})
+        declined = self.xdmcp[41001]
+        self.assertEqual({k: declined[k] for k in ('authentication_names', 'status', 'result')},
+                         {'authentication_names': ['XDM-AUTHENTICATION-1'], 'status': 'Authentication failed',
+                          'result': 'declined'})
+
+    def test_flows_match_suricatas_and_the_merge_adds_the_records(self):
+        from scripts.compare_shark_suricata import compare
+        report = compare(_load_eve('xdmcp_fixture.eve.json'), self.records)['flow']
+        self.assertEqual((report['matched'], report['differences']), (6, []))
+        d = os.path.join(self.tmpdir, 'analysis')
+        os.makedirs(d)
+        shutil.copy(self.pcap, d)
+        events_db = os.path.join(d, 'events.db')
+        db.create_sqlite_db(events_db, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data',
+                                                    'xdmcp_fixture.eve.json'))
+        self.assertTrue(shark_analyzer.build(d, os.path.join(d, 'xdmcp.pcap')))
+        shark_analyzer.merge(d)
+        counts = db.get_event_types_sqlite(events_db)
+        self.assertEqual(counts.get('xdmcp'), 4)
+        self.assertFalse([t for t in counts if t.startswith('conn_')], 'records, not connection cards')
+
+
+@unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
 class TestTunnels(unittest.TestCase):
     """tests/protocol_fixtures.write_tunnel_pcap: one record per tunnel,
     and its packets' flows as Suricata 8.0.7 logged them

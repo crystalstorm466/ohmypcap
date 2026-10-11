@@ -1561,3 +1561,63 @@ def tunnel_packets():
 
 def write_tunnel_pcap(path):
     write_pcap(path, tunnel_packets())
+
+
+# ---------------------------------------------------------------- XDMCP
+
+# A client (XDMCP_CLIENT) asking a login manager (XDMCP_SERVER, port
+# 177), which is willing, then requesting a session - the X authorization
+# cookie in the Accept must never be kept; a scanner (XDMCP_SCANNER) nobody
+# answered; a broadcast query answered by one server willing and one not;
+# and a request declined.
+XDMCP_CLIENT, XDMCP_SERVER, XDMCP_BUSY, XDMCP_SCANNER = '10.1.0.40', '10.1.0.62', '10.1.0.63', '198.51.100.21'
+XDMCP_PROBER, XDMCP_BROADCAST = '198.51.100.22', '10.1.0.255'
+XDMCP_COOKIE = bytes(range(0xa0, 0xb0))
+
+
+def _array8(value):
+    value = value.encode() if isinstance(value, str) else value
+    return struct.pack('!H', len(value)) + value
+
+
+def _arrays8(values):
+    return bytes([len(values)]) + b''.join(_array8(v) for v in values)
+
+
+def _xdmcp(opcode, body):
+    return struct.pack('!HHH', 1, opcode, len(body)) + body
+
+
+def xdmcp_packets():
+    query = lambda names=(): _xdmcp(2, _arrays8(names))
+    willing = lambda host, status: _xdmcp(5, _array8('') + _array8(host) + _array8(status))
+    request = lambda auth: _xdmcp(7, struct.pack('!H', 0) + b'\x01' + struct.pack('!H', 0) +
+                                  _arrays8([socket.inet_aton(XDMCP_CLIENT)]) + _array8(auth) + _array8('') +
+                                  _arrays8(['MIT-MAGIC-COOKIE-1']) + _array8('Linux 1'))
+    accept = _xdmcp(8, struct.pack('!I', 0x1234) + _array8('') + _array8('') + _array8('MIT-MAGIC-COOKIE-1') +
+                    _array8(XDMCP_COOKIE))
+    manage = _xdmcp(10, struct.pack('!IH', 0x1234, 0) + _array8('MIT-unspecified'))
+    decline = _xdmcp(9, _array8('Authentication failed') + _array8('XDM-AUTHENTICATION-1') + _array8(''))
+
+    def ask(src, sport, dst, message):
+        return _udp_packet(src, dst, sport, 177, message)
+
+    def answer(src, dst, dport, message):
+        return _udp_packet(src, dst, 177, dport, message)
+    return [ask(XDMCP_CLIENT, 40177, XDMCP_SERVER, query()),
+            answer(XDMCP_SERVER, XDMCP_CLIENT, 40177, willing('labsrv', 'Linux 5.15.0-91-generic, load: 0.08')),
+            ask(XDMCP_CLIENT, 40177, XDMCP_SERVER, request('')),
+            answer(XDMCP_SERVER, XDMCP_CLIENT, 40177, accept),
+            ask(XDMCP_CLIENT, 40177, XDMCP_SERVER, manage),
+            ask(XDMCP_SCANNER, 41000, XDMCP_SERVER, query()),
+            ask(XDMCP_CLIENT, 40178, XDMCP_BROADCAST, _xdmcp(1, _arrays8([]))),
+            answer(XDMCP_SERVER, XDMCP_CLIENT, 40178, willing('labsrv', 'Linux 5.15.0-91-generic, load: 0.08')),
+            answer(XDMCP_BUSY, XDMCP_CLIENT, 40178, _xdmcp(6, _array8('busybox') + _array8('Too many sessions'))),
+            ask(XDMCP_PROBER, 41001, XDMCP_SERVER, query(['XDM-AUTHENTICATION-1'])),
+            answer(XDMCP_SERVER, XDMCP_PROBER, 41001, willing('labsrv', 'Willing to manage')),
+            ask(XDMCP_PROBER, 41001, XDMCP_SERVER, request('XDM-AUTHENTICATION-1')),
+            answer(XDMCP_SERVER, XDMCP_PROBER, 41001, decline)]
+
+
+def write_xdmcp_pcap(path):
+    write_pcap(path, xdmcp_packets())

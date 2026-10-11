@@ -21827,6 +21827,11 @@ class TestTsharkUI(unittest.TestCase):
         'coap': {'event_type': 'coap', 'coap': {'method': 'GET', 'type': 'Confirmable', 'uri': '/sensors/temp', 'query': 'unit=c',
                                                 'response_code': '2.05 Content', 'response_content_format': 'application/json',
                                                 'response_length': 10, 'resources': ['/sensors/temp']}},
+        'xdmcp': {'event_type': 'xdmcp', 'xdmcp': {'version': 1, 'messages': ['Query', 'Willing'], 'result': 'willing',
+                                                  'server_host_name': 'labsrv', 'server_status': 'Linux, load: 0.08',
+                                                  'display_addresses': ['10.1.0.40'],
+                                                  'authentication_names': ['XDM-AUTHENTICATION-1'],
+                                                  'authorization_names': ['MIT-MAGIC-COOKIE-1']}},
         'tunnel': {'event_type': 'tunnel', 'tunnel': {'type': 'IP-in-IP', 'packets_toserver': 1, 'packets_toclient': 0,
                                                       'inner_flows': 1, 'inner_hosts': ['10.1.0.1', '198.51.100.19'],
                                                       'returns_to_sender': True}},
@@ -21913,6 +21918,8 @@ class TestTsharkUI(unittest.TestCase):
         'browser': ['Local Master Announcement', 'DC1', 'FIXTUREDOM', '10.0', 'workstation, domain controller', '3'],
         'rpc': ['mountd', '3', 'MNT', 'RPC executed successfully', 'client1'],
         'coap': ['GET', '/sensors/temp', 'unit=c', '2.05 Content', 'application/json', 'Confirmable'],
+        'xdmcp': ['willing', 'labsrv', 'Linux, load: 0.08', 'Query, Willing', '10.1.0.40', 'XDM-AUTHENTICATION-1',
+                  'MIT-MAGIC-COOKIE-1'],
         'tunnel': ['IP-in-IP', '1', '0', '1', '10.1.0.1', 'yes'],
         'rip': ['response', 'RIPv2', '3', '10.2.0.0/16 metric 1', '1', '1', 'simple password'],
         'l2tp': ['l2tpscan', 'driftnet', '0x0123', 'vpn-gw', 'refused', 'general error', '2'],
@@ -22008,7 +22015,7 @@ class TestTsharkUI(unittest.TestCase):
         import db
         from tests.jsdom_helper import js_statements
         cols = js_statements("""window.__jsdom_result = Object.fromEntries(
-            ['llmnr', 'nbns', 's7comm', 'ssdp', 'telnet', 'iec104', 'iec104_point', 'bacnet', 'bacnet_property', 'bacnet_device', 'opcua', 'opcua_action', 'goose', 'browser', 'lldp', 'cdp', 'dhcpv6', 'syslog', 'dtls', 'rpc', 'socks', 'radius', 'stun', 'coap', 'slp', 'ipmi', 'l2tp', 'rip', 'tunnel'].map(t => [t, getColumnsForType(t).slice(6)]));""")
+            ['llmnr', 'nbns', 's7comm', 'ssdp', 'telnet', 'iec104', 'iec104_point', 'bacnet', 'bacnet_property', 'bacnet_device', 'opcua', 'opcua_action', 'goose', 'browser', 'lldp', 'cdp', 'dhcpv6', 'syslog', 'dtls', 'rpc', 'socks', 'radius', 'stun', 'coap', 'slp', 'ipmi', 'l2tp', 'rip', 'tunnel', 'xdmcp'].map(t => [t, getColumnsForType(t).slice(6)]));""")
         for t, columns in cols.items():
             self.assertEqual(list(db.AGGREGATION_JSON_PATHS[t]), columns, t)
 
