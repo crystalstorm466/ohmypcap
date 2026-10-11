@@ -2169,6 +2169,7 @@
                 socks: '#ab47bc',
                 radius: '#ef5350',
                 stun: '#66bb6a',
+                coap: '#ffa726',
                 opcua_action: '#ff7043',
                 bacnet_property: '#5c6bc0',
                 bacnet_device: '#8d6e63',
@@ -3834,6 +3835,31 @@
             return html;
         }
 
+        // tshark's CoAP records (shark_protocols.CoAP): one per request and
+        // its response, like Suricata's http records.
+        function renderCoapDetails(e) {
+            const c = e.coap || {};
+            const size = n => n !== undefined ? `${n.toLocaleString()} bytes` : '';
+            let html = htmlSection('CoAP Details', COLORS.EVENT.coap);
+            html += htmlRowText('Method', c.method);
+            html += htmlRowText('URI', c.uri, 'mono');
+            html += htmlRowText('Query', c.query, 'mono');
+            html += htmlRowText('Host', c.host, 'mono');
+            html += htmlRowText('Type', c.type);
+            html += htmlRowText('Response Code', c.response_code || 'no response');
+            html += htmlRowText('Response Time', c.response_time !== undefined ? `${c.response_time} s` : '');
+            html += htmlRowText('Accept', c.accept);
+            html += htmlRowText('Request Content Format', c.request_content_format);
+            html += htmlRowText('Request Size', size(c.request_length));
+            html += htmlRowText('Response Content Format', c.response_content_format);
+            html += htmlRowText('Response Size', size(c.response_length));
+            html += htmlRow('Resources', (c.resources || []).map(escapeHtml).join('<br>'), 'mono');
+            html += htmlRowText('Observe', c.observe ? 'yes' : '');
+            html += htmlRowText('Responses', c.responses > 1 ? c.responses.toLocaleString() : '');
+            html += htmlRowText('Retransmissions', c.retransmissions ? c.retransmissions.toLocaleString() : '');
+            return html;
+        }
+
         // tshark's STUN records (shark_protocols.STUN): one per flow and
         // method - the public addresses the server reported, a TURN relay.
         function renderStunDetails(e) {
@@ -4557,6 +4583,7 @@
             socks: renderSocksDetails,
             radius: renderRadiusDetails,
             stun: renderStunDetails,
+            coap: renderCoapDetails,
             rpc: renderRpcDetails,
             lldp: renderNeighborDetails,
             cdp: renderNeighborDetails,
@@ -7234,6 +7261,7 @@
             socks: 'SOCKS',
             radius: 'RADIUS',
             stun: 'STUN',
+            coap: 'CoAP',
             lldp: 'LLDP',
             cdp: 'CDP',
             opcua_action: 'OPC UA Actions',
@@ -7628,6 +7656,8 @@
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Program', 'Version', 'Procedure', 'Reply', 'Machine Name'];
                 case 'dtls':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'SNI / Host', 'Version', 'Handshake', 'Subject', 'JA4'];
+                case 'coap':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Method', 'URI', 'Query', 'Response Code', 'Content Format', 'Type'];
                 case 'stun':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Method', 'Result', 'Requests', 'Mapped Address', 'Relayed Address', 'Software', 'User'];
                 case 'radius':
@@ -8133,10 +8163,11 @@
                 case 'rpc':
                 case 'socks':
                 case 'radius':
-                case 'stun': {
+                case 'stun':
+                case 'coap': {
                     const cols = getColumnsForType(etype).slice(6);
                     colSpan = cols.length + 6;
-                    row = rowPrefixCells(e) + cols.map(col => `<td${['Search Target', 'Location', 'User', 'Password', 'Chassis ID', 'Port ID', 'Device ID', 'Management IP', 'Hostname', 'Client MAC', 'Assigned IP', 'Host', 'Program', 'Message', 'SNI / Host', 'Subject', 'JA4', 'Machine Name', 'Destination', 'Destination Port', 'Calling Station', 'Mapped Address', 'Relayed Address'].includes(col) ? ' class="mono"' : ''}>${escapeHtml(extractValue(e, col))}</td>`).join('') + '</tr>';
+                    row = rowPrefixCells(e) + cols.map(col => `<td${['Search Target', 'Location', 'User', 'Password', 'Chassis ID', 'Port ID', 'Device ID', 'Management IP', 'Hostname', 'Client MAC', 'Assigned IP', 'Host', 'Program', 'Message', 'SNI / Host', 'Subject', 'JA4', 'Machine Name', 'Destination', 'Destination Port', 'Calling Station', 'Mapped Address', 'Relayed Address', 'URI', 'Query'].includes(col) ? ' class="mono"' : ''}>${escapeHtml(extractValue(e, col))}</td>`).join('') + '</tr>';
                     break;
                 }
                 case 'nbns': {
@@ -10315,6 +10346,7 @@
                 case 'Severity': return e.syslog ? e.syslog.severity || '' : 'Sev ' + (e.alert?.severity || 0);
                 case 'Ruleset': return classifyRuleset(e.alert?.signature_id);
                 case 'Type': {
+                    if (e.coap) return e.coap.type || '';
                     if (e.event_type === 'iec104_point') return e.iec104_point?.type || '';
                     if (e.event_type === 'dnp3') return e.dnp3?.type || '';
                     if (e.event_type === 's7comm') return e.s7comm?.type || '';
@@ -10329,6 +10361,7 @@
                 // An SSDP response has no method - its status stands in for it.
                 case 'Method': {
                     if (e.stun) return e.stun.method || '';
+                    if (e.coap) return e.coap.method || '';
                     return e.event_type === 'ssdp' ? (e.ssdp?.method || (e.ssdp?.status ? String(e.ssdp.status) : '')) : (e.http?.http_method || '');
                 }
                 case 'Search Target': return e.ssdp?.search_target || e.ssdp?.notification_type || '';
@@ -10421,6 +10454,9 @@
                 case 'Mapped Address': return (e.stun?.mapped_addresses || [])[0] || '';
                 case 'Relayed Address': return (e.stun?.relayed_addresses || [])[0] || '';
                 case 'Software': return e.stun?.client_software || e.stun?.server_software || '';
+                // CoAP: a request's and its response's
+                case 'Response Code': return e.coap?.response_code || '';
+                case 'Content Format': return e.coap?.response_content_format || e.coap?.request_content_format || '';
                 case 'Version': {
                     if (e.event_type === 'ntp') return e.ntp?.version !== undefined ? String(e.ntp.version) : '';
                     if (e.dtls) return e.dtls.version || '';
@@ -10481,6 +10517,7 @@
                 case 'Source Addr': return e.dnp3?.src !== undefined ? String(e.dnp3.src) : (e.dnp3?.request?.src !== undefined ? String(e.dnp3.request.src) : '');
                 case 'Dest Addr': return e.dnp3?.dst !== undefined ? String(e.dnp3.dst) : (e.dnp3?.request?.dst !== undefined ? String(e.dnp3.request.dst) : '');
                 case 'Query': {
+                    if (e.coap) return e.coap.query || '';
                     if (e.event_type === 'pgsql') return e.pgsql?.request?.simple_query || '';
                     if (e.event_type === 'mdns') return e.mdns?.queries?.[0]?.rrname || '';
                     if (e.event_type === 'llmnr') return e.llmnr?.queries?.[0]?.rrname || '';
@@ -10550,7 +10587,7 @@
                 case 'Realm': return e.krb5?.realm || '';
                 case 'Error Code': return e.krb5?.error_code || '';
                 case 'SIP Method': return e.sip?.method || '';
-                case 'URI': return e.sip?.uri || '';
+                case 'URI': return e.sip?.uri || e.coap?.uri || '';
                 case 'SIP Code': return String(e.sip?.code || '');
                 case 'Reason': return e.sip?.reason || '';
                 case 'SNMP Version': return String(e.snmp?.version || '');

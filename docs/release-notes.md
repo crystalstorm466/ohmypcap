@@ -50,6 +50,10 @@ each card marked with a dot:
   record for each call and its reply: program, version, procedure and
   result, the AUTH_UNIX machine name and uid; the portmapper's list of
   the RPC services a host runs, and mountd's exports and mounts
+- **CoAP** (HTTP for IoT devices, over UDP 5683) - a record for each
+  request and its response, like Suricata's HTTP records: method, URI,
+  response code and content format - and, for a device's discovery
+  (`/.well-known/core`), the resources it listed
 - **STUN** (NAT discovery and TURN relays, for WebRTC, VoIP and games -
   and malware finding its public address) - a record for each flow's
   exchanges of one kind: the public address and port the server

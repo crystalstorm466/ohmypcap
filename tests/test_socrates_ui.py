@@ -21659,8 +21659,8 @@ class TestTsharkUI(unittest.TestCase):
         result = js_statements("""
             currentMd5 = 'abc123';
             isLogAnalysisMode = false; isEmailAnalysisMode = false;
-            eventTypes = sortEventTypes(['tls', 'conn__probed', 'conn_coap', 'alert', 'conn_bfd', 'http']);
-            eventStats = {tls: 2, conn__probed: 1640, conn_coap: 73, alert: 1, conn_bfd: 10, http: 5};
+            eventTypes = sortEventTypes(['tls', 'conn__probed', 'conn_xdmcp', 'alert', 'conn_bfd', 'http']);
+            eventStats = {tls: 2, conn__probed: 1640, conn_xdmcp: 73, alert: 1, conn_bfd: 10, http: 5};
             buildStats();
             var grid = document.getElementById('statsGrid');
             var order = [...grid.children].map(el => el.classList.contains('stats-grid-heading') ? 'HEADING'
@@ -21676,7 +21676,7 @@ class TestTsharkUI(unittest.TestCase):
             window.__jsdom_result = {order: order, column: column, heading: heading, probedTitle: probedTitle,
                                      allTitle: all.title, allTitleWithoutConnections: grid.querySelector('[data-section="section-all"]').title};
         """)
-        self.assertEqual(result['order'], ['Network Alerts', 'HTTP', 'TLS', 'All Events', 'HEADING', 'BFD', 'COAP', 'Probed Only'])
+        self.assertEqual(result['order'], ['Network Alerts', 'HTTP', 'TLS', 'All Events', 'HEADING', 'BFD', 'XDMCP', 'Probed Only'])
         self.assertEqual(result['column'], ['Network Alerts', 'All Events', 'BFD'],
                          "BFD heads the first column of its own rows, under All Events' column")
         self.assertIn('Connections tshark identified', result['heading'])
@@ -21824,6 +21824,9 @@ class TestTsharkUI(unittest.TestCase):
         'browser': {'event_type': 'browser', 'browser': {'message': 'Local Master Announcement', 'source_name': 'DC1',
                                                       'destination_name': 'FIXTUREDOM', 'os_version': '10.0',
                                                       'roles': ['workstation', 'domain controller'], 'count': 3}},
+        'coap': {'event_type': 'coap', 'coap': {'method': 'GET', 'type': 'Confirmable', 'uri': '/sensors/temp', 'query': 'unit=c',
+                                                'response_code': '2.05 Content', 'response_content_format': 'application/json',
+                                                'response_length': 10, 'resources': ['/sensors/temp']}},
         'stun': {'event_type': 'stun', 'stun': {'method': 'Allocate', 'result': 'success', 'requests': 2, 'successes': 1,
                                                 'errors': 1, 'error_codes': ['401 Unauthorized'],
                                                 'mapped_addresses': ['203.0.113.50:40002'],
@@ -21890,6 +21893,7 @@ class TestTsharkUI(unittest.TestCase):
         'iec104': ['Single command', '7', '2001', 'on', 'confirmed, terminated'],
         'browser': ['Local Master Announcement', 'DC1', 'FIXTUREDOM', '10.0', 'workstation, domain controller', '3'],
         'rpc': ['mountd', '3', 'MNT', 'RPC executed successfully', 'client1'],
+        'coap': ['GET', '/sensors/temp', 'unit=c', '2.05 Content', 'application/json', 'Confirmable'],
         'stun': ['Allocate', 'success', '2', '203.0.113.50:40002', '192.0.2.30:50000', 'fixture-client 1.0', 'turnuser'],
         'radius': ['Access-Request', 'alice', 'AA-BB-CC-DD-EE-01', 'wlc-1', 'accepted', 'EAP-PEAP', 'Welcome, alice'],
         'socks': ['5', 'connect', 'files.example.net', '80', 'succeeded', 'proxyuser', 'http'],
@@ -21978,7 +21982,7 @@ class TestTsharkUI(unittest.TestCase):
         import db
         from tests.jsdom_helper import js_statements
         cols = js_statements("""window.__jsdom_result = Object.fromEntries(
-            ['llmnr', 'nbns', 's7comm', 'ssdp', 'telnet', 'iec104', 'iec104_point', 'bacnet', 'bacnet_property', 'bacnet_device', 'opcua', 'opcua_action', 'goose', 'browser', 'lldp', 'cdp', 'dhcpv6', 'syslog', 'dtls', 'rpc', 'socks', 'radius', 'stun'].map(t => [t, getColumnsForType(t).slice(6)]));""")
+            ['llmnr', 'nbns', 's7comm', 'ssdp', 'telnet', 'iec104', 'iec104_point', 'bacnet', 'bacnet_property', 'bacnet_device', 'opcua', 'opcua_action', 'goose', 'browser', 'lldp', 'cdp', 'dhcpv6', 'syslog', 'dtls', 'rpc', 'socks', 'radius', 'stun', 'coap'].map(t => [t, getColumnsForType(t).slice(6)]));""")
         for t, columns in cols.items():
             self.assertEqual(list(db.AGGREGATION_JSON_PATHS[t]), columns, t)
 

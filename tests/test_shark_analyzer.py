@@ -774,6 +774,73 @@ class TestRPC(unittest.TestCase):
 
 
 @unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
+class TestCoAP(unittest.TestCase):
+    """tests/protocol_fixtures.write_coap_pcap: one record per request and
+    its response - with what Suricata 8.0.7 logged for the capture
+    (tests/data/coap_fixture.eve.json): flows it gives no protocol."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests.protocol_fixtures import write_coap_pcap
+        cls.tmpdir = tempfile.mkdtemp()
+        cls.pcap = os.path.join(cls.tmpdir, 'coap.pcap')
+        write_coap_pcap(cls.pcap)
+        cls.records = shark_analyzer.run_tshark(cls.pcap)
+        cls.coap = [r['coap'] for r in cls.records if r['event_type'] == 'coap']
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    def test_discovery_lists_the_devices_resources(self):
+        self.assertEqual(self.coap[0], {'method': 'GET', 'type': 'Confirmable', 'uri': '/.well-known/core',
+                                        'accept': 'application/link-format', 'responses': 1,
+                                        'response_code': '2.05 Content', 'response_time': 1.0,
+                                        'response_content_format': 'application/link-format', 'response_length': 86,
+                                        'resources': ['/sensors/temp', '/sensors/light', '/config']})
+
+    def test_a_read_sent_twice_a_refused_put_and_a_separate_404(self):
+        read, put, missing = self.coap[1:4]
+        self.assertEqual({k: read[k] for k in ('uri', 'query', 'retransmissions', 'response_code', 'response_time',
+                                                'response_content_format')},
+                         {'uri': '/sensors/temp', 'query': 'unit=c', 'retransmissions': 1,
+                          'response_code': '2.05 Content', 'response_time': 2.0,
+                          'response_content_format': 'application/json'})
+        self.assertEqual({k: put[k] for k in ('method', 'request_content_format', 'request_length', 'response_code')},
+                         {'method': 'PUT', 'request_content_format': 'application/cbor', 'request_length': 3,
+                          'response_code': '4.01 Unauthorized'})
+        self.assertEqual((missing['type'], missing['response_code']), ('Non-Confirmable', '4.04 Not Found'),
+                         'matched by its token, its own message ID being different')
+
+    def test_a_ping_and_a_scanners_unanswered_discovery(self):
+        ping, scan = self.coap[4:]
+        self.assertEqual((ping['method'], ping['response_code']), ('ping', 'reset'))
+        self.assertEqual(scan, {'method': 'GET', 'type': 'Confirmable', 'uri': '/.well-known/core'})
+
+    def test_a_payload_past_extended_options(self):
+        from shark_protocols import _coap_payload
+        message = bytes([0x41, 1, 0, 1, 0xaa]) + bytes([0xbd, 7]) + b'x' * 20 + bytes([0x0e, 0, 1]) + b'y' * 270
+        self.assertEqual(_coap_payload(message + b'\xffBODY'), b'BODY')
+        self.assertEqual(_coap_payload(message[:12]), b'', 'cut short')
+
+    def test_flows_match_suricatas_and_the_merge_adds_the_records(self):
+        from scripts.compare_shark_suricata import compare
+        report = compare(_load_eve('coap_fixture.eve.json'), self.records)['flow']
+        self.assertEqual((report['matched'], report['named_by_tshark'], report['differences']), (2, 2, []))
+        d = os.path.join(self.tmpdir, 'analysis')
+        os.makedirs(d)
+        shutil.copy(self.pcap, d)
+        events_db = os.path.join(d, 'events.db')
+        db.create_sqlite_db(events_db, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data',
+                                                    'coap_fixture.eve.json'))
+        self.assertTrue(shark_analyzer.build(d, os.path.join(d, 'coap.pcap')))
+        shark_analyzer.merge(d)
+        counts = db.get_event_types_sqlite(events_db)
+        self.assertEqual(counts.get('coap'), 6)
+        self.assertFalse([t for t in counts if t.startswith('conn_')], 'records, not connection cards')
+
+
+@unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
 class TestSTUN(unittest.TestCase):
     """tests/protocol_fixtures.write_stun_pcap: one record per flow and
     method - with what Suricata 8.0.7 logged for the capture
@@ -1443,17 +1510,17 @@ class TestAnswered(unittest.TestCase):
         self.assertEqual(flows['10.9.0.2']['flow']['pkts_toclient'], 1, 'the ICMP error still counts as a packet back')
 
     def test_the_merge_gives_the_protocols_nobody_answered_one_card(self):
-        """CoAP was answered once, so it keeps its card; memcached's probes
+        """Echo was answered once, so it keeps its card; memcached's probes
         got only an ICMP error, so they're filed under Probed Only - with
         their own app_proto."""
         from tests.pcap_fixtures import write_pcap
         from tests.protocol_fixtures import _icmp_unreachable, _udp_packet
-        coap = b'\x40\x01\x00\x01\xbb.well-known\x04core'
+        echo = b'hello'
         memcache = b'\x00\x01\x00\x00\x00\x01\x00\x00stats\r\n'
         probe = _udp_packet('10.9.0.1', '10.9.0.2', 40005, 11211, memcache)
-        packets = [_udp_packet('10.9.0.1', '10.9.0.3', 40002, 5683, coap),
-                   _udp_packet('10.9.0.3', '10.9.0.1', 5683, 40002, b'\x60\x45\x00\x01'),
-                   _udp_packet('10.9.0.1', '10.9.0.4', 40003, 5683, coap),
+        packets = [_udp_packet('10.9.0.1', '10.9.0.3', 40002, 7, echo),
+                   _udp_packet('10.9.0.3', '10.9.0.1', 7, 40002, echo),
+                   _udp_packet('10.9.0.1', '10.9.0.4', 40003, 7, echo),
                    probe, _icmp_unreachable('10.9.0.2', '10.9.0.1', probe),
                    _udp_packet('10.9.0.1', '10.9.0.5', 40006, 11211, memcache)]
         d = tempfile.mkdtemp()
@@ -1468,7 +1535,7 @@ class TestAnswered(unittest.TestCase):
         self.assertEqual(shark_analyzer.probe_only_protocols(shark_analyzer.shark_db_path(d)), {'memcache'})
         shark_analyzer.merge(d)
         counts = db.get_event_types_sqlite(events_db)
-        self.assertEqual((counts.get('conn_coap'), counts.get(db.PROBED_CONNECTION_TYPE)), (2, 2))
+        self.assertEqual((counts.get('conn_echo'), counts.get(db.PROBED_CONNECTION_TYPE)), (2, 2))
         self.assertNotIn('conn_memcache', counts)
         probed = db.query_events_sqlite(events_db, db.PROBED_CONNECTION_TYPE)
         self.assertEqual(sorted((e['app_proto'], e['shark']['answered']) for e in probed),

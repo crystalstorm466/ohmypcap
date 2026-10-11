@@ -1076,6 +1076,114 @@ class STUN:
         return self.records
 
 
+# ---------------------------------------------------------------- CoAP
+#
+# HTTP for constrained devices - sensors, smart lighting and building
+# gear, over UDP 5683. One record per request and its response, named
+# like Suricata's http records: the method, the URI path and query, the
+# response code, the content format and payload size each way, and, for
+# the discovery of a device's resources (GET /.well-known/core), the
+# resources it listed. Internet scanners send that discovery to find
+# devices for amplification attacks - a request nobody answered is still
+# a record. A CoAP ping (an empty message answered by a reset) is one too.
+
+_COAP_MAX_RESOURCES = 50
+_COAP_LINK = re.compile(r'<([^>]*)>')
+
+
+def _coap_payload(raw):
+    """A CoAP message's payload: what follows its options' 0xFF marker."""
+    pos = 4 + (raw[0] & 0x0f) if raw else 0
+    try:
+        while pos < len(raw):
+            if raw[pos] == 0xff:
+                return raw[pos + 1:]
+            delta, length = raw[pos] >> 4, raw[pos] & 0x0f
+            pos += 1 + {13: 1, 14: 2}.get(delta, 0)
+            if length == 13:
+                length, pos = raw[pos] + 13, pos + 1
+            elif length == 14:
+                length, pos = int.from_bytes(raw[pos:pos + 2], 'big') + 269, pos + 2
+            pos += length
+    except IndexError:
+        pass
+    return b''
+
+
+class CoAP:
+    """CoAP - see the comment above."""
+    event_type = 'coap'
+    app_protos = ('coap',)
+    fields = ('vals(coap.type)', 'vals(coap.code)', 'coap.code', 'coap.mid', 'coap.token', 'coap.retransmitted',
+              'coap.opt.uri_path_recon', 'coap.opt.uri_query', 'coap.opt.uri_host', 'coap.opt.ctype',
+              'coap.opt.accept', 'coap.opt.observe', 'coap.payload_length', '@coap')
+
+    def __init__(self):
+        self.records = []
+        self.open = {}           # (flow key, 'token', token) / (flow key, 'mid', mid) -> body
+        self.started = {}        # id(body) -> its request's time
+
+    def feed(self, pkt, v):
+        def first(name):
+            return (v[name] or [''])[0]
+        kind, code, number = first('vals(coap.type)'), first('vals(coap.code)'), _int(first('coap.code'))
+        mid, token = _int(first('coap.mid')), first('coap.token')
+        if number is None or mid is None:
+            return
+        by_token = (pkt.flow.key, 'token', token) if token else None
+        by_mid = (pkt.flow.key, 'mid', mid)
+        if first('coap.retransmitted'):
+            body = self.open.get(by_token) or self.open.get(by_mid)
+            if body is not None:
+                body['retransmissions'] = body.get('retransmissions', 0) + 1
+            return
+        request = 1 <= number < 32 or (number == 0 and kind in ('Confirmable', 'Non-Confirmable'))
+        if request:
+            body = {'method': code if number else 'ping', 'type': kind}
+            for name, field in (('uri', 'coap.opt.uri_path_recon'), ('query', 'coap.opt.uri_query'),
+                                ('host', 'coap.opt.uri_host'), ('accept', 'coap.opt.accept')):
+                if first(field):
+                    body[name] = '&'.join(v[field]) if name == 'query' else first(field)
+            if first('coap.opt.observe'):
+                body['observe'] = True
+            self._payload(body, 'request', v, first)
+            self.records.append((pkt.flow, pkt.when, self.event_type, body))
+            self.started[id(body)] = pkt.when
+            self.open[by_mid] = body
+            if by_token:
+                self.open[by_token] = body
+            return
+        if number == 0 and kind == 'Acknowledgement':
+            return               # an empty ACK: the answer comes separately, by token
+        body = self.open.get(by_token) if by_token else None
+        if body is None:
+            body = self.open.get(by_mid)
+        if body is None:
+            return               # an answer to a request before the capture began
+        body['responses'] = body.get('responses', 0) + 1
+        if 'response_code' in body:
+            return               # an Observe notification after the first
+        body['response_code'] = 'reset' if kind == 'Reset' else code
+        body['response_time'] = round(pkt.when - self.started[id(body)], 6)
+        self._payload(body, 'response', v, first)
+        if body.get('uri') == '/.well-known/core' and number // 32 == 2:
+            raw = bytes.fromhex(first('@coap').replace(':', '')) if first('@coap') else b''
+            links = _COAP_LINK.findall(_coap_payload(raw).decode('utf-8', 'replace'))
+            if links:
+                body['resources'] = list(dict.fromkeys(links))[:_COAP_MAX_RESOURCES]
+
+    @staticmethod
+    def _payload(body, side, v, first):
+        if first('coap.opt.ctype'):
+            body[f'{side}_content_format'] = first('coap.opt.ctype')
+        length = _int(first('coap.payload_length'))
+        if length:
+            body[f'{side}_length'] = length
+
+    def finish(self):
+        return self.records
+
+
 # ---------------------------------------------------------------- SSDP
 
 class SSDP:
@@ -2610,7 +2718,7 @@ def _pdus(layer):
 
 # Every protocol with records here, from tshark's fields, in the order their
 # fields follow the base fields in tshark's output.
-PROTOCOLS = (LLMNR, NBNS, DHCPv6, Syslog, DTLS, RPC, SOCKS, RADIUS, STUN, SSDP, S7comm, Telnet, IEC104, BACnet, GOOSE, Browser, LLDP, CDP)
+PROTOCOLS = (LLMNR, NBNS, DHCPv6, Syslog, DTLS, RPC, SOCKS, RADIUS, STUN, CoAP, SSDP, S7comm, Telnet, IEC104, BACnet, GOOSE, Browser, LLDP, CDP)
 # ... and from the structured pass (shark_analyzer._structured_pass): none
 # yet - it's for a protocol whose messages nest, which flat fields can't
 # keep apart (several commands per packet, a token inside a command).

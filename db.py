@@ -1411,6 +1411,14 @@ AGGREGATION_JSON_PATHS = {
         'Reply': ['$.rpc.reply'],
         'Machine Name': ['$.rpc.machine_name'],
     },
+    'coap': {
+        'Method': ['$.coap.method'],
+        'URI': ['$.coap.uri'],
+        'Query': ['$.coap.query'],
+        'Response Code': ['$.coap.response_code'],
+        'Content Format': ['$.coap.response_content_format', '$.coap.request_content_format'],
+        'Type': ['$.coap.type'],
+    },
     'stun': {
         'Method': ['$.stun.method'],
         'Result': ['$.stun.result'],

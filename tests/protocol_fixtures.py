@@ -1224,3 +1224,59 @@ def stun_packets():
 
 def write_stun_pcap(path):
     write_pcap(path, stun_packets())
+
+
+# ---------------------------------------------------------------- CoAP
+#
+# A client (COAP_CLIENT) and a sensor (COAP_DEVICE, port 5683): discovery
+# of its resources (/.well-known/core); a temperature read, sent twice
+# before its answer; a PUT the device refused; a non-confirmable GET
+# answered by a separate non-confirmable 4.04; a CoAP ping - and a
+# scanner's discovery nobody answered.
+
+COAP_CLIENT, COAP_DEVICE, COAP_SCANNER = '10.1.0.36', '10.1.0.56', '198.51.100.13'
+COAP_RESOURCES = b'</sensors/temp>;rt="temperature";if="sensor",</sensors/light>;rt="light-lux",</config>'
+
+
+def _coap(kind, code, mid, token=b'', options=(), payload=b''):
+    out, last = bytearray([0x40 | kind << 4 | len(token), code]) + struct.pack('!H', mid) + token, 0
+    for number, value in sorted(options, key=lambda o: o[0]):
+        if isinstance(value, int):
+            value = value.to_bytes((value.bit_length() + 7) // 8, 'big')
+        elif isinstance(value, str):
+            value = value.encode()
+        delta, length = number - last, len(value)
+        out += bytes([min(delta, 13) << 4 | min(length, 13)])
+        out += bytes([delta - 13]) if delta >= 13 else b''
+        out += bytes([length - 13]) if length >= 13 else b''
+        out += value
+        last = number
+    return bytes(out) + (b'\xff' + payload if payload else b'')
+
+
+def coap_packets():
+    con, non, ack, rst = 0, 1, 2, 3
+    get, put = 1, 3
+
+    def request(client, sport, message):
+        return _udp_packet(client, COAP_DEVICE, sport, 5683, message)
+
+    def answer(sport, message):
+        return _udp_packet(COAP_DEVICE, COAP_CLIENT, 5683, sport, message)
+    path = lambda *parts: tuple((11, p) for p in parts)
+    temp = _coap(con, get, 2, b'\x02', path('sensors', 'temp') + ((15, 'unit=c'),))
+    return [request(COAP_CLIENT, 45001, _coap(con, get, 1, b'\x01', path('.well-known', 'core') + ((17, 40),))),
+            answer(45001, _coap(ack, 69, 1, b'\x01', ((12, 40),), COAP_RESOURCES)),
+            request(COAP_CLIENT, 45001, temp), request(COAP_CLIENT, 45001, temp),
+            answer(45001, _coap(ack, 69, 2, b'\x02', ((12, 50),), b'{"t":21.5}')),
+            request(COAP_CLIENT, 45001, _coap(con, put, 3, b'\x03', path('config') + ((12, 60),), b'\xa1\x01\x02')),
+            answer(45001, _coap(ack, 129, 3, b'\x03')),
+            request(COAP_CLIENT, 45001, _coap(non, get, 4, b'\x04', path('missing'))),
+            answer(45001, _coap(non, 132, 900, b'\x04')),
+            request(COAP_CLIENT, 45001, _coap(con, 0, 5)),
+            answer(45001, _coap(rst, 0, 5)),
+            request(COAP_SCANNER, 46000, _coap(con, get, 7, b'\x07', path('.well-known', 'core')))]
+
+
+def write_coap_pcap(path):
+    write_pcap(path, coap_packets())
