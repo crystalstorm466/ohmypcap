@@ -1333,6 +1333,197 @@ class SLP:
         return self.records
 
 
+# ---------------------------------------------------------------- IPMI
+#
+# IPMI over RMCP (UDP 623): the out-of-band management controller (BMC)
+# in a server - iDRAC, iLO, IMM, Supermicro's - which can power the
+# machine on and off, reinstall it and watch its console whatever runs
+# on it. What a BMC tells anyone who asks, before any login, is what's
+# recorded - one record per flow: whether it answered an ASF presence
+# ping, and its answer to Get Channel Authentication Capabilities (the
+# IPMI versions it speaks, the login methods it offers, whether it lets
+# in null user names or an anonymous login), and for an IPMI 2.0
+# session, the algorithms the console asked for and the BMC accepted -
+# a BMC that accepts no authentication at all (cipher zero,
+# CVE-2013-4782) logs anyone in. The weaknesses those show are listed.
+# Internet scanners send the capabilities request to find exposed BMCs.
+# Nothing past a session's opening is read: the RAKP messages that
+# follow carry a hash of the user's password (CVE-2013-4786), and
+# what's inside a session is the BMC's commands.
+
+_IPMI_PRIVILEGES = {0: 'highest available', 1: 'callback', 2: 'user', 3: 'operator', 4: 'administrator', 5: 'OEM'}
+_IPMI_AUTH_TYPES = ((0x01, 'none'), (0x02, 'MD2'), (0x04, 'MD5'), (0x10, 'straight password'), (0x20, 'OEM'))
+_IPMI_AUTH_ALGORITHMS = {0: 'RAKP-none', 1: 'RAKP-HMAC-SHA1', 2: 'RAKP-HMAC-MD5', 3: 'RAKP-HMAC-SHA256'}
+_IPMI_INTEGRITY_ALGORITHMS = {0: 'none', 1: 'HMAC-SHA1-96', 2: 'HMAC-MD5-128', 3: 'MD5-128', 4: 'HMAC-SHA256-128'}
+_IPMI_CONFIDENTIALITY_ALGORITHMS = {0: 'none', 1: 'AES-CBC-128', 2: 'xRC4-128', 3: 'xRC4-40'}
+_IPMI_SESSION_STATUS = {0: 'OK', 1: 'insufficient resources', 2: 'invalid session ID', 3: 'invalid payload type',
+                        4: 'invalid authentication algorithm', 5: 'invalid integrity algorithm',
+                        6: 'no matching authentication payload', 7: 'no matching integrity payload',
+                        9: 'invalid role', 0x0a: 'unauthorized role or privilege',
+                        0x0b: 'insufficient resources for role', 0x10: 'invalid confidentiality algorithm',
+                        0x11: 'no cipher suite match', 0x12: 'illegal parameter'}
+_IPMI_GET_CHANNEL_AUTH = 0x38
+_ASF_PING, _ASF_PONG = 0x80, 0x40
+_RMCP_ASF, _RMCP_IPMI = 0x06, 0x07
+_IPMI_OPEN_SESSION_REQUEST, _IPMI_OPEN_SESSION_RESPONSE = 0x10, 0x11
+
+
+def _ipmi_message(session):
+    """An IPMI v1.5 session's IPMB message (netfn, command, data), or None:
+    the session header - its auth code there unless its type is none -
+    then the message."""
+    if len(session) < 10 or session[0] == 0x06:
+        return None
+    pos = 9 + (16 if session[0] else 0)
+    if len(session) <= pos:
+        return None
+    message = session[pos + 1:pos + 1 + session[pos]]
+    if len(message) < 7:
+        return None
+    return message[1] >> 2, message[5], message[6:-1]
+
+
+def _ipmi_payload(session):
+    """An IPMI 2.0 (RMCP+) session's payload type and payload, or None."""
+    if len(session) < 12 or session[0] != 0x06:
+        return None
+    kind, pos = session[1] & 0x3f, 2 + (6 if session[1] & 0x3f == 0x02 else 0)
+    if len(session) < pos + 10:
+        return None
+    length = int.from_bytes(session[pos + 8:pos + 10], 'little')
+    return kind, session[pos + 10:pos + 10 + length]
+
+
+def _ipmi_algorithms(payload, start):
+    """An Open Session message's three algorithm payloads, from start."""
+    names = (('authentication', _IPMI_AUTH_ALGORITHMS), ('integrity', _IPMI_INTEGRITY_ALGORITHMS),
+             ('confidentiality', _IPMI_CONFIDENTIALITY_ALGORITHMS))
+    out = {}
+    for i, (name, table) in enumerate(names):
+        pos = start + 8 * i
+        if len(payload) >= pos + 5:
+            number = payload[pos + 4] & 0x3f
+            out[name] = table.get(number, f'algorithm {number}')
+    return out
+
+
+class IPMI:
+    """IPMI over RMCP - see the comment above."""
+    event_type = 'ipmi'
+    app_protos = ('rmcp',)
+    fields = ('rmcp.class', 'asf.type', 'data.data', '@ipmi_session')
+
+    def __init__(self):
+        self.records = []
+        self.flows = {}          # flow key -> body
+
+    def _body(self, pkt):
+        body = self.flows.get(pkt.flow.key)
+        if body is None:
+            body = self.flows[pkt.flow.key] = {}
+            self.records.append((pkt.flow, pkt.when, self.event_type, body))
+        return body
+
+    @staticmethod
+    def _asked(body, what):
+        if what not in body.setdefault('requests', []):
+            body['requests'].append(what)
+
+    def feed(self, pkt, v):
+        def first(name):
+            return (v[name] or [''])[0]
+        raw = lambda name: bytes.fromhex(first(name).replace(':', '')) if first(name) else b''
+        kind = _int(first('rmcp.class'))
+        if kind == _RMCP_ASF:
+            asf = _int(first('asf.type'))
+            if asf == _ASF_PING:
+                self._asked(self._body(pkt), 'presence ping')
+            elif asf == _ASF_PONG:
+                body, data = self._body(pkt), raw('data.data')     # the pong's body, past its ASF header
+                body['responses'] = body.get('responses', 0) + 1
+                if len(data) >= 9:
+                    body['ipmi_supported'] = bool(data[8] & 0x80)
+            return
+        if kind != _RMCP_IPMI:
+            return
+        session = raw('@ipmi_session')
+        message = _ipmi_message(session)
+        if message is not None:
+            netfn, command, data = message
+            if command != _IPMI_GET_CHANNEL_AUTH or netfn not in (0x06, 0x07):
+                return           # a command, or its answer - not read
+            body = self._body(pkt)
+            if netfn == 0x06:
+                self._asked(body, 'channel authentication capabilities')
+                if len(data) >= 2:
+                    body['requested_privilege'] = _IPMI_PRIVILEGES.get(data[1] & 0x0f, str(data[1] & 0x0f))
+            else:
+                body['responses'] = body.get('responses', 0) + 1
+                self._capabilities(body, data)
+            return
+        payload = _ipmi_payload(session)
+        if payload is None:
+            return
+        kind, data = payload
+        if kind == _IPMI_OPEN_SESSION_REQUEST:
+            body = self._body(pkt)
+            self._asked(body, 'open session')
+            if len(data) >= 2:
+                body['requested_privilege'] = _IPMI_PRIVILEGES.get(data[1] & 0x0f, str(data[1] & 0x0f))
+            body['cipher_requested'] = _ipmi_algorithms(data, 8)
+        elif kind == _IPMI_OPEN_SESSION_RESPONSE and pkt.flow.key in self.flows:
+            body = self.flows[pkt.flow.key]
+            body['responses'] = body.get('responses', 0) + 1
+            if len(data) >= 2:
+                body['session_status'] = _IPMI_SESSION_STATUS.get(data[1], f'status 0x{data[1]:02x}')
+                if data[1] == 0:
+                    body['cipher_accepted'] = _ipmi_algorithms(data, 12)
+        # RAKP messages (0x12-0x15) and session traffic are never read - see above
+
+    @staticmethod
+    def _capabilities(body, data):
+        if not data:
+            return
+        if data[0]:
+            body['completion_code'] = f'0x{data[0]:02x}'
+            return
+        if len(data) < 4:
+            return
+        support, status = data[2], data[3]
+        body['channel'] = data[1] & 0x0f
+        body['auth_types'] = [name for bit, name in _IPMI_AUTH_TYPES if support & bit]
+        versions = []
+        if support & 0x80 and len(data) >= 5:
+            versions = [version for bit, version in ((0x01, '1.5'), (0x02, '2.0')) if data[4] & bit]
+        body['ipmi_versions'] = versions or ['1.5']
+        body['anonymous_login'] = bool(status & 0x01)
+        body['null_user_names'] = bool(status & 0x02)
+        body['non_null_user_names'] = bool(status & 0x04)
+        body['user_level_authentication'] = not status & 0x08
+        body['per_message_authentication'] = not status & 0x10
+        body['kg_set'] = bool(status & 0x20)
+        if len(data) >= 8 and int.from_bytes(data[5:8], 'little'):
+            body['oem_iana'] = int.from_bytes(data[5:8], 'little')
+
+    def finish(self):
+        for _, _, _, body in self.records:
+            weaknesses = []
+            if body.get('anonymous_login'):
+                weaknesses.append('anonymous login')
+            if body.get('null_user_names'):
+                weaknesses.append('null user names')
+            if 'none' in body.get('auth_types', ()):
+                weaknesses.append('no authentication offered')
+            if 'straight password' in body.get('auth_types', ()):
+                weaknesses.append('cleartext password')
+            if body.get('cipher_accepted', {}).get('authentication') == 'RAKP-none':
+                weaknesses.append('cipher zero accepted')
+            if weaknesses:
+                body['weaknesses'] = weaknesses
+            body['result'] = 'answered' if body.get('responses') else 'no answer'
+        return self.records
+
+
 # ---------------------------------------------------------------- SSDP
 
 class SSDP:
@@ -2867,7 +3058,7 @@ def _pdus(layer):
 
 # Every protocol with records here, from tshark's fields, in the order their
 # fields follow the base fields in tshark's output.
-PROTOCOLS = (LLMNR, NBNS, DHCPv6, Syslog, DTLS, RPC, SOCKS, RADIUS, STUN, CoAP, SLP, SSDP, S7comm, Telnet, IEC104, BACnet, GOOSE, Browser, LLDP, CDP)
+PROTOCOLS = (LLMNR, NBNS, DHCPv6, Syslog, DTLS, RPC, SOCKS, RADIUS, STUN, CoAP, SLP, IPMI, SSDP, S7comm, Telnet, IEC104, BACnet, GOOSE, Browser, LLDP, CDP)
 # ... and from the structured pass (shark_analyzer._structured_pass): none
 # yet - it's for a protocol whose messages nest, which flat fields can't
 # keep apart (several commands per packet, a token inside a command).

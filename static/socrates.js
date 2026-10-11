@@ -2171,6 +2171,7 @@
                 stun: '#66bb6a',
                 coap: '#ffa726',
                 slp: '#7e57c2',
+                ipmi: '#ec407a',
                 opcua_action: '#ff7043',
                 bacnet_property: '#5c6bc0',
                 bacnet_device: '#8d6e63',
@@ -3897,6 +3898,36 @@
             return html;
         }
 
+        // tshark's IPMI records (shark_protocols.IPMI): one per flow to a
+        // server's management controller - what it says before any login.
+        function renderIpmiDetails(e) {
+            const p = e.ipmi || {};
+            const yes = b => b === undefined ? '' : (b ? 'yes' : 'no');
+            const cipher = c => c ? [c.authentication, c.integrity, c.confidentiality].filter(Boolean).join(' / ') : '';
+            let html = htmlSection('IPMI Details', COLORS.EVENT.ipmi);
+            html += htmlRowText('Requests', (p.requests || []).join(', '));
+            html += htmlRowText('Result', p.result);
+            html += htmlRowText('Weaknesses', (p.weaknesses || []).join(', '));
+            html += htmlRowText('IPMI Supported', yes(p.ipmi_supported));
+            html += htmlRowText('IPMI Versions', (p.ipmi_versions || []).join(', '));
+            html += htmlRowText('Auth Types', (p.auth_types || []).join(', '));
+            html += htmlRowText('Anonymous Login', yes(p.anonymous_login));
+            html += htmlRowText('Null User Names', yes(p.null_user_names));
+            html += htmlRowText('Non-null User Names', yes(p.non_null_user_names));
+            html += htmlRowText('User-level Authentication', yes(p.user_level_authentication));
+            html += htmlRowText('Per-message Authentication', yes(p.per_message_authentication));
+            html += htmlRowText('KG Set', yes(p.kg_set));
+            html += htmlRowText('Channel', p.channel !== undefined ? String(p.channel) : '');
+            html += htmlRowText('OEM IANA', p.oem_iana !== undefined ? String(p.oem_iana) : '', 'mono');
+            html += htmlRowText('Completion Code', p.completion_code, 'mono');
+            html += htmlRowText('Requested Privilege', p.requested_privilege);
+            html += htmlRowText('Cipher Requested', cipher(p.cipher_requested));
+            html += htmlRowText('Cipher Accepted', cipher(p.cipher_accepted));
+            html += htmlRowText('Session Status', p.session_status);
+            html += htmlRowText('Responses', p.responses ? p.responses.toLocaleString() : '');
+            return html;
+        }
+
         // tshark's STUN records (shark_protocols.STUN): one per flow and
         // method - the public addresses the server reported, a TURN relay.
         function renderStunDetails(e) {
@@ -4622,6 +4653,7 @@
             stun: renderStunDetails,
             coap: renderCoapDetails,
             slp: renderSlpDetails,
+            ipmi: renderIpmiDetails,
             rpc: renderRpcDetails,
             lldp: renderNeighborDetails,
             cdp: renderNeighborDetails,
@@ -7301,6 +7333,7 @@
             stun: 'STUN',
             coap: 'CoAP',
             slp: 'SLP',
+            ipmi: 'IPMI',
             lldp: 'LLDP',
             cdp: 'CDP',
             opcua_action: 'OPC UA Actions',
@@ -7697,6 +7730,8 @@
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'SNI / Host', 'Version', 'Handshake', 'Subject', 'JA4'];
                 case 'coap':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Method', 'URI', 'Query', 'Response Code', 'Content Format', 'Type'];
+                case 'ipmi':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Requests', 'Result', 'IPMI Versions', 'Auth Types', 'Privilege', 'Cipher', 'Weaknesses'];
                 case 'slp':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Function', 'Service Type', 'Scopes', 'URL', 'Response', 'Status', 'Version'];
                 case 'stun':
@@ -8206,7 +8241,8 @@
                 case 'radius':
                 case 'stun':
                 case 'coap':
-                case 'slp': {
+                case 'slp':
+                case 'ipmi': {
                     const cols = getColumnsForType(etype).slice(6);
                     colSpan = cols.length + 6;
                     row = rowPrefixCells(e) + cols.map(col => `<td${['Search Target', 'Location', 'User', 'Password', 'Chassis ID', 'Port ID', 'Device ID', 'Management IP', 'Hostname', 'Client MAC', 'Assigned IP', 'Host', 'Program', 'Message', 'SNI / Host', 'Subject', 'JA4', 'Machine Name', 'Destination', 'Destination Port', 'Calling Station', 'Mapped Address', 'Relayed Address', 'URI', 'Query', 'Service Type', 'Scopes', 'URL'].includes(col) ? ' class="mono"' : ''}>${escapeHtml(extractValue(e, col))}</td>`).join('') + '</tr>';
@@ -10418,7 +10454,7 @@
                     if (r?.value !== undefined) return String(r.value);
                     return e.opcua_action?.arguments ? e.opcua_action.arguments.join(', ') : '';
                 }
-                case 'Result': return e.iec104?.result || e.bacnet?.result || e.opcua_action?.result || e.dhcpv6?.status || e.radius?.result || e.stun?.result || '';
+                case 'Result': return e.iec104?.result || e.bacnet?.result || e.opcua_action?.result || e.dhcpv6?.status || e.radius?.result || e.stun?.result || e.ipmi?.result || '';
                 case 'Updates': return e.iec104_point?.updates !== undefined ? String(e.iec104_point.updates) : '';
                 case 'Last Value': { const r = e.iec104_point || e.bacnet_property; return r?.last_value !== undefined ? String(r.last_value) : ''; }
                 // BACnet: an action's, a read/notification summary's, a device's
@@ -10494,7 +10530,10 @@
                 case 'EAP Method': return (e.radius?.eap_methods || [])[0] || '';
                 case 'Reply Message': return e.radius?.reply_message || '';
                 // STUN: a flow's exchanges of one method
-                case 'Requests': return e.stun?.requests !== undefined ? String(e.stun.requests) : '';
+                case 'Requests': {
+                    if (e.ipmi) return (e.ipmi.requests || []).join(', ');
+                    return e.stun?.requests !== undefined ? String(e.stun.requests) : '';
+                }
                 case 'Mapped Address': return (e.stun?.mapped_addresses || [])[0] || '';
                 case 'Relayed Address': return (e.stun?.relayed_addresses || [])[0] || '';
                 case 'Software': return e.stun?.client_software || e.stun?.server_software || '';
@@ -10505,6 +10544,12 @@
                 case 'Service Type': return e.slp?.service_type || (e.slp?.service_types || [])[0] || '';
                 case 'Scopes': return e.slp?.scopes || '';
                 case 'Response': return e.slp?.response || '';
+                // IPMI: what a management controller offers before any login
+                case 'IPMI Versions': return (e.ipmi?.ipmi_versions || []).join(', ');
+                case 'Auth Types': return (e.ipmi?.auth_types || []).join(', ');
+                case 'Privilege': return e.ipmi?.requested_privilege || '';
+                case 'Cipher': return e.ipmi?.cipher_accepted?.authentication || e.ipmi?.cipher_requested?.authentication || '';
+                case 'Weaknesses': return (e.ipmi?.weaknesses || []).join(', ');
                 case 'Version': {
                     if (e.event_type === 'ntp') return e.ntp?.version !== undefined ? String(e.ntp.version) : '';
                     if (e.dtls) return e.dtls.version || '';

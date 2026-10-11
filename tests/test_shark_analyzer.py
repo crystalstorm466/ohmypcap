@@ -841,6 +841,76 @@ class TestCoAP(unittest.TestCase):
 
 
 @unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
+class TestIPMI(unittest.TestCase):
+    """tests/protocol_fixtures.write_ipmi_pcap: one record per flow to a
+    BMC, of what it said before any login - with what Suricata 8.0.7
+    logged for the capture (tests/data/ipmi_fixture.eve.json): flows it
+    gives no protocol."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests.protocol_fixtures import write_ipmi_pcap
+        cls.tmpdir = tempfile.mkdtemp()
+        cls.pcap = os.path.join(cls.tmpdir, 'ipmi.pcap')
+        write_ipmi_pcap(cls.pcap)
+        cls.records = shark_analyzer.run_tshark(cls.pcap)
+        cls.ipmi = {r['src_port']: r['ipmi'] for r in cls.records if r['event_type'] == 'ipmi'}
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    def test_a_consoles_ping_capabilities_and_session_to_a_modern_bmc(self):
+        self.assertEqual(self.ipmi[50101], {
+            'requests': ['presence ping', 'channel authentication capabilities', 'open session'], 'responses': 3,
+            'result': 'answered', 'ipmi_supported': True, 'requested_privilege': 'administrator', 'channel': 1,
+            'auth_types': ['MD5'], 'ipmi_versions': ['1.5', '2.0'], 'anonymous_login': False,
+            'null_user_names': False, 'non_null_user_names': True, 'user_level_authentication': True,
+            'per_message_authentication': True, 'kg_set': False,
+            'cipher_requested': {'authentication': 'RAKP-HMAC-SHA1', 'integrity': 'HMAC-SHA1-96',
+                                 'confidentiality': 'AES-CBC-128'},
+            'session_status': 'OK',
+            'cipher_accepted': {'authentication': 'RAKP-HMAC-SHA1', 'integrity': 'HMAC-SHA1-96',
+                                'confidentiality': 'AES-CBC-128'}})
+
+    def test_the_rakp_messages_and_their_password_hash_are_never_read(self):
+        from tests.protocol_fixtures import IPMI_RAKP2_HMAC
+        text = json.dumps([r for r in self.records if r['event_type'] == 'ipmi'])
+        self.assertNotIn('admin"', text)
+        self.assertNotIn(IPMI_RAKP2_HMAC.hex(), text)
+        self.assertNotIn(IPMI_RAKP2_HMAC.hex(':'), text)
+
+    def test_an_old_bmcs_anonymous_login_and_cipher_zero(self):
+        caps, cipher_zero = self.ipmi[52000], self.ipmi[52001]
+        self.assertEqual({k: caps[k] for k in ('auth_types', 'ipmi_versions', 'anonymous_login', 'weaknesses')},
+                         {'auth_types': ['none', 'MD5', 'straight password'], 'ipmi_versions': ['1.5'],
+                          'anonymous_login': True,
+                          'weaknesses': ['anonymous login', 'null user names', 'no authentication offered',
+                                         'cleartext password']})
+        self.assertEqual((cipher_zero['cipher_accepted']['authentication'], cipher_zero['weaknesses']),
+                         ('RAKP-none', ['cipher zero accepted']))
+
+    def test_a_ping_nobody_answered(self):
+        self.assertEqual(self.ipmi[52002], {'requests': ['presence ping'], 'result': 'no answer'})
+
+    def test_flows_match_suricatas_and_the_merge_adds_the_records(self):
+        from scripts.compare_shark_suricata import compare
+        report = compare(_load_eve('ipmi_fixture.eve.json'), self.records)['flow']
+        self.assertEqual((report['matched'], report['named_by_tshark'], report['differences']), (4, 4, []))
+        d = os.path.join(self.tmpdir, 'analysis')
+        os.makedirs(d)
+        shutil.copy(self.pcap, d)
+        events_db = os.path.join(d, 'events.db')
+        db.create_sqlite_db(events_db, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data',
+                                                    'ipmi_fixture.eve.json'))
+        self.assertTrue(shark_analyzer.build(d, os.path.join(d, 'ipmi.pcap')))
+        shark_analyzer.merge(d)
+        counts = db.get_event_types_sqlite(events_db)
+        self.assertEqual(counts.get('ipmi'), 4)
+        self.assertFalse([t for t in counts if t.startswith('conn_')], 'records, not connection cards')
+
+
+@unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
 class TestSLP(unittest.TestCase):
     """tests/protocol_fixtures.write_slp_pcap: one record per request and
     its replies, or per advertisement - with what Suricata 8.0.7 logged

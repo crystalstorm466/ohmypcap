@@ -1419,6 +1419,15 @@ AGGREGATION_JSON_PATHS = {
         'Content Format': ['$.coap.response_content_format', '$.coap.request_content_format'],
         'Type': ['$.coap.type'],
     },
+    'ipmi': {
+        'Requests': ['$.ipmi.requests[0]'],
+        'Result': ['$.ipmi.result'],
+        'IPMI Versions': ['$.ipmi.ipmi_versions[0]'],
+        'Auth Types': ['$.ipmi.auth_types[0]'],
+        'Privilege': ['$.ipmi.requested_privilege'],
+        'Cipher': ['$.ipmi.cipher_accepted.authentication', '$.ipmi.cipher_requested.authentication'],
+        'Weaknesses': ['$.ipmi.weaknesses[0]'],
+    },
     'slp': {
         'Function': ['$.slp.function'],
         'Service Type': ['$.slp.service_type', '$.slp.service_types[0]'],

@@ -62,6 +62,15 @@ each card marked with a dot:
   Internet scanners hunt ESXi hosts with SLP and register services
   with exposed hosts for the CVE-2023-29552 amplification attack; their
   registrations and unanswered probes are records too
+- **IPMI** (server management controllers - iDRAC, iLO, Supermicro -
+  over RMCP, UDP 623; Suricata doesn't parse it) - a record for each
+  flow to a controller, of what it says before any login: whether it
+  answered a presence ping, the IPMI versions and login methods it
+  offers, whether it allows anonymous logins or null user names, and the
+  cipher an IPMI 2.0 session asked for and was given - with the
+  weaknesses those show, such as cipher zero (CVE-2013-4782). The
+  password hash a controller sends during an IPMI 2.0 login is never
+  read, nor anything inside a session
 - **STUN** (NAT discovery and TURN relays, for WebRTC, VoIP and games -
   and malware finding its public address) - a record for each flow's
   exchanges of one kind: the public address and port the server

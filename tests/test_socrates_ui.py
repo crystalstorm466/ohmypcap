@@ -21827,6 +21827,11 @@ class TestTsharkUI(unittest.TestCase):
         'coap': {'event_type': 'coap', 'coap': {'method': 'GET', 'type': 'Confirmable', 'uri': '/sensors/temp', 'query': 'unit=c',
                                                 'response_code': '2.05 Content', 'response_content_format': 'application/json',
                                                 'response_length': 10, 'resources': ['/sensors/temp']}},
+        'ipmi': {'event_type': 'ipmi', 'ipmi': {'requests': ['channel authentication capabilities'], 'result': 'answered',
+                                                'requested_privilege': 'administrator', 'ipmi_versions': ['1.5'],
+                                                'auth_types': ['none', 'MD5'], 'anonymous_login': True,
+                                                'cipher_accepted': {'authentication': 'RAKP-none'},
+                                                'weaknesses': ['anonymous login', 'no authentication offered']}},
         'slp': {'event_type': 'slp', 'slp': {'version': 2, 'function': 'Service Request', 'xid': 2,
                                               'service_type': 'service:VMwareInfrastructure', 'scopes': 'DEFAULT',
                                               'response': 'Service Reply', 'status': 'OK',
@@ -21898,6 +21903,8 @@ class TestTsharkUI(unittest.TestCase):
         'browser': ['Local Master Announcement', 'DC1', 'FIXTUREDOM', '10.0', 'workstation, domain controller', '3'],
         'rpc': ['mountd', '3', 'MNT', 'RPC executed successfully', 'client1'],
         'coap': ['GET', '/sensors/temp', 'unit=c', '2.05 Content', 'application/json', 'Confirmable'],
+        'ipmi': ['channel authentication capabilities', 'answered', '1.5', 'none, MD5', 'administrator', 'RAKP-none',
+                 'anonymous login, no authentication offered'],
         'slp': ['Service Request', 'service:VMwareInfrastructure', 'DEFAULT',
                 'service:VMwareInfrastructure://esx01.example.org', 'Service Reply', 'OK', '2'],
         'stun': ['Allocate', 'success', '2', '203.0.113.50:40002', '192.0.2.30:50000', 'fixture-client 1.0', 'turnuser'],
@@ -21988,7 +21995,7 @@ class TestTsharkUI(unittest.TestCase):
         import db
         from tests.jsdom_helper import js_statements
         cols = js_statements("""window.__jsdom_result = Object.fromEntries(
-            ['llmnr', 'nbns', 's7comm', 'ssdp', 'telnet', 'iec104', 'iec104_point', 'bacnet', 'bacnet_property', 'bacnet_device', 'opcua', 'opcua_action', 'goose', 'browser', 'lldp', 'cdp', 'dhcpv6', 'syslog', 'dtls', 'rpc', 'socks', 'radius', 'stun', 'coap', 'slp'].map(t => [t, getColumnsForType(t).slice(6)]));""")
+            ['llmnr', 'nbns', 's7comm', 'ssdp', 'telnet', 'iec104', 'iec104_point', 'bacnet', 'bacnet_property', 'bacnet_device', 'opcua', 'opcua_action', 'goose', 'browser', 'lldp', 'cdp', 'dhcpv6', 'syslog', 'dtls', 'rpc', 'socks', 'radius', 'stun', 'coap', 'slp', 'ipmi'].map(t => [t, getColumnsForType(t).slice(6)]));""")
         for t, columns in cols.items():
             self.assertEqual(list(db.AGGREGATION_JSON_PATHS[t]), columns, t)
 

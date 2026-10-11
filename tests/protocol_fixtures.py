@@ -1344,3 +1344,70 @@ def slp_packets():
 
 def write_slp_pcap(path):
     write_pcap(path, slp_packets())
+
+
+# ---------------------------------------------------------------- IPMI
+
+# An admin console (IPMI_CONSOLE) pinging a server's BMC (IPMI_BMC, port
+# 623), asking its authentication capabilities and opening an IPMI 2.0
+# session - its RAKP messages, one with the BMC's password hash, follow
+# and must never be read; a scanner (IPMI_SCANNER) asking an older BMC
+# (IPMI_OLD_BMC) that lets in anonymous logins and accepts cipher zero,
+# and pinging an address with no BMC.
+IPMI_CONSOLE, IPMI_BMC, IPMI_OLD_BMC, IPMI_SCANNER = '10.1.0.38', '10.1.0.58', '10.1.0.59', '198.51.100.15'
+IPMI_NOBODY = '10.1.0.60'
+IPMI_RAKP2_HMAC = bytes(range(0x40, 0x54))
+
+
+def _ipmb(netfn, command, data, request):
+    """An IPMB message: requests from the console's software ID (0x81) to
+    the BMC (0x20), responses back, with their checksums."""
+    target, source = (0x20, 0x81) if request else (0x81, 0x20)
+    head = bytes([target, netfn << 2])
+    body = bytes([source, 0, command]) + data
+    check = lambda b: (-sum(b)) & 0xff
+    return head + bytes([check(head)]) + body + bytes([check(body)])
+
+
+def _ipmi15(message):
+    return b'\x06\x00\xff\x07' + b'\x00' + b'\0' * 8 + bytes([len(message)]) + message
+
+
+def _ipmi20(kind, payload):
+    return b'\x06\x00\xff\x07' + bytes([0x06, kind]) + b'\0' * 8 + struct.pack('<H', len(payload)) + payload
+
+
+def _ipmi_algorithms(auth, integrity, confidentiality):
+    return b''.join(bytes([i, 0, 0, 8, alg, 0, 0, 0]) for i, alg in enumerate((auth, integrity, confidentiality)))
+
+
+def ipmi_packets():
+    ping = b'\x06\x00\xff\x06' + b'\x00\x00\x11\xbe\x80\x01\x00\x00'
+    pong = b'\x06\x00\xff\x06' + b'\x00\x00\x11\xbe\x40\x01\x00\x10' + b'\x00\x00\x11\xbe' + b'\0' * 4 + b'\x81\x00' + b'\0' * 6
+    caps_request = _ipmi15(_ipmb(0x06, 0x38, b'\x8e\x04', True))
+    modern = _ipmi15(_ipmb(0x07, 0x38, b'\x00\x01\x84\x04\x03\x00\x00\x00\x00', False))
+    old = _ipmi15(_ipmb(0x07, 0x38, b'\x00\x01\x15\x07\x00\x00\x00\x00\x00', False))
+    open_request = lambda algs: _ipmi20(0x10, b'\x01\x04\x00\x00' + b'\xa0\xa1\xa2\xa3' + _ipmi_algorithms(*algs))
+    open_response = lambda algs: _ipmi20(0x11, b'\x01\x00\x04\x00' + b'\xa0\xa1\xa2\xa3' + b'\x10\x20\x30\x40' +
+                                         _ipmi_algorithms(*algs))
+    rakp1 = _ipmi20(0x12, b'\x02\x00\x00\x00\x10\x20\x30\x40' + b'\x55' * 16 + b'\x14\x00\x00' + bytes([5]) + b'admin')
+    rakp2 = _ipmi20(0x13, b'\x02\x00\x00\x00\xa0\xa1\xa2\xa3' + b'\x66' * 16 + b'\x77' * 16 + IPMI_RAKP2_HMAC)
+
+    def ask(src, sport, dst, message):
+        return _udp_packet(src, dst, sport, 623, message)
+
+    def answer(src, dst, dport, message):
+        return _udp_packet(src, dst, 623, dport, message)
+    return [ask(IPMI_CONSOLE, 50101, IPMI_BMC, ping), answer(IPMI_BMC, IPMI_CONSOLE, 50101, pong),
+            ask(IPMI_CONSOLE, 50101, IPMI_BMC, caps_request), answer(IPMI_BMC, IPMI_CONSOLE, 50101, modern),
+            ask(IPMI_CONSOLE, 50101, IPMI_BMC, open_request((1, 1, 1))),
+            answer(IPMI_BMC, IPMI_CONSOLE, 50101, open_response((1, 1, 1))),
+            ask(IPMI_CONSOLE, 50101, IPMI_BMC, rakp1), answer(IPMI_BMC, IPMI_CONSOLE, 50101, rakp2),
+            ask(IPMI_SCANNER, 52000, IPMI_OLD_BMC, caps_request), answer(IPMI_OLD_BMC, IPMI_SCANNER, 52000, old),
+            ask(IPMI_SCANNER, 52001, IPMI_OLD_BMC, open_request((0, 0, 0))),
+            answer(IPMI_OLD_BMC, IPMI_SCANNER, 52001, open_response((0, 0, 0))),
+            ask(IPMI_SCANNER, 52002, IPMI_NOBODY, ping)]
+
+
+def write_ipmi_pcap(path):
+    write_pcap(path, ipmi_packets())
