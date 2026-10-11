@@ -2170,6 +2170,7 @@
                 radius: '#ef5350',
                 stun: '#66bb6a',
                 coap: '#ffa726',
+                slp: '#7e57c2',
                 opcua_action: '#ff7043',
                 bacnet_property: '#5c6bc0',
                 bacnet_device: '#8d6e63',
@@ -3860,6 +3861,42 @@
             return html;
         }
 
+        // tshark's SLP records (shark_protocols.SLP): one per request and
+        // its replies - every host's, for a multicast request - or per
+        // advertisement.
+        function renderSlpDetails(e) {
+            const s = e.slp || {};
+            const size = n => n !== undefined ? `${n.toLocaleString()} bytes` : '';
+            const asked = s.response !== undefined || ['Service Request', 'Service Registration', 'Service Deregistration',
+                'Attribute Request', 'Service Type Request'].includes(s.function);
+            let html = htmlSection('SLP Details', COLORS.EVENT.slp);
+            html += htmlRowText('Function', s.function);
+            html += htmlRowText('Version', s.version !== undefined ? String(s.version) : '');
+            html += htmlRowText('Service Type', s.service_type, 'mono');
+            html += htmlRowText('Scopes', s.scopes, 'mono');
+            html += htmlRowText('URL', s.url, 'mono');
+            html += htmlRowText('Predicate', s.predicate, 'mono');
+            html += htmlRowText('Tags', s.tags, 'mono');
+            html += htmlRowText('Naming Authority', s.naming_authority, 'mono');
+            html += htmlRowText('Lifetime', s.lifetime !== undefined ? `${s.lifetime.toLocaleString()} s` : '');
+            html += htmlRowText('Fresh Registration', s.fresh ? 'yes' : '');
+            html += htmlRowText('Multicast', s.multicast ? 'yes' : '');
+            html += htmlRowText('Request Size', size(s.request_length));
+            if (asked) html += htmlRowText('Response', s.response || 'no response');
+            html += htmlRowText('Status', s.status);
+            html += htmlRowText('Response Time', s.response_time !== undefined ? `${s.response_time} s` : '');
+            html += htmlRow('URLs', (s.urls || []).map(escapeHtml).join('<br>'), 'mono');
+            html += htmlRow('Service Types', (s.service_types || []).map(escapeHtml).join('<br>'), 'mono');
+            html += htmlRowText('Attributes', s.attributes, 'mono');
+            html += htmlRowText('Responders', (s.responders || []).join(', '), 'mono');
+            html += htmlRowText('Response Size', size(s.response_length));
+            html += htmlRowText('Size', size(s.length));
+            html += htmlRowText('Responses', s.responses > 1 ? s.responses.toLocaleString() : '');
+            html += htmlRowText('Retransmissions', s.retransmissions ? s.retransmissions.toLocaleString() : '');
+            html += htmlRowText('XID', s.xid !== undefined ? String(s.xid) : '', 'mono');
+            return html;
+        }
+
         // tshark's STUN records (shark_protocols.STUN): one per flow and
         // method - the public addresses the server reported, a TURN relay.
         function renderStunDetails(e) {
@@ -4584,6 +4621,7 @@
             radius: renderRadiusDetails,
             stun: renderStunDetails,
             coap: renderCoapDetails,
+            slp: renderSlpDetails,
             rpc: renderRpcDetails,
             lldp: renderNeighborDetails,
             cdp: renderNeighborDetails,
@@ -7262,6 +7300,7 @@
             radius: 'RADIUS',
             stun: 'STUN',
             coap: 'CoAP',
+            slp: 'SLP',
             lldp: 'LLDP',
             cdp: 'CDP',
             opcua_action: 'OPC UA Actions',
@@ -7658,6 +7697,8 @@
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'SNI / Host', 'Version', 'Handshake', 'Subject', 'JA4'];
                 case 'coap':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Method', 'URI', 'Query', 'Response Code', 'Content Format', 'Type'];
+                case 'slp':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Function', 'Service Type', 'Scopes', 'URL', 'Response', 'Status', 'Version'];
                 case 'stun':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Method', 'Result', 'Requests', 'Mapped Address', 'Relayed Address', 'Software', 'User'];
                 case 'radius':
@@ -8164,10 +8205,11 @@
                 case 'socks':
                 case 'radius':
                 case 'stun':
-                case 'coap': {
+                case 'coap':
+                case 'slp': {
                     const cols = getColumnsForType(etype).slice(6);
                     colSpan = cols.length + 6;
-                    row = rowPrefixCells(e) + cols.map(col => `<td${['Search Target', 'Location', 'User', 'Password', 'Chassis ID', 'Port ID', 'Device ID', 'Management IP', 'Hostname', 'Client MAC', 'Assigned IP', 'Host', 'Program', 'Message', 'SNI / Host', 'Subject', 'JA4', 'Machine Name', 'Destination', 'Destination Port', 'Calling Station', 'Mapped Address', 'Relayed Address', 'URI', 'Query'].includes(col) ? ' class="mono"' : ''}>${escapeHtml(extractValue(e, col))}</td>`).join('') + '</tr>';
+                    row = rowPrefixCells(e) + cols.map(col => `<td${['Search Target', 'Location', 'User', 'Password', 'Chassis ID', 'Port ID', 'Device ID', 'Management IP', 'Hostname', 'Client MAC', 'Assigned IP', 'Host', 'Program', 'Message', 'SNI / Host', 'Subject', 'JA4', 'Machine Name', 'Destination', 'Destination Port', 'Calling Station', 'Mapped Address', 'Relayed Address', 'URI', 'Query', 'Service Type', 'Scopes', 'URL'].includes(col) ? ' class="mono"' : ''}>${escapeHtml(extractValue(e, col))}</td>`).join('') + '</tr>';
                     break;
                 }
                 case 'nbns': {
@@ -10426,6 +10468,7 @@
                 case 'Error': return e.s7comm?.response?.error_class || '';
                 case 'Host': return e.http?.hostname || e.syslog?.hostname || '';
                 case 'URL': {
+                    if (e.slp) return e.slp.url || (e.slp.urls || [])[0] || '';
                     if (e.event_type === 'link') return e.link?.url || '';
                     return e.http?.url || '';
                 }
@@ -10433,6 +10476,7 @@
                     if (e.event_type === 'enip') return e.enip?.response?.status || e.enip?.request?.status || '';
                     if (e.event_type === 'pop3') return e.pop3?.response?.status || '';
                     if (e.socks) return e.socks.status || '';
+                    if (e.slp) return e.slp.status || '';
                     return String(e.http?.status || '');
                 }
                 case 'User-Agent': return (e.http?.http_user_agent || '').slice(0, CONFIG.USER_AGENT_MAX_LENGTH);
@@ -10457,11 +10501,16 @@
                 // CoAP: a request's and its response's
                 case 'Response Code': return e.coap?.response_code || '';
                 case 'Content Format': return e.coap?.response_content_format || e.coap?.request_content_format || '';
+                // SLP: what a request asked about, and what answered it
+                case 'Service Type': return e.slp?.service_type || (e.slp?.service_types || [])[0] || '';
+                case 'Scopes': return e.slp?.scopes || '';
+                case 'Response': return e.slp?.response || '';
                 case 'Version': {
                     if (e.event_type === 'ntp') return e.ntp?.version !== undefined ? String(e.ntp.version) : '';
                     if (e.dtls) return e.dtls.version || '';
                     if (e.rpc) return e.rpc.version !== undefined ? String(e.rpc.version) : '';
                     if (e.socks) return e.socks.version || '';
+                    if (e.slp) return e.slp.version !== undefined ? String(e.slp.version) : '';
                     return e.tls?.version || '-';
                 }
                 case 'Issuer': return (e.tls?.issuerdn || '-').slice(0, CONFIG.TLS_SUBJECT_MAX_LENGTH);
@@ -10502,6 +10551,7 @@
                 case 'Tags': return (e.filealerts?.tags || []).join(', ');
                 case 'Author': return e.filealerts?.author || '';
                 case 'Function': {
+                    if (e.slp) return e.slp.function || '';
                     if (e.event_type === 'modbus') return e.modbus?.request?.function_code || '';
                     if (e.event_type === 's7comm') return e.s7comm?.function || e.s7comm?.function_group || '';
                     if (e.event_type === 'dnp3') {

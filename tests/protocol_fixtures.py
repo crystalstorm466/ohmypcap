@@ -1280,3 +1280,67 @@ def coap_packets():
 
 def write_coap_pcap(path):
     write_pcap(path, coap_packets())
+
+
+# ---------------------------------------------------------------- SLP
+
+# A client (SLP_CLIENT) asking an ESXi host (SLP_HOST, port 427) for its
+# service types, then for its vSphere service and that service's
+# attributes, and for a scope it doesn't serve; the client asking on the
+# SLP multicast group, answered by the host directly; a scanner
+# (SLP_SCANNER) registering a service with the host, and asking for its
+# service types without an answer - the amplification probe; and the
+# host announcing itself as a directory agent.
+SLP_CLIENT, SLP_HOST, SLP_SCANNER, SLP_MULTICAST = '10.1.0.37', '10.1.0.57', '198.51.100.14', '239.255.255.253'
+SLP_URL = 'service:VMwareInfrastructure://esx01.example.org'
+SLP_ATTRIBUTES = '(product="VMware ESXi 7.0.3 build-19193900"),(hostname=esx01)'
+
+
+def _slp_string(value):
+    raw = value.encode()
+    return struct.pack('!H', len(raw)) + raw
+
+
+def _slp_url(url, lifetime=10800):
+    return b'\0' + struct.pack('!H', lifetime) + _slp_string(url) + b'\0'
+
+
+def _slp(function, xid, body, flags=0):
+    """An SLPv2 message (RFC 2608): the header, language 'en', then body."""
+    lang = _slp_string('en')
+    length = 14 + len(lang) - 2 + len(body)
+    return (bytes([2, function]) + length.to_bytes(3, 'big') + struct.pack('!H', flags) + b'\0\0\0' +
+            struct.pack('!H', xid) + lang + body)
+
+
+def slp_packets():
+    def ask(src, sport, dst, message):
+        return _udp_packet(src, dst, sport, 427, message)
+
+    def answer(dport, message):
+        return _udp_packet(SLP_HOST, SLP_CLIENT, 427, dport, message)
+    s = _slp_string
+    service_request = lambda xid, kind, scope, flags=0: _slp(1, xid, s('') + s(kind) + s(scope) + s('') + s(''), flags)
+    type_request = lambda xid: _slp(9, xid, s('') + b'\xff\xff' + s('DEFAULT'))
+    return [ask(SLP_CLIENT, 50001, SLP_HOST, type_request(1)),
+            answer(50001, _slp(10, 1, b'\0\0' + s('service:VMwareInfrastructure,service:wbem'))),
+            ask(SLP_CLIENT, 50001, SLP_HOST, service_request(2, 'service:VMwareInfrastructure', 'DEFAULT')),
+            answer(50001, _slp(2, 2, b'\0\0\0\1' + _slp_url(SLP_URL))),
+            ask(SLP_CLIENT, 50001, SLP_HOST, _slp(6, 3, s('') + s(SLP_URL) + s('DEFAULT') + s('') + s(''))),
+            answer(50001, _slp(7, 3, b'\0\0' + s(SLP_ATTRIBUTES) + b'\0')),
+            ask(SLP_CLIENT, 50001, SLP_HOST, service_request(4, 'service:wbem', 'LAB')),
+            answer(50001, _slp(2, 4, b'\0\4\0\0')),
+            ask(SLP_CLIENT, 50002, SLP_MULTICAST, service_request(5, 'service:directory-agent', 'DEFAULT', 0x2000)),
+            answer(50002, _slp(8, 5, b'\0\0' + struct.pack('!I', 1700000000) + s('service:directory-agent://10.1.0.57') +
+                               s('DEFAULT') + s('') + s('') + b'\0')),
+            ask(SLP_SCANNER, 51000, SLP_HOST, _slp(3, 6, _slp_url('service:printer:lpr://198.51.100.14', 65535) +
+                                                   s('service:printer:lpr') + s('DEFAULT') + s('(x=' + 'A' * 40 + ')') +
+                                                   b'\0', flags=0x4000)),
+            _udp_packet(SLP_HOST, SLP_SCANNER, 427, 51000, _slp(5, 6, b'\0\0')),
+            ask(SLP_SCANNER, 51001, SLP_HOST, type_request(7)),
+            _udp_packet(SLP_HOST, '255.255.255.255', 427, 427,
+                        _slp(11, 0, s('service:service-agent://10.1.0.57') + s('DEFAULT') + s('') + b'\0'))]
+
+
+def write_slp_pcap(path):
+    write_pcap(path, slp_packets())

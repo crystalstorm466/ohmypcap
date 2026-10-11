@@ -1184,6 +1184,155 @@ class CoAP:
         return self.records
 
 
+# ---------------------------------------------------------------- SLP
+#
+# The Service Location Protocol (UDP and TCP 427): how a client finds a
+# service - ESXi's vSphere service, printers, WBEM - by asking a host or
+# the SLP multicast group. One record per request and its replies: the
+# function, service type, scopes and URL asked about, the URLs, service
+# types and attributes the reply listed, its status, and the request's
+# and replies' sizes. Internet scanners send SLP to find ESXi hosts
+# (the OpenSLP flaws behind the ESXiArgs ransomware) and reflectors for
+# the CVE-2023-29552 amplification attack, which registers a service
+# with a host so that its answers to spoofed requests grow - a
+# registration from outside, or a request nobody answered, is still a
+# record. A multicast request's replies come straight back from each
+# host that answered, so they join the request's record, with who
+# answered. An advertisement, or a reply to a request before the capture
+# began, is a record of its own.
+
+_SLP_FUNCTIONS = {1: 'Service Request', 2: 'Service Reply', 3: 'Service Registration', 4: 'Service Deregistration',
+                  5: 'Service Acknowledge', 6: 'Attribute Request', 7: 'Attribute Reply', 8: 'DA Advertisement',
+                  9: 'Service Type Request', 10: 'Service Type Reply', 11: 'SA Advertisement'}
+_SLP_REQUESTS = {1, 3, 4, 6, 9}
+_SLP_ERRORS = {0: 'OK', 1: 'LANGUAGE_NOT_SUPPORTED', 2: 'PARSE_ERROR', 3: 'INVALID_REGISTRATION',
+               4: 'SCOPE_NOT_SUPPORTED', 5: 'AUTHENTICATION_UNKNOWN', 6: 'AUTHENTICATION_ABSENT',
+               7: 'AUTHENTICATION_FAILED', 9: 'VER_NOT_SUPPORTED', 10: 'INTERNAL_ERROR', 11: 'DA_BUSY_NOW',
+               12: 'OPTION_NOT_UNDERSTOOD', 13: 'INVALID_UPDATE', 14: 'MSG_NOT_SUPPORTED', 15: 'REFRESH_REJECTED'}
+_SLP_V1_ERRORS = {**_SLP_ERRORS, 2: 'PROTOCOL_PARSE_ERROR', 5: 'CHARSET_NOT_UNDERSTOOD'}
+_SLP_MAX_LIST = 50
+_SLP_MAX_ATTRIBUTES = 1024
+# What each request asks about: record name -> its field, by function
+_SLP_ASKED = {1: (('service_type', 'srvloc.srvreq.srvtypelist'), ('scopes', 'srvloc.srvreq.scopelist'),
+                  ('predicate', 'srvloc.srvreq.predicate')),
+              3: (('url', 'srvloc.url.url'), ('service_type', 'srvloc.srvreq.srvtype'),
+                  ('scopes', 'srvloc.srvreq.scopelist'), ('attributes', 'srvloc.srvreq.attrlist')),
+              4: (('url', 'srvloc.url.url'), ('scopes', 'srvloc.srvdereq.scopelist'),
+                  ('tags', 'srvloc.srvdereq.taglist')),
+              6: (('url', 'srvloc.attrreq.url'), ('scopes', 'srvloc.attrreq.scopelist'),
+                  ('tags', 'srvloc.attrreq.taglist')),
+              9: (('naming_authority', 'srvloc.srvtypereq.nameauthlist'), ('scopes', 'srvloc.srvtypereq.scopelist'))}
+# Where a reply or advertisement lists URLs and attributes
+_SLP_URLS = ('srvloc.url.url', 'srvloc.daadvert.url', 'srvloc.saadvert.url')
+_SLP_ATTRIBUTES = ('srvloc.attrrply.attrlist', 'srvloc.daadvert.attrlist', 'srvloc.saadvert.attrlist')
+_SLP_ADVERT_SCOPES = ('srvloc.daadvert.scopelist', 'srvloc.saadvert.scopelist')
+
+
+def _slp_group_address(address):
+    from shark_analyzer import _is_group_address   # shark_analyzer imports this module
+    return _is_group_address(address)
+
+
+class SLP:
+    """SLP - see the comment above."""
+    event_type = 'slp'
+    app_protos = ('slp',)
+    fields = tuple(dict.fromkeys(
+        ('srvloc.version', 'srvloc.function', 'srvloc.xid', 'srvloc.pktlen', 'srvloc.err', 'srvloc.errv2',
+         'srvloc.flags_v2.fresh', 'srvloc.flags_v2.reqmulti', 'srvloc.url.lifetime', 'srvloc.srvtyperply.srvtypelist')
+        + tuple(field for asked in _SLP_ASKED.values() for _, field in asked)
+        + _SLP_URLS + _SLP_ATTRIBUTES + _SLP_ADVERT_SCOPES))
+
+    def __init__(self):
+        self.records = []
+        self.open = {}           # (flow key, xid) / ('group', client, client port, xid) -> body
+        self.started = {}        # id(body) -> its request's time and flow
+
+    def feed(self, pkt, v):
+        def first(name):
+            return (v[name] or [''])[0]
+        version, number, xid = _int(first('srvloc.version')), _int(first('srvloc.function')), _int(first('srvloc.xid'))
+        if version not in (1, 2) or number not in _SLP_FUNCTIONS or (version == 1 and number == 11):
+            return               # something else on port 427
+        function, length = _SLP_FUNCTIONS[number], _int(first('srvloc.pktlen'))
+        if number in _SLP_REQUESTS:
+            key = (pkt.flow.key, xid)
+            body = self.open.get(key)
+            if body is not None and body['function'] == function and 'response' not in body:
+                body['retransmissions'] = body.get('retransmissions', 0) + 1
+                return
+            body = {'version': version, 'function': function, 'xid': xid}
+            for name, field in _SLP_ASKED[number]:
+                if first(field):
+                    body[name] = first(field)
+            if 'attributes' in body:
+                body['attributes'] = body['attributes'][:_SLP_MAX_ATTRIBUTES]
+            if number == 3:
+                if _int(first('srvloc.url.lifetime')) is not None:
+                    body['lifetime'] = _int(first('srvloc.url.lifetime'))
+                if first('srvloc.flags_v2.fresh') in ('1', 'True'):
+                    body['fresh'] = True
+            if first('srvloc.flags_v2.reqmulti') in ('1', 'True'):
+                body['multicast'] = True
+            if length:
+                body['request_length'] = length
+            self.records.append((pkt.flow, pkt.when, self.event_type, body))
+            self.started[id(body)] = (pkt.when, pkt.flow)
+            self.open[key] = body
+            if _slp_group_address(pkt.dst):
+                self.open[('group', pkt.src, pkt.sport, xid)] = body
+            return
+        body = self.open.get((pkt.flow.key, xid)) or self.open.get(('group', pkt.dst, pkt.dport, xid))
+        if body is None or number in (8, 11) and xid == 0:
+            body = {'version': version, 'function': function}
+            if xid:
+                body['xid'] = xid
+            for field in _SLP_ADVERT_SCOPES:
+                if first(field):
+                    body['scopes'] = first(field)
+            self.records.append((pkt.flow, pkt.when, self.event_type, body))
+            self._reply(body, v, first, version, None)
+            if length:
+                body['length'] = length
+            return
+        started, flow = self.started[id(body)]
+        body['responses'] = body.get('responses', 0) + 1
+        if 'response' not in body:
+            body['response'] = function
+            body['response_time'] = round(pkt.when - started, 6)
+        if pkt.flow is not flow:
+            responders = body.setdefault('responders', [])
+            if pkt.src not in responders and len(responders) < _SLP_MAX_LIST:
+                responders.append(pkt.src)
+        self._reply(body, v, first, version, length)
+
+    @staticmethod
+    def _reply(body, v, first, version, length):
+        error = _int(first('srvloc.errv2' if version == 2 else 'srvloc.err'))
+        if error is not None and (error or 'status' not in body):
+            body['status'] = (_SLP_ERRORS if version == 2 else _SLP_V1_ERRORS).get(error, f'error {error}')
+        urls = body.get('urls', [])
+        for field in _SLP_URLS:
+            for url in v[field]:
+                if url and url not in urls and len(urls) < _SLP_MAX_LIST:
+                    urls.append(url)
+        if urls:
+            body['urls'] = urls
+        if first('srvloc.srvtyperply.srvtypelist'):
+            types = body.setdefault('service_types', [])
+            for kind in first('srvloc.srvtyperply.srvtypelist').split(','):
+                if kind and kind not in types and len(types) < _SLP_MAX_LIST:
+                    types.append(kind)
+        for field in _SLP_ATTRIBUTES:
+            if first(field):
+                body.setdefault('attributes', first(field)[:_SLP_MAX_ATTRIBUTES])
+        if length:
+            body['response_length'] = body.get('response_length', 0) + length
+
+    def finish(self):
+        return self.records
+
+
 # ---------------------------------------------------------------- SSDP
 
 class SSDP:
@@ -2718,7 +2867,7 @@ def _pdus(layer):
 
 # Every protocol with records here, from tshark's fields, in the order their
 # fields follow the base fields in tshark's output.
-PROTOCOLS = (LLMNR, NBNS, DHCPv6, Syslog, DTLS, RPC, SOCKS, RADIUS, STUN, CoAP, SSDP, S7comm, Telnet, IEC104, BACnet, GOOSE, Browser, LLDP, CDP)
+PROTOCOLS = (LLMNR, NBNS, DHCPv6, Syslog, DTLS, RPC, SOCKS, RADIUS, STUN, CoAP, SLP, SSDP, S7comm, Telnet, IEC104, BACnet, GOOSE, Browser, LLDP, CDP)
 # ... and from the structured pass (shark_analyzer._structured_pass): none
 # yet - it's for a protocol whose messages nest, which flat fields can't
 # keep apart (several commands per packet, a token inside a command).

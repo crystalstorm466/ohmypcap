@@ -841,6 +841,80 @@ class TestCoAP(unittest.TestCase):
 
 
 @unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
+class TestSLP(unittest.TestCase):
+    """tests/protocol_fixtures.write_slp_pcap: one record per request and
+    its replies, or per advertisement - with what Suricata 8.0.7 logged
+    for the capture (tests/data/slp_fixture.eve.json): flows it gives no
+    protocol."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests.protocol_fixtures import write_slp_pcap
+        cls.tmpdir = tempfile.mkdtemp()
+        cls.pcap = os.path.join(cls.tmpdir, 'slp.pcap')
+        write_slp_pcap(cls.pcap)
+        cls.records = shark_analyzer.run_tshark(cls.pcap)
+        cls.slp = [r for r in cls.records if r['event_type'] == 'slp']
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    def test_a_clients_questions_to_an_esxi_host(self):
+        types, service, attributes, scope = (r['slp'] for r in self.slp[:4])
+        self.assertEqual(types, {'version': 2, 'function': 'Service Type Request', 'xid': 1, 'scopes': 'DEFAULT',
+                                 'request_length': 29, 'responses': 1, 'response': 'Service Type Reply',
+                                 'response_time': 1.0, 'status': 'OK',
+                                 'service_types': ['service:VMwareInfrastructure', 'service:wbem'],
+                                 'response_length': 61})
+        self.assertEqual({k: service[k] for k in ('function', 'service_type', 'scopes', 'urls')},
+                         {'function': 'Service Request', 'service_type': 'service:VMwareInfrastructure',
+                          'scopes': 'DEFAULT', 'urls': ['service:VMwareInfrastructure://esx01.example.org']})
+        self.assertEqual({k: attributes[k] for k in ('function', 'url', 'response', 'attributes')},
+                         {'function': 'Attribute Request', 'url': 'service:VMwareInfrastructure://esx01.example.org',
+                          'response': 'Attribute Reply',
+                          'attributes': '(product="VMware ESXi 7.0.3 build-19193900"),(hostname=esx01)'})
+        self.assertEqual((scope['scopes'], scope['status']), ('LAB', 'SCOPE_NOT_SUPPORTED'))
+
+    def test_a_multicast_request_answered_by_a_host(self):
+        record = self.slp[4]
+        self.assertEqual(record['dest_ip'], '239.255.255.253')
+        self.assertEqual({k: record['slp'][k] for k in ('multicast', 'response', 'responders', 'urls')},
+                         {'multicast': True, 'response': 'DA Advertisement', 'responders': ['10.1.0.57'],
+                          'urls': ['service:directory-agent://10.1.0.57']})
+
+    def test_a_scanners_registration_and_its_unanswered_probe(self):
+        registration, probe = (r['slp'] for r in self.slp[5:7])
+        self.assertEqual({k: registration[k] for k in ('function', 'url', 'service_type', 'lifetime', 'fresh',
+                                                       'request_length', 'response', 'status')},
+                         {'function': 'Service Registration', 'url': 'service:printer:lpr://198.51.100.14',
+                          'service_type': 'service:printer:lpr', 'lifetime': 65535, 'fresh': True,
+                          'request_length': 134, 'response': 'Service Acknowledge', 'status': 'OK'})
+        self.assertEqual(probe, {'version': 2, 'function': 'Service Type Request', 'xid': 7, 'scopes': 'DEFAULT',
+                                 'request_length': 29})
+
+    def test_an_advertisement_is_a_record_of_its_own(self):
+        self.assertEqual(self.slp[7]['slp'], {'version': 2, 'function': 'SA Advertisement', 'scopes': 'DEFAULT',
+                                              'urls': ['service:service-agent://10.1.0.57'], 'length': 63})
+
+    def test_flows_match_suricatas_and_the_merge_adds_the_records(self):
+        from scripts.compare_shark_suricata import compare
+        report = compare(_load_eve('slp_fixture.eve.json'), self.records)['flow']
+        self.assertEqual((report['matched'], report['named_by_tshark'], report['differences']), (6, 6, []))
+        d = os.path.join(self.tmpdir, 'analysis')
+        os.makedirs(d)
+        shutil.copy(self.pcap, d)
+        events_db = os.path.join(d, 'events.db')
+        db.create_sqlite_db(events_db, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data',
+                                                    'slp_fixture.eve.json'))
+        self.assertTrue(shark_analyzer.build(d, os.path.join(d, 'slp.pcap')))
+        shark_analyzer.merge(d)
+        counts = db.get_event_types_sqlite(events_db)
+        self.assertEqual(counts.get('slp'), 8)
+        self.assertFalse([t for t in counts if t.startswith('conn_')], 'records, not connection cards')
+
+
+@unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
 class TestSTUN(unittest.TestCase):
     """tests/protocol_fixtures.write_stun_pcap: one record per flow and
     method - with what Suricata 8.0.7 logged for the capture

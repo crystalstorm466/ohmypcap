@@ -62,7 +62,7 @@ SHARK_ARTIFACTS = (SHARK_DB, SHARK_DB + '-wal', SHARK_DB + '-shm', SHARK_DB + '.
 # change here or in shark_protocols changes what a run produces: a
 # shark.db stamped with an older version is rebuilt the next time its
 # status is asked for, so existing analyses pick up the change.
-SHARK_FORMAT_VERSION = 26
+SHARK_FORMAT_VERSION = 27
 
 # The fields every packet is read for, one per column of tshark's
 # tab-separated output, in this order - then each of shark_protocols'
@@ -127,7 +127,8 @@ _IP_PROTO_NAMES = {'1': 'ICMP', '2': 'IGMP', '6': 'TCP', '17': 'UDP', '47': 'GRE
 # app_proto uses Suricata's name, so the two views agree (its
 # shark.protocols keeps tshark's own names).
 SURICATA_APP_PROTO_NAMES = {'mbtcp': 'modbus', 'smb2': 'smb', 'kerberos': 'krb5', 'isakmp': 'ike',
-                            'vnc': 'rfb', 'pop': 'pop3', 'bt-dht': 'bittorrent-dht', 'cldap': 'ldap'}
+                            'vnc': 'rfb', 'pop': 'pop3', 'bt-dht': 'bittorrent-dht', 'cldap': 'ldap',
+                            'srvloc': 'slp'}
 
 _TRANSPORT_LAYERS = {'tcp', 'udp', 'sctp'}
 # Layers that only carry another protocol, or carry undecoded payload -

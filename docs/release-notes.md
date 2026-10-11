@@ -54,6 +54,14 @@ each card marked with a dot:
   request and its response, like Suricata's HTTP records: method, URI,
   response code and content format - and, for a device's discovery
   (`/.well-known/core`), the resources it listed
+- **SLP** (Service Location Protocol, UDP and TCP 427 - Suricata doesn't
+  parse it) - a record for each request and its replies: the service
+  type, scope and URL asked about, the URLs, service types and
+  attributes returned (an ESXi host's product and build), the status,
+  every host that answered a multicast request, and each side's size.
+  Internet scanners hunt ESXi hosts with SLP and register services
+  with exposed hosts for the CVE-2023-29552 amplification attack; their
+  registrations and unanswered probes are records too
 - **STUN** (NAT discovery and TURN relays, for WebRTC, VoIP and games -
   and malware finding its public address) - a record for each flow's
   exchanges of one kind: the public address and port the server

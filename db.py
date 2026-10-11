@@ -1419,6 +1419,15 @@ AGGREGATION_JSON_PATHS = {
         'Content Format': ['$.coap.response_content_format', '$.coap.request_content_format'],
         'Type': ['$.coap.type'],
     },
+    'slp': {
+        'Function': ['$.slp.function'],
+        'Service Type': ['$.slp.service_type', '$.slp.service_types[0]'],
+        'Scopes': ['$.slp.scopes'],
+        'URL': ['$.slp.url', '$.slp.urls[0]'],
+        'Response': ['$.slp.response'],
+        'Status': ['$.slp.status'],
+        'Version': ['$.slp.version'],
+    },
     'stun': {
         'Method': ['$.stun.method'],
         'Result': ['$.stun.result'],
