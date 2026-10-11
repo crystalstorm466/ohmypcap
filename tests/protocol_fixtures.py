@@ -1044,3 +1044,49 @@ def rpc_packets():
 
 def write_rpc_pcap(path):
     write_pcap(path, rpc_packets())
+
+
+# ---------------------------------------------------------------- SOCKS
+#
+# Clients through a SOCKS proxy (SOCKS_PROXY, port 1080): a SOCKS5
+# CONNECT by name with no login, then an HTTP request through the tunnel;
+# a SOCKS5 login and a CONNECT the proxy's ruleset refuses; a SOCKS4a
+# CONNECT by name and a SOCKS4 one by address, refused; and an open-proxy
+# check that offers no method the proxy accepts.
+
+SOCKS_CLIENT, SOCKS_PROXY, SOCKS_SCANNER = '10.1.0.31', '10.1.0.45', '198.51.100.9'
+
+
+def socks_packets():
+    def session(client, cport, exchanges):
+        tcp = _Tcp(client, SOCKS_PROXY, cport, 1080)
+        pkts = tcp.open()
+        for request, reply in exchanges:
+            pkts += tcp.send(True, request)
+            if reply:
+                pkts += tcp.send(False, reply)
+        return pkts + tcp.close()
+
+    name = b'files.example.net'
+    return (session(SOCKS_CLIENT, 42001, [
+                (b'\x05\x01\x00', b'\x05\x00'),
+                (b'\x05\x01\x00\x03' + bytes([len(name)]) + name + struct.pack('!H', 80),
+                 b'\x05\x00\x00\x01' + socket.inet_aton('192.0.2.10') + struct.pack('!H', 50123)),
+                (b'GET /update.bin HTTP/1.1\r\nHost: files.example.net\r\n\r\n',
+                 b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok')])
+            + session(SOCKS_CLIENT, 42002, [
+                (b'\x05\x02\x00\x02', b'\x05\x02'),
+                (b'\x01\x09proxyuser\x06hunter', b'\x01\x00'),
+                (b'\x05\x01\x00\x01' + socket.inet_aton('203.0.113.25') + struct.pack('!H', 25),
+                 b'\x05\x02\x00\x01' + b'\x00' * 6)])
+            + session(SOCKS_CLIENT, 42003, [
+                (b'\x04\x01' + struct.pack('!H', 80) + b'\x00\x00\x00\x01' + b'bob\x00' + b'example.org\x00',
+                 b'\x00\x5a' + struct.pack('!H', 80) + socket.inet_aton('198.51.100.80'))])
+            + session(SOCKS_CLIENT, 42004, [
+                (b'\x04\x01' + struct.pack('!H', 6667) + socket.inet_aton('192.0.2.67') + b'\x00',
+                 b'\x00\x5b' + b'\x00' * 6)])
+            + session(SOCKS_SCANNER, 51000, [(b'\x05\x01\x02', b'\x05\xff')]))
+
+
+def write_socks_pcap(path):
+    write_pcap(path, socks_packets())

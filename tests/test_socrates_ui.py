@@ -21824,6 +21824,9 @@ class TestTsharkUI(unittest.TestCase):
         'browser': {'event_type': 'browser', 'browser': {'message': 'Local Master Announcement', 'source_name': 'DC1',
                                                       'destination_name': 'FIXTUREDOM', 'os_version': '10.0',
                                                       'roles': ['workstation', 'domain controller'], 'count': 3}},
+        'socks': {'event_type': 'socks', 'socks': {'version': '5', 'command': 'connect', 'request_name': 'files.example.net',
+                                                  'request_port': 80, 'status': 'succeeded', 'user': 'proxyuser',
+                                                  'tunneled': 'http', 'bound_host': '192.0.2.10', 'bound_port': 50123}},
         'rpc': {'event_type': 'rpc', 'rpc': {'program': 'mountd', 'program_number': 100005, 'version': 3, 'procedure': 'MNT',
                                              'reply': 'RPC executed successfully', 'machine_name': 'client1',
                                              'uid': 1000, 'gid': 1000, 'path': '/export/home'}},
@@ -21878,6 +21881,7 @@ class TestTsharkUI(unittest.TestCase):
         'iec104': ['Single command', '7', '2001', 'on', 'confirmed, terminated'],
         'browser': ['Local Master Announcement', 'DC1', 'FIXTUREDOM', '10.0', 'workstation, domain controller', '3'],
         'rpc': ['mountd', '3', 'MNT', 'RPC executed successfully', 'client1'],
+        'socks': ['5', 'connect', 'files.example.net', '80', 'succeeded', 'proxyuser', 'http'],
         'dtls': ['dtls.example', 'DTLS 1.2', 'completed', 'C=US, O=Fixture Ltd, CN=dtls.example',
                  'dd2d0105wc_648b5c445417_7d72a171e567'],
         'syslog': ['info', 'auth', 'sw-core', 'sshd', 'Failed password for admin from 10.1.0.77'],
@@ -21963,7 +21967,7 @@ class TestTsharkUI(unittest.TestCase):
         import db
         from tests.jsdom_helper import js_statements
         cols = js_statements("""window.__jsdom_result = Object.fromEntries(
-            ['llmnr', 'nbns', 's7comm', 'ssdp', 'telnet', 'iec104', 'iec104_point', 'bacnet', 'bacnet_property', 'bacnet_device', 'opcua', 'opcua_action', 'goose', 'browser', 'lldp', 'cdp', 'dhcpv6', 'syslog', 'dtls', 'rpc'].map(t => [t, getColumnsForType(t).slice(6)]));""")
+            ['llmnr', 'nbns', 's7comm', 'ssdp', 'telnet', 'iec104', 'iec104_point', 'bacnet', 'bacnet_property', 'bacnet_device', 'opcua', 'opcua_action', 'goose', 'browser', 'lldp', 'cdp', 'dhcpv6', 'syslog', 'dtls', 'rpc', 'socks'].map(t => [t, getColumnsForType(t).slice(6)]));""")
         for t, columns in cols.items():
             self.assertEqual(list(db.AGGREGATION_JSON_PATHS[t]), columns, t)
 

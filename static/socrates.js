@@ -2166,6 +2166,7 @@
                 syslog: '#ffca28',
                 dtls: '#4dd0e1',
                 rpc: '#a1887f',
+                socks: '#ab47bc',
                 opcua_action: '#ff7043',
                 bacnet_property: '#5c6bc0',
                 bacnet_device: '#8d6e63',
@@ -3831,6 +3832,26 @@
             return html;
         }
 
+        // tshark's SOCKS records (shark_protocols.SOCKS): one per connection
+        // through the proxy - the host it was asked to reach, and its answer.
+        function renderSocksDetails(e) {
+            const s = e.socks || {};
+            let html = htmlSection('SOCKS Details', COLORS.EVENT.socks);
+            html += htmlRowText('Version', s.version);
+            html += htmlRowText('Command', s.command);
+            html += htmlRowText('Destination', s.request_name || s.request_host, 'mono');
+            html += htmlRowText('Destination Port', s.request_port !== undefined ? String(s.request_port) : '', 'mono');
+            html += htmlRowText('Status', s.status || 'no reply');
+            html += htmlRowText('Bound Address', s.bound_host, 'mono');
+            html += htmlRowText('Bound Port', s.bound_port !== undefined ? String(s.bound_port) : '', 'mono');
+            html += htmlRowText('Auth Methods Offered', (s.auth_methods || []).join(', '));
+            html += htmlRowText('Auth Method', s.auth_method);
+            html += htmlRowText('User', s.user, 'mono');
+            html += htmlRowText('Login', s.login);
+            html += htmlRowText('Tunneled', s.tunneled);
+            return html;
+        }
+
         // tshark's DTLS records (shark_protocols.DTLS): one per connection's
         // handshake, with the fields Suricata's tls records have.
         function renderDtlsDetails(e) {
@@ -4474,6 +4495,7 @@
             dhcpv6: renderDhcpv6Details,
             syslog: renderSyslogDetails,
             dtls: renderDtlsDetails,
+            socks: renderSocksDetails,
             rpc: renderRpcDetails,
             lldp: renderNeighborDetails,
             cdp: renderNeighborDetails,
@@ -7148,6 +7170,7 @@
             syslog: 'Syslog',
             dtls: 'DTLS',
             rpc: 'ONC RPC',
+            socks: 'SOCKS',
             lldp: 'LLDP',
             cdp: 'CDP',
             opcua_action: 'OPC UA Actions',
@@ -7542,6 +7565,8 @@
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Program', 'Version', 'Procedure', 'Reply', 'Machine Name'];
                 case 'dtls':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'SNI / Host', 'Version', 'Handshake', 'Subject', 'JA4'];
+                case 'socks':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Version', 'Command', 'Destination', 'Destination Port', 'Status', 'User', 'Tunneled'];
                 case 'syslog':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Severity', 'Facility', 'Host', 'Program', 'Message'];
                 case 'dhcpv6':
@@ -8038,10 +8063,11 @@
                 case 'dhcpv6':
                 case 'syslog':
                 case 'dtls':
-                case 'rpc': {
+                case 'rpc':
+                case 'socks': {
                     const cols = getColumnsForType(etype).slice(6);
                     colSpan = cols.length + 6;
-                    row = rowPrefixCells(e) + cols.map(col => `<td${['Search Target', 'Location', 'User', 'Password', 'Chassis ID', 'Port ID', 'Device ID', 'Management IP', 'Hostname', 'Client MAC', 'Assigned IP', 'Host', 'Program', 'Message', 'SNI / Host', 'Subject', 'JA4', 'Machine Name'].includes(col) ? ' class="mono"' : ''}>${escapeHtml(extractValue(e, col))}</td>`).join('') + '</tr>';
+                    row = rowPrefixCells(e) + cols.map(col => `<td${['Search Target', 'Location', 'User', 'Password', 'Chassis ID', 'Port ID', 'Device ID', 'Management IP', 'Hostname', 'Client MAC', 'Assigned IP', 'Host', 'Program', 'Message', 'SNI / Host', 'Subject', 'JA4', 'Machine Name', 'Destination', 'Destination Port'].includes(col) ? ' class="mono"' : ''}>${escapeHtml(extractValue(e, col))}</td>`).join('') + '</tr>';
                     break;
                 }
                 case 'nbns': {
@@ -10276,7 +10302,7 @@
                 case 'Device': return e.bacnet_device?.device !== undefined ? String(e.bacnet_device.device) : '';
                 case 'Vendor': { const d = e.bacnet_device; return d?.vendor || (d?.vendor_id !== undefined ? String(d.vendor_id) : ''); }
                 case 'Announcements': return e.bacnet_device?.announcements !== undefined ? String(e.bacnet_device.announcements) : '';
-                case 'User': return e.telnet?.username || e.opcua?.username || '';
+                case 'User': return e.telnet?.username || e.opcua?.username || e.socks?.user || '';
                 // GOOSE: a state change's
                 case 'Control Block': return e.goose?.gocb_ref || '';
                 case 'Dataset': return e.goose?.dataset || '';
@@ -10301,6 +10327,7 @@
                 case 'Status': {
                     if (e.event_type === 'enip') return e.enip?.response?.status || e.enip?.request?.status || '';
                     if (e.event_type === 'pop3') return e.pop3?.response?.status || '';
+                    if (e.socks) return e.socks.status || '';
                     return String(e.http?.status || '');
                 }
                 case 'User-Agent': return (e.http?.http_user_agent || '').slice(0, CONFIG.USER_AGENT_MAX_LENGTH);
@@ -10308,10 +10335,15 @@
                 // DTLS: how far the handshake got, and the client's fingerprint
                 case 'Handshake': return e.dtls?.handshake || '';
                 case 'JA4': return e.dtls?.ja4 || '';
+                // SOCKS: where the proxy was asked to connect, and what came through it
+                case 'Destination': return e.socks?.request_name || e.socks?.request_host || '';
+                case 'Destination Port': return e.socks?.request_port !== undefined ? String(e.socks.request_port) : '';
+                case 'Tunneled': return e.socks?.tunneled || '';
                 case 'Version': {
                     if (e.event_type === 'ntp') return e.ntp?.version !== undefined ? String(e.ntp.version) : '';
                     if (e.dtls) return e.dtls.version || '';
                     if (e.rpc) return e.rpc.version !== undefined ? String(e.rpc.version) : '';
+                    if (e.socks) return e.socks.version || '';
                     return e.tls?.version || '-';
                 }
                 case 'Issuer': return (e.tls?.issuerdn || '-').slice(0, CONFIG.TLS_SUBJECT_MAX_LENGTH);
@@ -10388,6 +10420,7 @@
                     if (e.event_type === 'pgsql') return e.pgsql?.response?.command_completed || '';
                     if (e.event_type === 'enip') return e.enip?.request?.command || e.enip?.response?.command || '';
                     if (e.event_type === 'pop3') return e.pop3?.request?.command || '';
+                    if (e.socks) return e.socks.command || '';
                     return e.ftp?.command || '';
                 }
                 case 'Rows': return e.pgsql?.response?.data_rows !== undefined ? String(e.pgsql.response.data_rows) : '';

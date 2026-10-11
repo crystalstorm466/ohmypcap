@@ -740,6 +740,102 @@ class DTLS:
         return records
 
 
+# ---------------------------------------------------------------- SOCKS
+#
+# A SOCKS proxy (port 1080) relays a client's connection to the host it
+# names - so the flow shows only the proxy, and the real destination is
+# in the handshake. One record per connection, like Zeek's socks.log: the
+# version, the login methods the client offered and the one the proxy
+# picked, the user name (never the password), the command and the host
+# (by address or name) and port asked for, the proxy's answer and the
+# address it bound for the relay - and the protocol tshark saw tunneled
+# through it afterwards. An open-proxy check the proxy turned away is
+# still a record.
+
+_SOCKS_AUTH_METHODS = {0: 'no authentication', 1: 'GSSAPI', 2: 'username/password', 3: 'CHAP',
+                       0xff: 'no acceptable methods'}
+# The proxy's answer: SOCKS 5's codes, then SOCKS 4's (tshark's vals()
+# names only SOCKS 5's)
+_SOCKS_RESULTS = {0: 'succeeded', 1: 'general SOCKS server failure', 2: 'connection not allowed by ruleset',
+                  3: 'network unreachable', 4: 'host unreachable', 5: 'connection refused', 6: 'TTL expired',
+                  7: 'command not supported', 8: 'address type not supported', 90: 'granted',
+                  91: 'rejected or failed', 92: "rejected: can't reach the client's identd",
+                  93: "rejected: the client's identd gave a different user"}
+# Layers tshark gives a tunneled packet's bytes it can't name
+_SOCKS_UNNAMED = {'data', 'tcp.segments'}
+
+
+def _socks_auth_method(value):
+    number = _int(value)
+    return _SOCKS_AUTH_METHODS.get(number, f'method {number}') if number is not None else ''
+
+
+class SOCKS:
+    """SOCKS 4, 4a and 5 - see the comment above."""
+    event_type = 'socks'
+    app_protos = ('socks',)
+    fields = ('frame.protocols', 'socks.version', 'vals(socks.command)', 'socks.results', 'socks.auth_method',
+              'socks.auth_accepted_method', 'socks.auth_status', 'socks.username', 'socks.dst', 'socks.dstV6',
+              'socks.remote_name', 'socks.v4a_dns_name', 'socks.dstport', 'socks.port')
+
+    def __init__(self):
+        self.records = []
+        self.sessions = {}       # flow key -> body
+
+    def feed(self, pkt, v):
+        def first(name):
+            return (v[name] or [''])[0]
+        layers = first('frame.protocols').split(':')
+        above = layers[layers.index('socks') + 1:] if 'socks' in layers else []
+        body = self.sessions.get(pkt.flow.key)
+        if above:
+            # The tunnel: tshark keeps adding the handshake's socks.* fields
+            # to every packet relayed after it, so only the layer above counts
+            if body is not None and 'tunneled' not in body:
+                named = [layer for layer in above if layer not in _SOCKS_UNNAMED]
+                body['tunneled'] = named[0] if named else 'unknown'
+            return
+        if body is None:
+            body = self.sessions[pkt.flow.key] = {}
+            self.records.append((pkt.flow, pkt.when, self.event_type, body))
+        host = first('socks.dst') or (ipv6_exploded(first('socks.dstV6')) if first('socks.dstV6') else '')
+        port = _int(first('socks.port') or first('socks.dstport'))
+        if v['socks.auth_method']:
+            body['version'] = first('socks.version')
+            body['auth_methods'] = [_socks_auth_method(m) for m in v['socks.auth_method']]
+        elif first('socks.auth_accepted_method'):
+            body['auth_method'] = _socks_auth_method(first('socks.auth_accepted_method'))
+            if body['auth_method'] == 'no acceptable methods':
+                body['status'] = 'no acceptable authentication method'
+        elif first('socks.auth_status'):
+            body['login'] = 'succeeded' if _int(first('socks.auth_status')) == 0 else 'failed'
+            if body['login'] == 'failed':
+                body['status'] = 'login failed'
+        elif first('socks.results'):
+            code = _int(first('socks.results'))
+            body['status'] = _SOCKS_RESULTS.get(code, f'result {code}')
+            if host and host not in ('0.0.0.0', '::', '0000:0000:0000:0000:0000:0000:0000:0000'):
+                body['bound_host'] = host
+            if port:
+                body['bound_port'] = port
+        elif first('vals(socks.command)'):
+            version = first('socks.version')
+            body['version'] = '4a' if version == '4' and first('socks.v4a_dns_name') else version
+            body['command'] = first('vals(socks.command)').lower().replace('udpassociate', 'UDP associate')
+            name = first('socks.remote_name') or first('socks.v4a_dns_name')
+            if name:
+                body['request_name'] = name
+            elif host:
+                body['request_host'] = host
+            if port is not None:
+                body['request_port'] = port
+        if first('socks.username'):
+            body['user'] = first('socks.username')
+
+    def finish(self):
+        return self.records
+
+
 # ---------------------------------------------------------------- SSDP
 
 class SSDP:
@@ -2274,7 +2370,7 @@ def _pdus(layer):
 
 # Every protocol with records here, from tshark's fields, in the order their
 # fields follow the base fields in tshark's output.
-PROTOCOLS = (LLMNR, NBNS, DHCPv6, Syslog, DTLS, RPC, SSDP, S7comm, Telnet, IEC104, BACnet, GOOSE, Browser, LLDP, CDP)
+PROTOCOLS = (LLMNR, NBNS, DHCPv6, Syslog, DTLS, RPC, SOCKS, SSDP, S7comm, Telnet, IEC104, BACnet, GOOSE, Browser, LLDP, CDP)
 # ... and from the structured pass (shark_analyzer._structured_pass): none
 # yet - it's for a protocol whose messages nest, which flat fields can't
 # keep apart (several commands per packet, a token inside a command).

@@ -774,6 +774,72 @@ class TestRPC(unittest.TestCase):
 
 
 @unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
+class TestSOCKS(unittest.TestCase):
+    """tests/protocol_fixtures.write_socks_pcap: one record per connection
+    through the proxy - with what Suricata 8.0.7 logged for the capture
+    (tests/data/socks_fixture.eve.json): flows it gives no protocol, but
+    for the SOCKS 5 one it calls dcerpc (its greeting starts 05, like a
+    DCE/RPC header), backed only by a protocol-decode alert."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests.protocol_fixtures import write_socks_pcap
+        cls.tmpdir = tempfile.mkdtemp()
+        cls.pcap = os.path.join(cls.tmpdir, 'socks.pcap')
+        write_socks_pcap(cls.pcap)
+        cls.records = shark_analyzer.run_tshark(cls.pcap)
+        cls.sessions = {r['src_port']: r['socks'] for r in cls.records if r['event_type'] == 'socks'}
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    def test_a_socks5_connect_by_name_and_what_went_through_it(self):
+        self.assertEqual(self.sessions[42001], {
+            'version': '5', 'auth_methods': ['no authentication'], 'auth_method': 'no authentication',
+            'command': 'connect', 'request_name': 'files.example.net', 'request_port': 80, 'status': 'succeeded',
+            'bound_host': '192.0.2.10', 'bound_port': 50123, 'tunneled': 'http'})
+
+    def test_a_login_keeps_the_user_name_never_the_password(self):
+        login = self.sessions[42002]
+        self.assertEqual({k: login[k] for k in ('auth_methods', 'auth_method', 'user', 'login', 'request_host',
+                                                 'request_port', 'status')},
+                         {'auth_methods': ['no authentication', 'username/password'], 'auth_method': 'username/password',
+                          'user': 'proxyuser', 'login': 'succeeded', 'request_host': '203.0.113.25', 'request_port': 25,
+                          'status': 'connection not allowed by ruleset'})
+        self.assertNotIn('hunter', json.dumps(self.records))
+
+    def test_socks4_and_4a(self):
+        self.assertEqual(self.sessions[42003], {'version': '4a', 'command': 'connect', 'request_name': 'example.org',
+                                                'request_port': 80, 'user': 'bob', 'status': 'granted',
+                                                'bound_host': '198.51.100.80', 'bound_port': 80})
+        self.assertEqual(self.sessions[42004], {'version': '4', 'command': 'connect', 'request_host': '192.0.2.67',
+                                                'request_port': 6667, 'status': 'rejected or failed'})
+
+    def test_an_open_proxy_check_turned_away(self):
+        self.assertEqual(self.sessions[51000], {'version': '5', 'auth_methods': ['username/password'],
+                                                'auth_method': 'no acceptable methods',
+                                                'status': 'no acceptable authentication method'})
+
+    def test_flows_match_suricatas_and_the_merge_adds_every_record(self):
+        from scripts.compare_shark_suricata import compare
+        report = compare(_load_eve('socks_fixture.eve.json'), self.records)['flow']
+        self.assertEqual([d['fields'] for d in report['differences']], [{'app_proto': ('dcerpc', 'socks')}])
+        d = os.path.join(self.tmpdir, 'analysis')
+        os.makedirs(d)
+        shutil.copy(self.pcap, d)
+        events_db = os.path.join(d, 'events.db')
+        db.create_sqlite_db(events_db, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data',
+                                                    'socks_fixture.eve.json'))
+        self.assertTrue(shark_analyzer.build(d, os.path.join(d, 'socks.pcap')))
+        shark_analyzer.merge(d)
+        counts = db.get_event_types_sqlite(events_db)
+        self.assertEqual(counts.get('socks'), 5,
+                         "the dcerpc label is backed by nothing but a protocol-decode alert, so it isn't Suricata's word")
+        self.assertFalse([t for t in counts if t.startswith('conn_')], 'records, not connection cards')
+
+
+@unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
 class TestDTLS(unittest.TestCase):
     """tests/protocol_fixtures.write_dtls_pcap: one record per connection's
     handshake, named like Suricata's tls records - with what Suricata

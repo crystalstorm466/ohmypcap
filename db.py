@@ -672,7 +672,9 @@ def iter_events_json(db_path):
 
 
 # Event types that aren't the output of Suricata's protocol parsing
-_NOT_PROTOCOL_RECORDS = ('flow', 'alert', 'anomaly', 'fileinfo', 'stats', 'netflow', 'frame', 'drop')
+# (protocol_decode is an alert too - create_sqlite_db's name for Suricata's
+# own decoder ones, such as 'Applayer Detect protocol only one direction')
+_NOT_PROTOCOL_RECORDS = ('flow', 'alert', 'protocol_decode', 'anomaly', 'fileinfo', 'stats', 'netflow', 'frame', 'drop')
 
 
 def suricata_identified_flows(db_path):
@@ -1408,6 +1410,15 @@ AGGREGATION_JSON_PATHS = {
         'Procedure': ['$.rpc.procedure'],
         'Reply': ['$.rpc.reply'],
         'Machine Name': ['$.rpc.machine_name'],
+    },
+    'socks': {
+        'Version': ['$.socks.version'],
+        'Command': ['$.socks.command'],
+        'Destination': ['$.socks.request_name', '$.socks.request_host'],
+        'Destination Port': ['$.socks.request_port'],
+        'Status': ['$.socks.status'],
+        'User': ['$.socks.user'],
+        'Tunneled': ['$.socks.tunneled'],
     },
     'dtls': {
         'SNI / Host': ['$.dtls.sni'],
