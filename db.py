@@ -1419,6 +1419,14 @@ AGGREGATION_JSON_PATHS = {
         'Content Format': ['$.coap.response_content_format', '$.coap.request_content_format'],
         'Type': ['$.coap.type'],
     },
+    'tunnel': {
+        'Tunnel Type': ['$.tunnel.type'],
+        'Tunnel Packets →': ['$.tunnel.packets_toserver'],
+        'Tunnel Packets ←': ['$.tunnel.packets_toclient'],
+        'Inner Flows': ['$.tunnel.inner_flows'],
+        'Inner Host': ['$.tunnel.inner_hosts[0]'],
+        'Returns to Sender': ['$.tunnel.returns_to_sender'],
+    },
     'rip': {
         'Command': ['$.rip.command'],
         'Version': ['$.rip.version'],

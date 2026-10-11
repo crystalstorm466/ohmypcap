@@ -2174,6 +2174,7 @@
                 ipmi: '#ec407a',
                 l2tp: '#26c6da',
                 rip: '#9ccc65',
+                tunnel: '#8d6e63',
                 opcua_action: '#ff7043',
                 bacnet_property: '#5c6bc0',
                 bacnet_device: '#8d6e63',
@@ -3977,6 +3978,26 @@
             return html;
         }
 
+        // tshark's tunnel records (shark_analyzer._Tunnels): one per tunnel
+        // - its type and outer endpoints - with what crossed it.
+        function renderTunnelDetails(e) {
+            const t = e.tunnel || {};
+            const count = n => n !== undefined ? n.toLocaleString() : '';
+            let html = htmlSection('Tunnel Details', COLORS.EVENT.tunnel);
+            html += htmlRowText('Type', t.type);
+            html += htmlRowText('Returns to Sender', t.returns_to_sender ? 'yes - a probe of whether this end unwraps tunnels' : '');
+            html += htmlRowText('Packets →', count(t.packets_toserver));
+            html += htmlRowText('Packets ←', count(t.packets_toclient));
+            html += htmlRowText('Bytes →', count(t.bytes_toserver));
+            html += htmlRowText('Bytes ←', count(t.bytes_toclient));
+            html += htmlRowText('Inner Flows', count(t.inner_flows));
+            html += htmlRowText('Inner Hosts', (t.inner_hosts || []).join(', '), 'mono');
+            html += htmlRowText('Start', t.start);
+            html += htmlRowText('End', t.end);
+            html += htmlRowText('Duration', t.age !== undefined ? `${t.age.toLocaleString()} s` : '');
+            return html;
+        }
+
         // tshark's STUN records (shark_protocols.STUN): one per flow and
         // method - the public addresses the server reported, a TURN relay.
         function renderStunDetails(e) {
@@ -4705,6 +4726,7 @@
             ipmi: renderIpmiDetails,
             l2tp: renderL2tpDetails,
             rip: renderRipDetails,
+            tunnel: renderTunnelDetails,
             rpc: renderRpcDetails,
             lldp: renderNeighborDetails,
             cdp: renderNeighborDetails,
@@ -7387,6 +7409,7 @@
             ipmi: 'IPMI',
             l2tp: 'L2TP',
             rip: 'RIP',
+            tunnel: 'Tunnel',
             lldp: 'LLDP',
             cdp: 'CDP',
             opcua_action: 'OPC UA Actions',
@@ -7783,6 +7806,8 @@
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'SNI / Host', 'Version', 'Handshake', 'Subject', 'JA4'];
                 case 'coap':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Method', 'URI', 'Query', 'Response Code', 'Content Format', 'Type'];
+                case 'tunnel':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Tunnel Type', 'Tunnel Packets →', 'Tunnel Packets ←', 'Inner Flows', 'Inner Host', 'Returns to Sender'];
                 case 'rip':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Command', 'Version', 'Route Count', 'Route', 'Withdrawn', 'Metric Changes', 'Authentication'];
                 case 'l2tp':
@@ -8301,10 +8326,11 @@
                 case 'slp':
                 case 'ipmi':
                 case 'l2tp':
-                case 'rip': {
+                case 'rip':
+                case 'tunnel': {
                     const cols = getColumnsForType(etype).slice(6);
                     colSpan = cols.length + 6;
-                    row = rowPrefixCells(e) + cols.map(col => `<td${['Search Target', 'Location', 'User', 'Password', 'Chassis ID', 'Port ID', 'Device ID', 'Management IP', 'Hostname', 'Client MAC', 'Assigned IP', 'Host', 'Program', 'Message', 'SNI / Host', 'Subject', 'JA4', 'Machine Name', 'Destination', 'Destination Port', 'Calling Station', 'Mapped Address', 'Relayed Address', 'URI', 'Query', 'Service Type', 'Scopes', 'URL', 'Client Host', 'Firmware', 'Server Host', 'Route'].includes(col) ? ' class="mono"' : ''}>${escapeHtml(extractValue(e, col))}</td>`).join('') + '</tr>';
+                    row = rowPrefixCells(e) + cols.map(col => `<td${['Search Target', 'Location', 'User', 'Password', 'Chassis ID', 'Port ID', 'Device ID', 'Management IP', 'Hostname', 'Client MAC', 'Assigned IP', 'Host', 'Program', 'Message', 'SNI / Host', 'Subject', 'JA4', 'Machine Name', 'Destination', 'Destination Port', 'Calling Station', 'Mapped Address', 'Relayed Address', 'URI', 'Query', 'Service Type', 'Scopes', 'URL', 'Client Host', 'Firmware', 'Server Host', 'Route', 'Inner Host'].includes(col) ? ' class="mono"' : ''}>${escapeHtml(extractValue(e, col))}</td>`).join('') + '</tr>';
                     break;
                 }
                 case 'nbns': {
@@ -10624,6 +10650,13 @@
                 case 'Withdrawn': return e.rip?.withdrawn ? String(e.rip.withdrawn) : '';
                 case 'Metric Changes': return e.rip?.metric_changes ? String(e.rip.metric_changes) : '';
                 case 'Authentication': return e.rip?.authentication || '';
+                // Tunnels: what carried packets inside others, and what crossed it
+                case 'Tunnel Type': return e.tunnel?.type || '';
+                case 'Tunnel Packets →': return e.tunnel ? String(e.tunnel.packets_toserver || 0) : '';
+                case 'Tunnel Packets ←': return e.tunnel ? String(e.tunnel.packets_toclient || 0) : '';
+                case 'Inner Flows': return e.tunnel?.inner_flows !== undefined ? String(e.tunnel.inner_flows) : '';
+                case 'Inner Host': return (e.tunnel?.inner_hosts || [])[0] || '';
+                case 'Returns to Sender': return e.tunnel?.returns_to_sender ? 'yes' : '';
                 case 'Version': {
                     if (e.event_type === 'ntp') return e.ntp?.version !== undefined ? String(e.ntp.version) : '';
                     if (e.dtls) return e.dtls.version || '';

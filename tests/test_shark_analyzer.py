@@ -841,6 +841,75 @@ class TestCoAP(unittest.TestCase):
 
 
 @unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
+class TestTunnels(unittest.TestCase):
+    """tests/protocol_fixtures.write_tunnel_pcap: one record per tunnel,
+    and its packets' flows as Suricata 8.0.7 logged them
+    (tests/data/tunnel_fixture.eve.json): the inner flow from the inner
+    network layer on, and - but for GRE - the outer flow too."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests.protocol_fixtures import write_tunnel_pcap
+        cls.tmpdir = tempfile.mkdtemp()
+        cls.pcap = os.path.join(cls.tmpdir, 'tunnel.pcap')
+        write_tunnel_pcap(cls.pcap)
+        cls.records = shark_analyzer.run_tshark(cls.pcap)
+        cls.tunnels = {r['tunnel']['type']: r for r in cls.records if r['event_type'] == 'tunnel'}
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    def test_a_gre_tunnel_between_two_sites(self):
+        gre = self.tunnels['GRE']
+        self.assertEqual((gre['src_ip'], gre['dest_ip'], gre['proto']), ('192.0.2.10', '192.0.2.20', 'GRE'))
+        self.assertEqual({k: gre['tunnel'][k] for k in ('packets_toserver', 'packets_toclient', 'bytes_toserver',
+                                                        'bytes_toclient', 'inner_flows', 'inner_hosts', 'age')},
+                         {'packets_toserver': 2, 'packets_toclient': 1, 'bytes_toserver': 156, 'bytes_toclient': 78,
+                          'inner_flows': 1, 'inner_hosts': ['10.10.0.5', '10.20.0.7'], 'age': 2})
+
+    def test_udp_tunnels_and_ip_in_ip(self):
+        self.assertEqual(sorted(self.tunnels), ['6in4', 'GRE', 'IP-in-IP', 'Teredo', 'VXLAN'])
+        vxlan, teredo = self.tunnels['VXLAN'], self.tunnels['Teredo']
+        self.assertEqual((vxlan['proto'], vxlan['src_port'], vxlan['dest_port'], vxlan['tunnel']['inner_hosts']),
+                         ('UDP', 50000, 4789, ['172.16.5.1', '172.16.5.2']))
+        self.assertEqual((teredo['dest_port'], teredo['tunnel']['inner_hosts'][1]),
+                         (3544, '2001:0db8:0000:0000:0000:0000:0000:0001'))
+        self.assertEqual((self.tunnels['6in4']['proto'], self.tunnels['IP-in-IP']['proto']), ('IPv6', 'IP-in-IP'))
+
+    def test_a_probe_whose_inner_packet_returns_to_its_sender(self):
+        self.assertTrue(self.tunnels['IP-in-IP']['tunnel']['returns_to_sender'])
+        self.assertNotIn('returns_to_sender', self.tunnels['GRE']['tunnel'])
+
+    def test_flows_match_suricatas_inner_and_outer(self):
+        from scripts.compare_shark_suricata import compare
+        report = compare(_load_eve('tunnel_fixture.eve.json'), self.records)['flow']
+        self.assertEqual((report['suricata'], report['shark'], report['matched'], report['differences']),
+                         (9, 9, 9, []))
+        inner = [r for r in self.records if r['event_type'] == 'flow' and r.get('app_proto') == 'dns']
+        self.assertEqual((inner[0]['src_ip'], inner[0]['flow']['bytes_toserver']), ('172.16.5.1', 40),
+                         'the VXLAN packet inside, from its IP header on')
+
+    def test_the_merge_adds_tunnels_but_no_connection_cards_for_outer_flows(self):
+        d = os.path.join(self.tmpdir, 'analysis')
+        os.makedirs(d)
+        shutil.copy(self.pcap, d)
+        events_db = os.path.join(d, 'events.db')
+        db.create_sqlite_db(events_db, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data',
+                                                    'tunnel_fixture.eve.json'))
+        self.assertTrue(shark_analyzer.build(d, os.path.join(d, 'tunnel.pcap')))
+        shark_analyzer.merge(d)
+        counts = db.get_event_types_sqlite(events_db)
+        self.assertEqual(counts.get('tunnel'), 5)
+        self.assertNotIn('conn_vxlan', counts)
+        self.assertNotIn('conn_teredo', counts)
+
+    def test_community_id_of_a_flow_without_ports(self):
+        self.assertEqual(shark_analyzer._community_id('198.51.100.19', '10.1.0.1', 4, None, None),
+                         '1:gcg0H/WlbVi2i7iyVESN6ELcU3Y=')
+
+
+@unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
 class TestRIP(unittest.TestCase):
     """tests/protocol_fixtures.write_rip_pcap: one record per sender,
     destination and kind of message - with what Suricata 8.0.7 logged

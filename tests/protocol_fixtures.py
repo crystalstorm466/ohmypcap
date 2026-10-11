@@ -1521,3 +1521,43 @@ def rip_packets():
 
 def write_rip_pcap(path):
     write_pcap(path, rip_packets())
+
+
+# ---------------------------------------------------------------- Tunnels
+
+# Two sites (TUNNEL_SITE_A, TUNNEL_SITE_B) joined by GRE, a TCP connection
+# between their LANs crossing it both ways; a VXLAN overlay between two
+# hosts; a Teredo client reaching its relay; a scanner's IP-in-IP probe
+# whose inner packet goes back to the scanner; and a 6in4 packet.
+TUNNEL_SITE_A, TUNNEL_SITE_B = '192.0.2.10', '192.0.2.20'
+VXLAN_A, VXLAN_B, TEREDO_CLIENT, TEREDO_RELAY = '10.1.0.70', '10.1.0.71', '10.1.0.72', '198.51.100.30'
+TUNNEL_SCANNER, TUNNEL_TARGET, SIXIN4_SENDER = '198.51.100.19', '10.1.0.1', '198.51.100.20'
+
+
+def _ipv4_wrap(src, dst, proto, payload):
+    s, d = socket.inet_aton(src), socket.inet_aton(dst)
+    ip = struct.pack('!BBHHHBBH4s4s', 0x45, 0, 20 + len(payload), 1, 0, 64, proto, 0, s, d)
+    ip = ip[:10] + struct.pack('!H', _checksum(ip)) + ip[12:]
+    return b'\x00' * 6 + b'\x11' * 6 + struct.pack('!H', 0x0800) + ip + payload
+
+
+def tunnel_packets():
+    inner = lambda packet: packet[14:]          # an Ethernet frame's IP packet
+    gre = lambda packet: _ipv4_wrap(*packet[0], 47, b'\x00\x00\x08\x00' + inner(packet[1]))
+    syn = _tcp_packet('10.10.0.5', '10.20.0.7', 51000, 443, 1, 0, 0x02)
+    syn_ack = _tcp_packet('10.20.0.7', '10.10.0.5', 443, 51000, 1, 2, 0x12)
+    ack = _tcp_packet('10.10.0.5', '10.20.0.7', 51000, 443, 2, 2, 0x10)
+    vxlan_frame = _udp_packet('172.16.5.1', '172.16.5.2', 40000, 53, b'\x00\x01\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00')
+    teredo = _udp6_packet('2001:0:c633:641e::1', '2001:db8::1', 40001, 7, b'ping')
+    return [gre(((TUNNEL_SITE_A, TUNNEL_SITE_B), syn)), gre(((TUNNEL_SITE_B, TUNNEL_SITE_A), syn_ack)),
+            gre(((TUNNEL_SITE_A, TUNNEL_SITE_B), ack)),
+            _udp_packet(VXLAN_A, VXLAN_B, 50000, 4789, b'\x08\x00\x00\x00\x00\x13\x88\x00' + vxlan_frame),
+            _udp_packet(TEREDO_CLIENT, TEREDO_RELAY, 50444, 3544, inner(teredo)),
+            _ipv4_wrap(TUNNEL_SCANNER, TUNNEL_TARGET, 4,
+                       inner(_udp_packet(TUNNEL_TARGET, TUNNEL_SCANNER, 33000, 33001, b'probe'))),
+            _ipv4_wrap(SIXIN4_SENDER, TUNNEL_TARGET, 41, inner(_udp6_packet('2002:c633:6414::1', '2001:db8::2',
+                                                                            40002, 7, b'6in4')))]
+
+
+def write_tunnel_pcap(path):
+    write_pcap(path, tunnel_packets())

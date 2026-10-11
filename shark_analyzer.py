@@ -38,6 +38,8 @@ import os
 import re
 import shutil
 import signal
+import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -62,24 +64,27 @@ SHARK_ARTIFACTS = (SHARK_DB, SHARK_DB + '-wal', SHARK_DB + '-shm', SHARK_DB + '.
 # change here or in shark_protocols changes what a run produces: a
 # shark.db stamped with an older version is rebuilt the next time its
 # status is asked for, so existing analyses pick up the change.
-SHARK_FORMAT_VERSION = 30
+SHARK_FORMAT_VERSION = 31
 
 # The fields every packet is read for, one per column of tshark's
 # tab-separated output, in this order - then each of shark_protocols'
 # fields. Every occurrence of a repeated field is output, joined by
-# _AGGREGATOR; these base fields take the last one, so a tunneled packet
-# (IP in GRE/VXLAN, etc.) reports its inner addresses and ports - the flow
-# Suricata also reports.
+# _AGGREGATOR; these base fields take the last one. A tunneled packet (IP
+# in GRE, VXLAN, Teredo, IP in IP...) is split first (_split_tunnel): its
+# inner flow from the inner network layer on, and its tunnel's outer flow -
+# as Suricata logs them both. ip.len and ipv6.plen are for the inner
+# flow's bytes, which Suricata counts from the inner IP header on.
 _FIELDS = (
     'frame.time_epoch', 'frame.len', 'frame.protocols',
     'ip.src', 'ip.dst', 'ipv6.src', 'ipv6.dst', 'ip.proto', 'ipv6.nxt',
     'tcp.srcport', 'tcp.dstport', 'udp.srcport', 'udp.dstport',
     'tcp.stream', 'udp.stream', 'tcp.flags.syn', 'tcp.flags.ack',
-    'eth.src', 'eth.dst', 'communityid', 'frame.number',
+    'eth.src', 'eth.dst', 'communityid', 'frame.number', 'ip.len', 'ipv6.plen',
 )
 (_F_TIME, _F_LEN, _F_PROTOS, _F_IP_SRC, _F_IP_DST, _F_IP6_SRC, _F_IP6_DST, _F_IP_PROTO,
  _F_IP6_NXT, _F_TCP_SPORT, _F_TCP_DPORT, _F_UDP_SPORT, _F_UDP_DPORT, _F_TCP_STREAM,
- _F_UDP_STREAM, _F_SYN, _F_ACK, _F_ETH_SRC, _F_ETH_DST, _F_CID, _F_FRAME) = range(len(_FIELDS))
+ _F_UDP_STREAM, _F_SYN, _F_ACK, _F_ETH_SRC, _F_ETH_DST, _F_CID, _F_FRAME,
+ _F_IP_LEN, _F_IP6_PLEN) = range(len(_FIELDS))
 # Each field once: tshark fills only one column of a field asked for twice,
 # and protocols share fields (SSDP reads HTTP's) - so each protocol finds
 # its fields by name (_COLUMN), not by position.
@@ -120,7 +125,7 @@ _PROBE_SHARE = 0.75
 _AGGREGATOR = '\x1f'
 
 # IP protocol numbers Suricata names in a flow's proto field.
-_IP_PROTO_NAMES = {'1': 'ICMP', '2': 'IGMP', '6': 'TCP', '17': 'UDP', '47': 'GRE',
+_IP_PROTO_NAMES = {'1': 'ICMP', '2': 'IGMP', '4': 'IP-in-IP', '6': 'TCP', '17': 'UDP', '41': 'IPv6', '47': 'GRE',
                    '50': 'ESP', '58': 'IPv6-ICMP', '89': 'OSPF', '112': 'VRRP', '132': 'SCTP'}
 
 # tshark's names for protocols Suricata calls something else - a flow's
@@ -256,7 +261,7 @@ class _Flow:
     __slots__ = ('key', 'proto', 'ip_v', 'client', 'server', 'cport', 'sport', 'first', 'last',
                  'pkts_ts', 'pkts_tc', 'bytes_ts', 'bytes_tc', 'protocols', 'app_proto', 'community_id',
                  'stream', 'client_set_by_syn', 'client_set_by_message', 'first_frame', 'last_frame', 'recorded',
-                 'icmp_ts', 'icmp_tc')
+                 'icmp_ts', 'icmp_tc', 'tunnel')
 
     def __init__(self, key, proto, ip_v, src, dst, sport, dport, when, stream):
         self.key, self.proto, self.ip_v, self.stream = key, proto, ip_v, stream
@@ -270,6 +275,7 @@ class _Flow:
         self.client_set_by_syn = self.client_set_by_message = False
         self.first_frame = self.last_frame = 0     # its first and last packet's frame numbers
         self.recorded = False      # whether it carries a protocol with records (iter_records)
+        self.tunnel = False        # whether it's a tunnel's outer flow (its tunnel record says more)
 
     def _swap(self):
         self.client, self.server = self.server, self.client
@@ -360,6 +366,8 @@ class _Flow:
             event['src_port'], event['dest_port'] = self.cport, self.sport
         if self.stream is not None:
             event['shark']['stream'] = self.stream
+        if self.tunnel:
+            event['shark']['tunnel'] = True
         answered = self.answered()
         if answered:
             event['shark']['answered'] = answered
@@ -378,6 +386,162 @@ class _Flow:
         if self.pkts_tc > self.icmp_tc:
             return 'yes'
         return 'ICMP error only' if self.icmp_tc else 'no'
+
+
+# Tunnels: what carries a packet inside another - between a packet's
+# outer network layer and the next one in its frame.protocols, by name
+# (anything else - ESP, L2TP's PPP - isn't counted), or nothing at all
+# (IP in IP, 6in4...). Zeek's tunnel.log, which Suricata has no match
+# for: it decodes tunnels to inspect what's inside but logs only the
+# inner flows - which is all tshark's flows here are (see _FIELDS).
+_TUNNEL_LAYERS = (('vxlan', 'VXLAN'), ('geneve', 'Geneve'), ('teredo', 'Teredo'), ('ayiya', 'AYIYA'),
+                  ('gtp', 'GTP-U'), ('erspan', 'ERSPAN'), ('gre', 'GRE'))
+_BARE_TUNNELS = {('ip', 'ip'): 'IP-in-IP', ('ip', 'ipv6'): '6in4', ('ipv6', 'ip'): '4in6',
+                 ('ipv6', 'ipv6'): 'IPv6-in-IPv6'}
+_TUNNEL_OUTER_PROTO = {'IP-in-IP': 'IP-in-IP', '6in4': 'IPv6', '4in6': 'IP-in-IP', 'IPv6-in-IPv6': 'IPv6', 'GRE': 'GRE',
+                       'GRE (Ethernet)': 'GRE', 'ERSPAN': 'GRE'}
+_TUNNEL_MAX_HOSTS = 20
+
+
+def _tunnel_type(layers):
+    """A packet's tunnel and the indexes of its outer and inner network
+    layers, or None."""
+    nets = [i for i, layer in enumerate(layers) if layer in ('ip', 'ipv6')]
+    if len(nets) < 2:
+        return None
+    outer, inner = nets[0], nets[1]
+    between = layers[outer + 1:inner]
+    if not between:
+        kind = _BARE_TUNNELS[(layers[outer], layers[inner])]
+    else:
+        kind = next((name for layer, name in _TUNNEL_LAYERS if layer in between), None)
+        if kind is None:
+            return None
+        if kind == 'GRE' and 'eth' in between:
+            kind = 'GRE (Ethernet)'
+    return kind, outer, inner
+
+
+def _occurrence(cols, column, n):
+    values = cols[column].split(_AGGREGATOR) if column < len(cols) and cols[column] else []
+    return values[n] if n < len(values) else ''
+
+
+# Each base field's layer: the frame.protocols layer whose occurrences it
+# counts, to tell a tunneled packet's outer fields from its inner ones
+_FIELD_LAYERS = {_F_IP_SRC: 'ip', _F_IP_DST: 'ip', _F_IP_PROTO: 'ip', _F_IP_LEN: 'ip', _F_IP6_SRC: 'ipv6',
+                 _F_IP6_DST: 'ipv6', _F_IP6_NXT: 'ipv6', _F_IP6_PLEN: 'ipv6', _F_TCP_SPORT: 'tcp', _F_TCP_DPORT: 'tcp', _F_TCP_STREAM: 'tcp',
+                 _F_SYN: 'tcp', _F_ACK: 'tcp', _F_UDP_SPORT: 'udp', _F_UDP_DPORT: 'udp', _F_UDP_STREAM: 'udp'}
+# Suricata logs a tunnel's outer flow too - except GRE's
+_NO_OUTER_FLOW = ('GRE', 'GRE (Ethernet)', 'ERSPAN')
+_PROTO_NUMBERS = {'TCP': 6, 'UDP': 17, 'IP-in-IP': 4, 'IPv6': 41}
+
+
+def _community_id(src, dst, proto, sport, dport):
+    """Community ID v1 (seed 0) of a flow - for a tunnel's outer flow,
+    which tshark's communityid (the inner one's) doesn't give."""
+    import base64
+    import hashlib
+    family = socket.AF_INET6 if ':' in src else socket.AF_INET
+    a, b = (socket.inet_pton(family, src), sport or 0), (socket.inet_pton(family, dst), dport or 0)
+    if b < a:
+        a, b = b, a
+    # (a protocol without ports hashes them as zeros, as Suricata does)
+    data = struct.pack('!H', 0) + a[0] + b[0] + struct.pack('!BBHH', proto, 0, a[1], b[1])
+    return '1:' + base64.b64encode(hashlib.sha1(data).digest()).decode()
+
+
+def _split_tunnel(cols):
+    """A tunneled packet's two views, or None: (its tunnel's type, the
+    columns of the packet inside - each base field without the outer
+    layers' occurrences, frame.protocols from the inner network layer on
+    - and, for a tunnel whose outer flow Suricata logs, the outer packet's
+    base fields (each one's first occurrence) and app: the tunnel's
+    layer, or '' for IP in IP and the like)."""
+    layers = cols[_F_PROTOS].split(':')
+    found = _tunnel_type(layers)
+    if found is None:
+        return None
+    kind, outer, inner = found
+    inner_cols = list(cols)
+    for column, layer in _FIELD_LAYERS.items():
+        values = cols[column].split(_AGGREGATOR) if cols[column] else []
+        inner_cols[column] = _AGGREGATOR.join(values[layers[:inner].count(layer):])
+    inner_cols[_F_PROTOS] = ':'.join(layers[inner:])
+    if kind in _NO_OUTER_FLOW:
+        return kind, inner_cols, None, ''
+    outer_f = [_last(c) for c in cols[:len(_FIELDS)]]
+    transport = layers[outer + 1] if layers[outer + 1] in ('tcp', 'udp') else ''
+    for column, layer in _FIELD_LAYERS.items():
+        first = cols[column].split(_AGGREGATOR)[0] if cols[column] else ''
+        keep = layer == layers[outer] or layer == transport
+        outer_f[column] = first if keep else ''
+    outer_f[_F_PROTOS] = ':'.join(layers[:inner])
+    app = next((layer for layer, _ in _TUNNEL_LAYERS if layer in layers[outer + 1:inner]), '')
+    return kind, inner_cols, outer_f, app
+
+
+class _Tunnels:
+    """One record per tunnel - its type and outer endpoints - with the
+    inner hosts and flows it carried."""
+
+    def __init__(self):
+        self.tunnels = {}
+
+    def add(self, cols, layers, when, length, inner_key):
+        found = _tunnel_type(layers)
+        if found is None:
+            return
+        kind, outer, inner = found
+
+        def address(index, side):
+            layer = layers[index]
+            n = layers[:index].count(layer)
+            if layer == 'ip':
+                return _occurrence(cols, _F_IP_SRC if side == 'src' else _F_IP_DST, n)
+            value = _occurrence(cols, _F_IP6_SRC if side == 'src' else _F_IP6_DST, n)
+            return ipv6_exploded(value) if value else ''
+        src, dst = address(outer, 'src'), address(outer, 'dst')
+        sport = dport = None
+        if 'udp' in layers[outer + 1:inner]:
+            sport = _int(_occurrence(cols, _F_UDP_SPORT, 0))
+            dport = _int(_occurrence(cols, _F_UDP_DPORT, 0))
+        key = (kind,) + tuple(sorted(((src, sport or 0), (dst, dport or 0))))
+        tunnel = self.tunnels.get(key)
+        if tunnel is None:
+            tunnel = self.tunnels[key] = {'src': src, 'dst': dst, 'sport': sport, 'dport': dport,
+                                          'ip_v': 4 if layers[outer] == 'ip' else 6, 'first': when, 'last': when,
+                                          'body': {'type': kind, 'packets_toserver': 0, 'packets_toclient': 0,
+                                                   'bytes_toserver': 0, 'bytes_toclient': 0},
+                                          'flows': set(), 'hosts': []}
+        body = tunnel['body']
+        side = 'toserver' if (src, sport) == (tunnel['src'], tunnel['sport']) else 'toclient'
+        body[f'packets_{side}'] += 1
+        body[f'bytes_{side}'] += length
+        tunnel['first'], tunnel['last'] = min(tunnel['first'], when), max(tunnel['last'], when)
+        tunnel['flows'].add(inner_key)
+        inner_src, inner_dst = address(inner, 'src'), address(inner, 'dst')
+        for host in (inner_src, inner_dst):
+            if host and host not in tunnel['hosts'] and len(tunnel['hosts']) < _TUNNEL_MAX_HOSTS:
+                tunnel['hosts'].append(host)
+        # A packet that, unwrapped, goes back to whoever sent it: a scanner
+        # testing whether this end unwraps tunnels from anyone
+        if inner_dst and inner_dst == src and layers[outer] == layers[inner]:
+            body['returns_to_sender'] = True
+
+    def records(self):
+        for tunnel in sorted(self.tunnels.values(), key=lambda t: t['first']):
+            body = tunnel['body']
+            body['inner_flows'] = len(tunnel['flows'])
+            body['inner_hosts'] = tunnel['hosts']
+            body['start'], body['end'] = _iso(tunnel['first']), _iso(tunnel['last'])
+            body['age'] = int(tunnel['last'] - tunnel['first'])
+            proto = 'UDP' if tunnel['sport'] is not None else _TUNNEL_OUTER_PROTO.get(body['type'], '')
+            event = {'timestamp': _iso(tunnel['first']), 'event_type': 'tunnel', 'src_ip': tunnel['src'],
+                     'dest_ip': tunnel['dst'], 'proto': proto, 'ip_v': tunnel['ip_v'], 'tunnel': body}
+            if tunnel['sport'] is not None:
+                event['src_port'], event['dest_port'] = tunnel['sport'], tunnel['dport']
+            yield event
 
 
 _ESCAPE = re.compile(r'\\(x[0-9a-fA-F]{2}|.)')
@@ -435,6 +599,18 @@ def _packet_key(f, app):
     return ip_v, src, dst, proto, stream, sport, dport, key
 
 
+def _add_outer(flows, f, app, when, length):
+    """A tunneled packet to its tunnel's outer flow (_split_tunnel)."""
+    ip_v, src, dst, proto, stream, sport, dport, key = _packet_key(f, app)
+    flow = flows.get(key)
+    if flow is None:
+        flow = flows[key] = _Flow(key, proto, ip_v, src, dst, sport, dport, when, stream)
+        flow.tunnel = True
+    cid = _community_id(src, dst, _PROTO_NUMBERS.get(proto, _int(f[_F_IP_PROTO] or f[_F_IP6_NXT])), sport, dport) \
+        if not flow.community_id else ''
+    flow.add(src, sport, length, when, app, cid, False)
+
+
 def iter_records(lines, pcap_path=None, deadline=None, combined=()):
     """build_records' records, one at a time: a flow's is built as it's
     handed out and the flow then let go, so a capture's flows - most of
@@ -445,6 +621,7 @@ def iter_records(lines, pcap_path=None, deadline=None, combined=()):
     them), read from these same lines, which carry their fields too
     (_combined_fields, for a capture _mostly_recorded)."""
     flows = {}
+    tunnels = _Tunnels()
     last_frame = 0
     feeds = None
     if combined:
@@ -463,12 +640,21 @@ def iter_records(lines, pcap_path=None, deadline=None, combined=()):
         cols = line.rstrip('\n').split('\t')
         if len(cols) < len(_FIELDS):
             continue
+        split = _split_tunnel(cols) if cols[_F_PROTOS].count(':ip') > 1 else None    # (ipmi, ipp...: it says)
+        if split is not None:
+            raw_cols, cols = cols, split[1]
         f = [_last(c) for c in cols[:len(_FIELDS)]]
         try:
             when = float(f[_F_TIME])
         except ValueError:
             continue
         length = _int(f[_F_LEN])
+        if split is not None:
+            tunnels.add(raw_cols, raw_cols[_F_PROTOS].split(':'), when, length, _packet_key(f, '')[-1])
+            if split[2] is not None:
+                _add_outer(flows, split[2], split[3], when, length)
+            # The packet inside is its flow's, as Suricata counts it: from its IP header on
+            length = _int(f[_F_IP_LEN]) if f[_F_PROTOS].startswith('ip:') else _int(f[_F_IP6_PLEN]) + 40
         app = app_protocol(f[_F_PROTOS])
         # An ICMP error (port unreachable, TTL exceeded...) carries a copy
         # of the packet it's about, whose addresses and ports are what the
@@ -530,6 +716,7 @@ def iter_records(lines, pcap_path=None, deadline=None, combined=()):
     for handler in protocols + structured:
         for flow, when, event_type, body in handler.finish():
             yield flow.record(when, event_type, body)
+    yield from tunnels.records()
 
 
 # The layers every structured-pass packet is read for, to find its flow
@@ -801,6 +988,9 @@ def _feed_protocols(cols, index, feeds):
     pass's flow it belongs to."""
     if len(cols) < len(_FIELDS):
         return
+    split = _split_tunnel(cols) if cols[_F_PROTOS].count(':ip') > 1 else None
+    if split is not None:
+        cols = split[1]
     f = [_last(c) for c in cols[:len(_FIELDS)]]
     try:
         when = float(f[_F_TIME])
@@ -1271,7 +1461,8 @@ def merge_rows(shark_rows, identified, probed=frozenset()):
         cid = event.get('community_id')
         if event_type == 'flow':
             app = event.get('app_proto') or ''
-            if not app or app in SURICATA_APP_PROTOS or app in RECORDED_APP_PROTOS:
+            if not app or app in SURICATA_APP_PROTOS or app in RECORDED_APP_PROTOS or \
+                    (event.get('shark') or {}).get('tunnel'):
                 continue
             flow = event.get('flow') or {}
             first, last = _iso_epoch(flow.get('start')), _iso_epoch(flow.get('end'))

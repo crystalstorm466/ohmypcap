@@ -87,6 +87,16 @@ each card marked with a dot:
   isn't a router announcing a default route, and scanners asking a
   router for its whole table. RIPv2's authentication is only named: its
   password, sent in the clear, is never kept
+- **Tunnels** (Suricata decodes them but logs none) - a record for each
+  tunnel, like Zeek's tunnel.log: its type (GRE, VXLAN, Geneve, Teredo,
+  AYIYA, GTP-U, IP in IP, 6in4...), its outer endpoints, packets and
+  bytes each way, how long it lasted, and the inner flows and hosts that
+  crossed it - and whether its inner packet goes back to whoever sent
+  it, which is a scanner testing whether a host unwraps tunnels from
+  anyone. A tunneled packet's flows now match Suricata's: the inner
+  flow is addressed, named and counted from the inner packet on (an
+  IPv6 packet over IPv4 was given its outer IPv4 addresses), and the
+  tunnel's outer flow is there too
 - **STUN** (NAT discovery and TURN relays, for WebRTC, VoIP and games -
   and malware finding its public address) - a record for each flow's
   exchanges of one kind: the public address and port the server
