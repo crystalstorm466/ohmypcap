@@ -2173,6 +2173,7 @@
                 slp: '#7e57c2',
                 ipmi: '#ec407a',
                 l2tp: '#26c6da',
+                rip: '#9ccc65',
                 opcua_action: '#ff7043',
                 bacnet_property: '#5c6bc0',
                 bacnet_device: '#8d6e63',
@@ -3956,6 +3957,26 @@
             return html;
         }
 
+        // tshark's RIP records (shark_protocols.RIP): one per sender,
+        // destination and kind of message - the routes it announced.
+        function renderRipDetails(e) {
+            const r = e.rip || {};
+            const count = n => n ? n.toLocaleString() : '';
+            let html = htmlSection('RIP Details', COLORS.EVENT.rip);
+            html += htmlRowText('Command', r.command);
+            html += htmlRowText('Version', r.version);
+            html += htmlRowText('Messages', count(r.messages));
+            html += htmlRowText('Whole Table', r.whole_table ? 'yes' : '');
+            html += htmlRowText('Requested', (r.requested || []).join(', '), 'mono');
+            if (r.command === 'request' || r.command === 'update request') html += htmlRowText('Responses', count(r.responses) || 'no response');
+            html += htmlRowText('Route Count', count(r.route_count));
+            html += htmlRow('Routes', (r.routes || []).map(escapeHtml).join('<br>'), 'mono');
+            html += htmlRowText('Withdrawn', count(r.withdrawn));
+            html += htmlRowText('Metric Changes', count(r.metric_changes));
+            html += htmlRowText('Authentication', r.authentication);
+            return html;
+        }
+
         // tshark's STUN records (shark_protocols.STUN): one per flow and
         // method - the public addresses the server reported, a TURN relay.
         function renderStunDetails(e) {
@@ -4683,6 +4704,7 @@
             slp: renderSlpDetails,
             ipmi: renderIpmiDetails,
             l2tp: renderL2tpDetails,
+            rip: renderRipDetails,
             rpc: renderRpcDetails,
             lldp: renderNeighborDetails,
             cdp: renderNeighborDetails,
@@ -7364,6 +7386,7 @@
             slp: 'SLP',
             ipmi: 'IPMI',
             l2tp: 'L2TP',
+            rip: 'RIP',
             lldp: 'LLDP',
             cdp: 'CDP',
             opcua_action: 'OPC UA Actions',
@@ -7760,6 +7783,8 @@
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'SNI / Host', 'Version', 'Handshake', 'Subject', 'JA4'];
                 case 'coap':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Method', 'URI', 'Query', 'Response Code', 'Content Format', 'Type'];
+                case 'rip':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Command', 'Version', 'Route Count', 'Route', 'Withdrawn', 'Metric Changes', 'Authentication'];
                 case 'l2tp':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Client Host', 'Vendor', 'Firmware', 'Server Host', 'State', 'Result', 'Calls'];
                 case 'ipmi':
@@ -8275,10 +8300,11 @@
                 case 'coap':
                 case 'slp':
                 case 'ipmi':
-                case 'l2tp': {
+                case 'l2tp':
+                case 'rip': {
                     const cols = getColumnsForType(etype).slice(6);
                     colSpan = cols.length + 6;
-                    row = rowPrefixCells(e) + cols.map(col => `<td${['Search Target', 'Location', 'User', 'Password', 'Chassis ID', 'Port ID', 'Device ID', 'Management IP', 'Hostname', 'Client MAC', 'Assigned IP', 'Host', 'Program', 'Message', 'SNI / Host', 'Subject', 'JA4', 'Machine Name', 'Destination', 'Destination Port', 'Calling Station', 'Mapped Address', 'Relayed Address', 'URI', 'Query', 'Service Type', 'Scopes', 'URL', 'Client Host', 'Firmware', 'Server Host'].includes(col) ? ' class="mono"' : ''}>${escapeHtml(extractValue(e, col))}</td>`).join('') + '</tr>';
+                    row = rowPrefixCells(e) + cols.map(col => `<td${['Search Target', 'Location', 'User', 'Password', 'Chassis ID', 'Port ID', 'Device ID', 'Management IP', 'Hostname', 'Client MAC', 'Assigned IP', 'Host', 'Program', 'Message', 'SNI / Host', 'Subject', 'JA4', 'Machine Name', 'Destination', 'Destination Port', 'Calling Station', 'Mapped Address', 'Relayed Address', 'URI', 'Query', 'Service Type', 'Scopes', 'URL', 'Client Host', 'Firmware', 'Server Host', 'Route'].includes(col) ? ' class="mono"' : ''}>${escapeHtml(extractValue(e, col))}</td>`).join('') + '</tr>';
                     break;
                 }
                 case 'nbns': {
@@ -10592,12 +10618,19 @@
                 case 'Firmware': return e.l2tp?.client_firmware || '';
                 case 'Server Host': return e.l2tp?.server_host_name || '';
                 case 'Calls': return e.l2tp?.calls ? String(e.l2tp.calls) : '';
+                // RIP: the routes a sender announced
+                case 'Route Count': return e.rip?.route_count ? String(e.rip.route_count) : '';
+                case 'Route': return e.rip?.whole_table ? 'whole table' : (e.rip?.routes || e.rip?.requested || [])[0] || '';
+                case 'Withdrawn': return e.rip?.withdrawn ? String(e.rip.withdrawn) : '';
+                case 'Metric Changes': return e.rip?.metric_changes ? String(e.rip.metric_changes) : '';
+                case 'Authentication': return e.rip?.authentication || '';
                 case 'Version': {
                     if (e.event_type === 'ntp') return e.ntp?.version !== undefined ? String(e.ntp.version) : '';
                     if (e.dtls) return e.dtls.version || '';
                     if (e.rpc) return e.rpc.version !== undefined ? String(e.rpc.version) : '';
                     if (e.socks) return e.socks.version || '';
                     if (e.slp) return e.slp.version !== undefined ? String(e.slp.version) : '';
+                    if (e.rip) return e.rip.version || '';
                     return e.tls?.version || '-';
                 }
                 case 'Issuer': return (e.tls?.issuerdn || '-').slice(0, CONFIG.TLS_SUBJECT_MAX_LENGTH);
@@ -10672,6 +10705,7 @@
                     return e.dns?.rrname || e.dns?.queries?.[0]?.rrname || '';
                 }
                 case 'Command': {
+                    if (e.rip) return e.rip.command || '';
                     if (e.event_type === 'iec104') return e.iec104?.action || e.iec104?.type || '';
                     if (e.event_type === 'pgsql') return e.pgsql?.response?.command_completed || '';
                     if (e.event_type === 'enip') return e.enip?.request?.command || e.enip?.response?.command || '';

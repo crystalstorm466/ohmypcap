@@ -1419,6 +1419,15 @@ AGGREGATION_JSON_PATHS = {
         'Content Format': ['$.coap.response_content_format', '$.coap.request_content_format'],
         'Type': ['$.coap.type'],
     },
+    'rip': {
+        'Command': ['$.rip.command'],
+        'Version': ['$.rip.version'],
+        'Route Count': ['$.rip.route_count'],
+        'Route': ['$.rip.routes[0]', '$.rip.requested[0]'],
+        'Withdrawn': ['$.rip.withdrawn'],
+        'Metric Changes': ['$.rip.metric_changes'],
+        'Authentication': ['$.rip.authentication'],
+    },
     'l2tp': {
         'Client Host': ['$.l2tp.client_host_name'],
         'Vendor': ['$.l2tp.client_vendor'],

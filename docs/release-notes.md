@@ -79,6 +79,14 @@ each card marked with a dot:
   the calls placed and how many data messages crossed it. The tunnel's
   authentication is only noted, and the PPP inside it - the user's
   login - is never read
+- **RIP and RIPng** (routing, UDP 520 and 521 - Suricata doesn't parse
+  them) - a record for each sender and kind of message: the routes it
+  announced (prefix, next hop, metric, tag), the ones it withdrew, the
+  metric changes between its updates, and what a request asked for -
+  a map of the networks and the routers reaching them, a host that
+  isn't a router announcing a default route, and scanners asking a
+  router for its whole table. RIPv2's authentication is only named: its
+  password, sent in the clear, is never kept
 - **STUN** (NAT discovery and TURN relays, for WebRTC, VoIP and games -
   and malware finding its public address) - a record for each flow's
   exchanges of one kind: the public address and port the server

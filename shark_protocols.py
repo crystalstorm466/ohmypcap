@@ -20,6 +20,7 @@ server like its flow records.
 """
 
 import re
+import socket
 import struct
 
 
@@ -1635,6 +1636,150 @@ class L2TP:
         return self.records
 
 
+# ---------------------------------------------------------------- RIP
+#
+# RIP (UDP 520) and RIPng (its IPv6 version, UDP 521): routers telling
+# each other the networks they reach. On a LAN its records are a map of
+# the networks and the routers that reach them; a route from a host
+# that isn't a router, or a metric that suddenly changes, is how routes
+# are injected to put an attacker in the middle; and a request for the
+# whole route table, from outside, is a scanner asking a router to give
+# its networks away. One record per sender, destination and kind of
+# message: the messages' count, the routes announced (each one's prefix,
+# next hop, metric and tag - its last), the routes withdrawn (metric 16)
+# and the metric changes between updates, and what a request asked for.
+# RIPv2's authentication is only named: its simple password is sent in
+# the clear, and neither that nor a keyed digest is ever kept.
+
+_RIP_COMMANDS = {1: 'request', 2: 'response', 3: 'traceon', 4: 'traceoff', 5: 'reserved', 9: 'update request',
+                 10: 'update response', 11: 'update acknowledge'}
+_RIP_AUTH = {1: 'keyed MD5 trailer', 2: 'simple password', 3: 'keyed MD5'}
+_RIP_INFINITY = 16
+_RIP_MAX_ROUTES = 50
+
+
+def _rip_entries(raw):
+    """A RIP message's command, version, authentication and route entries
+    (prefix, next hop, metric, tag) - never an authentication entry's
+    password or digest."""
+    if len(raw) < 4:
+        return None
+    command, version, entries, auth = raw[0], raw[1], [], None
+    for pos in range(4, len(raw) - 19, 20):
+        family, tag = struct.unpack('!HH', raw[pos:pos + 4])
+        if family == 0xffff:
+            auth = auth or _RIP_AUTH.get(tag, f'type {tag}')
+            continue
+        address, mask, hop = (raw[pos + 4 + i:pos + 8 + i] for i in (0, 4, 8))
+        metric = int.from_bytes(raw[pos + 16:pos + 20], 'big')
+        prefix = '.'.join(map(str, address))
+        if version >= 2 and (any(mask) or not any(address)):     # 0.0.0.0/0, the default route
+            prefix += f'/{bin(int.from_bytes(mask, "big")).count("1")}'
+        hop = '.'.join(map(str, hop)) if any(hop) else ''
+        entries.append((family, prefix, hop, metric, tag if version >= 2 else 0))
+    return command, version, auth, entries
+
+
+def _ripng_entries(raw):
+    """A RIPng message's command, version and route entries; a next-hop
+    entry (metric 0xff) sets the next hop of those after it."""
+    if len(raw) < 4:
+        return None
+    command, version, entries, hop = raw[0], raw[1], [], ''
+    for pos in range(4, len(raw) - 19, 20):
+        address, tag, length, metric = raw[pos:pos + 16], *struct.unpack('!HBB', raw[pos + 16:pos + 20])
+        text = ipv6_exploded(socket.inet_ntop(socket.AF_INET6, address))
+        if metric == 0xff:
+            hop = '' if not any(address) else text
+            continue
+        entries.append((None, f'{text}/{length}', hop, metric, tag))
+    return command, version, None, entries
+
+
+class RIP:
+    """RIP and RIPng - see the comment above."""
+    event_type = 'rip'
+    app_protos = ('rip', 'ripng')
+    fields = ('@rip', '@ripng')
+
+    def __init__(self):
+        self.records = []
+        self.flows = {}          # (flow key, sender, command) -> body
+        self.routes = {}         # id(body) -> {prefix: (next hop, metric, tag)}
+
+    def feed(self, pkt, v):
+        def first(name):
+            return (v[name] or [''])[0]
+        name = '@ripng' if pkt.app == 'ripng' else '@rip'
+        raw = bytes.fromhex(first(name).replace(':', '')) if first(name) else b''
+        parsed = (_ripng_entries if pkt.app == 'ripng' else _rip_entries)(raw)
+        if parsed is None:
+            return
+        command, version, auth, entries = parsed
+        kind = _RIP_COMMANDS.get(command, f'command {command}')
+        # A response to a request on its flow is that request's answer
+        asked = self.flows.get((pkt.flow.key, 'asked'))
+        if command == 2 and asked is not None and asked[0] != pkt.src:
+            body = asked[1]
+            body['responses'] = body.get('responses', 0) + 1
+        else:
+            key = (pkt.flow.key, pkt.src, kind)
+            body = self.flows.get(key)
+            if body is None:
+                body = self.flows[key] = {'version': 'RIPng' if pkt.app == 'ripng' else f'RIPv{version}',
+                                          'command': kind}
+                self.records.append((pkt.flow, pkt.when, self.event_type, body))
+                self.routes[id(body)] = {}
+                if command in (1, 9):
+                    self.flows.setdefault((pkt.flow.key, 'asked'), (pkt.src, body))
+            body['messages'] = body.get('messages', 0) + 1
+        if auth:
+            body['authentication'] = auth
+        if command in (1, 9):
+            # A whole-table request: one entry, address family 0 and metric
+            # 16 - which some scanners send in the wrong byte order
+            if len(entries) == 1 and entries[0][0] in (0, None) and \
+                    entries[0][1].split('/')[0] in ('0.0.0.0', '0000:0000:0000:0000:0000:0000:0000:0000'):
+                body['whole_table'] = True
+            else:
+                asked = body.setdefault('requested', [])
+                for _, prefix, _, _, _ in entries:
+                    if prefix not in asked and len(asked) < _RIP_MAX_ROUTES:
+                        asked.append(prefix)
+                if not asked:
+                    del body['requested']
+            return
+        routes = self.routes[id(body)]
+        for _, prefix, hop, metric, tag in entries:
+            last = routes.get(prefix)
+            if last is not None and last[1] != metric:
+                body['metric_changes'] = body.get('metric_changes', 0) + 1
+            if last is not None or len(routes) < _RIP_MAX_ROUTES:
+                routes[prefix] = (hop, metric, tag)
+            elif prefix not in routes:
+                body['routes_not_kept'] = body.get('routes_not_kept', 0) + 1
+
+    def finish(self):
+        for _, _, _, body in self.records:
+            routes = self.routes.pop(id(body), {})
+            if not routes:
+                continue
+            listed = []
+            for prefix, (hop, metric, tag) in routes.items():
+                text = f'{prefix} metric {metric}'
+                if hop:
+                    text += f' via {hop}'
+                if tag:
+                    text += f' tag {tag}'
+                listed.append(text)
+            body['routes'] = listed
+            body['route_count'] = len(routes) + body.pop('routes_not_kept', 0)
+            withdrawn = sum(1 for _, metric, _ in routes.values() if metric >= _RIP_INFINITY)
+            if withdrawn:
+                body['withdrawn'] = withdrawn
+        return self.records
+
+
 # ---------------------------------------------------------------- SSDP
 
 class SSDP:
@@ -3169,7 +3314,7 @@ def _pdus(layer):
 
 # Every protocol with records here, from tshark's fields, in the order their
 # fields follow the base fields in tshark's output.
-PROTOCOLS = (LLMNR, NBNS, DHCPv6, Syslog, DTLS, RPC, SOCKS, RADIUS, STUN, CoAP, SLP, IPMI, L2TP, SSDP, S7comm, Telnet, IEC104, BACnet, GOOSE, Browser, LLDP, CDP)
+PROTOCOLS = (LLMNR, NBNS, DHCPv6, Syslog, DTLS, RPC, SOCKS, RADIUS, STUN, CoAP, SLP, IPMI, L2TP, RIP, SSDP, S7comm, Telnet, IEC104, BACnet, GOOSE, Browser, LLDP, CDP)
 # ... and from the structured pass (shark_analyzer._structured_pass): none
 # yet - it's for a protocol whose messages nest, which flat fields can't
 # keep apart (several commands per packet, a token inside a command).

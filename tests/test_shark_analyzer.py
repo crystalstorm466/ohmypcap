@@ -841,6 +841,66 @@ class TestCoAP(unittest.TestCase):
 
 
 @unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
+class TestRIP(unittest.TestCase):
+    """tests/protocol_fixtures.write_rip_pcap: one record per sender,
+    destination and kind of message - with what Suricata 8.0.7 logged
+    for the capture (tests/data/rip_fixture.eve.json): flows it gives no
+    protocol."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests.protocol_fixtures import write_rip_pcap
+        cls.tmpdir = tempfile.mkdtemp()
+        cls.pcap = os.path.join(cls.tmpdir, 'rip.pcap')
+        write_rip_pcap(cls.pcap)
+        cls.records = shark_analyzer.run_tshark(cls.pcap)
+        cls.rip = {r['src_ip']: r['rip'] for r in cls.records if r['event_type'] == 'rip'}
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    def test_a_routers_updates_withdrawing_a_route(self):
+        self.assertEqual(self.rip['10.1.0.1'], {
+            'version': 'RIPv2', 'command': 'response', 'messages': 2, 'authentication': 'simple password',
+            'metric_changes': 1, 'route_count': 3, 'withdrawn': 1,
+            'routes': ['10.2.0.0/16 metric 1', '10.3.0.0/16 metric 16 via 10.1.0.2', '0.0.0.0/0 metric 1 tag 7']})
+
+    def test_the_password_is_never_kept(self):
+        from tests.protocol_fixtures import RIP_PASSWORD
+        text = json.dumps([r for r in self.records if r['event_type'] == 'rip'])
+        self.assertNotIn(RIP_PASSWORD.decode(), text)
+        self.assertNotIn(RIP_PASSWORD.hex(), text)
+
+    def test_a_hosts_default_route_and_a_scanners_answered_request(self):
+        self.assertEqual(self.rip['10.1.0.66']['routes'], ['0.0.0.0/0 metric 1'])
+        self.assertEqual(self.rip['198.51.100.18'], {'version': 'RIPv1', 'command': 'request', 'messages': 1,
+                                                     'whole_table': True, 'responses': 1, 'route_count': 2,
+                                                     'routes': ['10.0.0.0 metric 1', '172.16.0.0 metric 2']})
+
+    def test_a_ripng_update(self):
+        self.assertEqual(self.rip['fe80:0000:0000:0000:0000:0000:0000:0001']['routes'],
+                         ['2001:0db8:0001:0000:0000:0000:0000:0000/48 metric 1',
+                          '2001:0db8:0002:0000:0000:0000:0000:0000/48 metric 3'])
+
+    def test_flows_match_suricatas_and_the_merge_adds_the_records(self):
+        from scripts.compare_shark_suricata import compare
+        report = compare(_load_eve('rip_fixture.eve.json'), self.records)['flow']
+        self.assertEqual((report['matched'], report['named_by_tshark'], report['differences']), (4, 4, []))
+        d = os.path.join(self.tmpdir, 'analysis')
+        os.makedirs(d)
+        shutil.copy(self.pcap, d)
+        events_db = os.path.join(d, 'events.db')
+        db.create_sqlite_db(events_db, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data',
+                                                    'rip_fixture.eve.json'))
+        self.assertTrue(shark_analyzer.build(d, os.path.join(d, 'rip.pcap')))
+        shark_analyzer.merge(d)
+        counts = db.get_event_types_sqlite(events_db)
+        self.assertEqual(counts.get('rip'), 4)
+        self.assertFalse([t for t in counts if t.startswith('conn_')], 'records, not connection cards')
+
+
+@unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
 class TestL2TP(unittest.TestCase):
     """tests/protocol_fixtures.write_l2tp_pcap: one record per control
     connection - with what Suricata 8.0.7 logged for the capture

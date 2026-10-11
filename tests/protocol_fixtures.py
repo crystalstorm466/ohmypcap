@@ -1479,3 +1479,45 @@ def l2tp_packets():
 
 def write_l2tp_pcap(path):
     write_pcap(path, l2tp_packets())
+
+
+# ---------------------------------------------------------------- RIP
+
+# A router (RIP_ROUTER) multicasting two RIPv2 updates, authenticated
+# with a simple password, the second withdrawing a route; a host
+# (RIP_ROGUE) announcing a default route - an injection; a scanner
+# (RIP_SCANNER) asking the router for its whole table and answered; and
+# a RIPng router's update. The password must never be kept.
+RIP_ROUTER, RIP_ROGUE, RIP_SCANNER, RIP_GROUP = '10.1.0.1', '10.1.0.66', '198.51.100.18', '224.0.0.9'
+RIPNG_ROUTER, RIPNG_GROUP = 'fe80::1', 'ff02::9'
+RIP_PASSWORD = b'r0uterPw'
+
+
+def _rip(command, version, entries, password=None):
+    out = bytes([command, version, 0, 0])
+    if password:
+        out += struct.pack('!HH', 0xffff, 2) + password.ljust(16, b'\0')
+    for family, address, mask, hop, metric, tag in entries:
+        out += struct.pack('!HH', family, tag) + socket.inet_aton(address) + socket.inet_aton(mask)
+        out += socket.inet_aton(hop) + struct.pack('!I', metric)
+    return out
+
+
+def rip_packets():
+    route = lambda address, mask, metric, hop='0.0.0.0', tag=0: (2, address, mask, hop, metric, tag)
+    update = lambda metric: _rip(2, 2, [route('10.2.0.0', '255.255.0.0', 1),
+                                        route('10.3.0.0', '255.255.0.0', metric, '10.1.0.2'),
+                                        route('0.0.0.0', '0.0.0.0', 1, tag=7)], RIP_PASSWORD)
+    ripng = (bytes([2, 1, 0, 0]) + socket.inet_pton(socket.AF_INET6, '2001:db8:1::') + struct.pack('!HBB', 0, 48, 1) +
+             socket.inet_pton(socket.AF_INET6, '2001:db8:2::') + struct.pack('!HBB', 0, 48, 3))
+    return [_udp_packet(RIP_ROUTER, RIP_GROUP, 520, 520, update(2)),
+            _udp_packet(RIP_ROGUE, RIP_GROUP, 520, 520, _rip(2, 2, [route('0.0.0.0', '0.0.0.0', 1)])),
+            _udp_packet(RIP_ROUTER, RIP_GROUP, 520, 520, update(16)),
+            _udp_packet(RIP_SCANNER, RIP_ROUTER, 40520, 520, _rip(1, 1, [(0, '0.0.0.0', '0.0.0.0', '0.0.0.0', 16, 0)])),
+            _udp_packet(RIP_ROUTER, RIP_SCANNER, 520, 40520,
+                        _rip(2, 1, [(2, '10.0.0.0', '0.0.0.0', '0.0.0.0', 1, 0), (2, '172.16.0.0', '0.0.0.0', '0.0.0.0', 2, 0)])),
+            _udp6_packet(RIPNG_ROUTER, RIPNG_GROUP, 521, 521, ripng)]
+
+
+def write_rip_pcap(path):
+    write_pcap(path, rip_packets())
