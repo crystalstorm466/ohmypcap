@@ -64,7 +64,7 @@ SHARK_ARTIFACTS = (SHARK_DB, SHARK_DB + '-wal', SHARK_DB + '-shm', SHARK_DB + '.
 # change here or in shark_protocols changes what a run produces: a
 # shark.db stamped with an older version is rebuilt the next time its
 # status is asked for, so existing analyses pick up the change.
-SHARK_FORMAT_VERSION = 32
+SHARK_FORMAT_VERSION = 33
 
 # The fields every packet is read for, one per column of tshark's
 # tab-separated output, in this order - then each of shark_protocols'
@@ -519,7 +519,8 @@ class _Tunnels:
         body[f'packets_{side}'] += 1
         body[f'bytes_{side}'] += length
         tunnel['first'], tunnel['last'] = min(tunnel['first'], when), max(tunnel['last'], when)
-        tunnel['flows'].add(inner_key)
+        if inner_key is not None:
+            tunnel['flows'].add(inner_key)
         inner_src, inner_dst = address(inner, 'src'), address(inner, 'dst')
         for host in (inner_src, inner_dst):
             if host and host not in tunnel['hosts'] and len(tunnel['hosts']) < _TUNNEL_MAX_HOSTS:
@@ -649,13 +650,23 @@ def iter_records(lines, pcap_path=None, deadline=None, combined=()):
         except ValueError:
             continue
         length = _int(f[_F_LEN])
+        app = app_protocol(f[_F_PROTOS])
         if split is not None:
-            tunnels.add(raw_cols, raw_cols[_F_PROTOS].split(':'), when, length, _packet_key(f, '')[-1])
+            # Nothing inside but an IP header (a Teredo bubble, keeping a
+            # NAT open) is no flow of its own - as in Suricata - only its
+            # tunnel's
+            bare = app in ('ip', 'ipv6')
+            tunnels.add(raw_cols, raw_cols[_F_PROTOS].split(':'), when, length,
+                        None if bare else _packet_key(f, '')[-1])
             if split[2] is not None:
                 _add_outer(flows, split[2], split[3], when, length)
-            # The packet inside is its flow's, as Suricata counts it: from its IP header on
+            if bare:
+                continue
+            # The packet inside is its flow's, as Suricata counts it: from its
+            # IP header on - or, for GRE carrying Ethernet, its Ethernet header
             length = _int(f[_F_IP_LEN]) if f[_F_PROTOS].startswith('ip:') else _int(f[_F_IP6_PLEN]) + 40
-        app = app_protocol(f[_F_PROTOS])
+            if split[0] == 'GRE (Ethernet)':
+                length += 14
         # An ICMP error (port unreachable, TTL exceeded...) carries a copy
         # of the packet it's about, whose addresses and ports are what the
         # last-occurrence fields read - so it lands in that packet's flow,

@@ -1541,6 +1541,12 @@ def _ipv4_wrap(src, dst, proto, payload):
     return b'\x00' * 6 + b'\x11' * 6 + struct.pack('!H', 0x0800) + ip + payload
 
 
+def _teredo_bubble():
+    """A Teredo bubble: an IPv6 header with no next header (59) and nothing after it."""
+    s, d = socket.inet_pton(socket.AF_INET6, '2001:0:c633:641e::1'), socket.inet_pton(socket.AF_INET6, '2001:db8::1')
+    return struct.pack('!IHBB', 6 << 28, 0, 59, 64) + s + d
+
+
 def tunnel_packets():
     inner = lambda packet: packet[14:]          # an Ethernet frame's IP packet
     gre = lambda packet: _ipv4_wrap(*packet[0], 47, b'\x00\x00\x08\x00' + inner(packet[1]))
@@ -1553,6 +1559,7 @@ def tunnel_packets():
             gre(((TUNNEL_SITE_A, TUNNEL_SITE_B), ack)),
             _udp_packet(VXLAN_A, VXLAN_B, 50000, 4789, b'\x08\x00\x00\x00\x00\x13\x88\x00' + vxlan_frame),
             _udp_packet(TEREDO_CLIENT, TEREDO_RELAY, 50444, 3544, inner(teredo)),
+            _udp_packet(TEREDO_CLIENT, TEREDO_RELAY, 50444, 3544, _teredo_bubble()),
             _ipv4_wrap(TUNNEL_SCANNER, TUNNEL_TARGET, 4,
                        inner(_udp_packet(TUNNEL_TARGET, TUNNEL_SCANNER, 33000, 33001, b'probe'))),
             _ipv4_wrap(SIXIN4_SENDER, TUNNEL_TARGET, 41, inner(_udp6_packet('2002:c633:6414::1', '2001:db8::2',

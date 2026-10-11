@@ -936,8 +936,9 @@ class TestTunnels(unittest.TestCase):
         vxlan, teredo = self.tunnels['VXLAN'], self.tunnels['Teredo']
         self.assertEqual((vxlan['proto'], vxlan['src_port'], vxlan['dest_port'], vxlan['tunnel']['inner_hosts']),
                          ('UDP', 50000, 4789, ['172.16.5.1', '172.16.5.2']))
-        self.assertEqual((teredo['dest_port'], teredo['tunnel']['inner_hosts'][1]),
-                         (3544, '2001:0db8:0000:0000:0000:0000:0000:0001'))
+        self.assertEqual((teredo['dest_port'], teredo['tunnel']['inner_hosts'][1], teredo['tunnel']['packets_toserver'],
+                          teredo['tunnel']['inner_flows']),
+                         (3544, '2001:0db8:0000:0000:0000:0000:0000:0001', 2, 1), 'the bubble counted, but no flow')
         self.assertEqual((self.tunnels['6in4']['proto'], self.tunnels['IP-in-IP']['proto']), ('IPv6', 'IP-in-IP'))
 
     def test_a_probe_whose_inner_packet_returns_to_its_sender(self):
@@ -948,7 +949,7 @@ class TestTunnels(unittest.TestCase):
         from scripts.compare_shark_suricata import compare
         report = compare(_load_eve('tunnel_fixture.eve.json'), self.records)['flow']
         self.assertEqual((report['suricata'], report['shark'], report['matched'], report['differences']),
-                         (9, 9, 9, []))
+                         (9, 9, 9, []), 'a Teredo bubble is its tunnel\'s, and no flow of its own')
         inner = [r for r in self.records if r['event_type'] == 'flow' and r.get('app_proto') == 'dns']
         self.assertEqual((inner[0]['src_ip'], inner[0]['flow']['bytes_toserver']), ('172.16.5.1', 40),
                          'the VXLAN packet inside, from its IP header on')
