@@ -909,6 +909,14 @@ def spawn_suricata(dir_path, pcap_path, suricata_config_path=None, data_dir=None
                 create_sqlite_db(db_file, eve_file)
             except Exception as e:
                 _set_error(dir_path, f'Database creation failed: {e}')
+            else:
+                # events.db has every event in full now and nothing reads
+                # eve.json again - it would only double the analysis's size
+                # (a failed import keeps it, to see what went wrong)
+                try:
+                    os.unlink(eve_file)
+                except OSError:
+                    pass
         # Clear phase only after DB (with YARA matches) is ready
         _clear_phase(dir_path)
         # If tshark finished first, its rows join Suricata's now (otherwise

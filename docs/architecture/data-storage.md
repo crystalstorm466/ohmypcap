@@ -23,7 +23,7 @@
   <md5>/
     <filename>             # Original uploaded file
     .meta                  # Analysis metadata (file type, extracted name, version)
-    eve.json               # Suricata JSON output (newline-delimited, PCAP only)
+    eve.json               # Suricata JSON output (newline-delimited, PCAP only) - removed once imported into events.db
     events.db              # SQLite index (auto-created after analysis); for a PCAP, also the rows tshark adds (JSON "source": "tshark") once both are done - see shark_analyzer.merge
     shark.db               # tshark's flows and records - same schema as events.db, built alongside Suricata; what Suricata lacks is merged into events.db (PCAP only)
     .shark_error           # Present only if the last tshark run failed; contains the error message

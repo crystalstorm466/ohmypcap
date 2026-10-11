@@ -5165,6 +5165,90 @@ class TestSpawnSuricataErrorHandling(unittest.TestCase):
                              '.phase must be cleared even when the failure is not a subprocess.TimeoutExpired, or the analysis is stuck forever')
 
 
+
+class TestEveJsonRemovedOnceImported(unittest.TestCase):
+    """eve.json is removed once events.db has imported it - events.db keeps
+    every event in full and nothing reads eve.json again, so it only
+    doubled an analysis's size. A failed import keeps it."""
+
+    EVENT = {'timestamp': '2026-10-11T10:00:00.000000+0000', 'event_type': 'dns',
+             'src_ip': '10.0.0.1', 'src_port': 5353, 'dest_ip': '10.0.0.2', 'dest_port': 53, 'proto': 'UDP',
+             'dns': {'type': 'query', 'rrname': 'example.com'}}
+
+    def _run(self, tmpdir, **patches):
+        import unittest.mock
+        import time
+        import suricata_analyzer
+        pcap_path = os.path.join(tmpdir, 'test.pcap')
+        with open(pcap_path, 'wb') as f:
+            f.write(b'\xd4\xc3\xb2\xa1' + b'\x00' * 100)
+        with open(os.path.join(tmpdir, 'eve.json'), 'w') as f:
+            f.write(json.dumps(self.EVENT) + '\n')
+        mock_proc = unittest.mock.MagicMock()
+        mock_proc.wait.return_value = None
+        with unittest.mock.patch('subprocess.Popen', return_value=mock_proc), \
+             unittest.mock.patch('suricata_analyzer.run_yara_pipeline'), \
+             unittest.mock.patch('suricata_analyzer.shark_analyzer') as shark, \
+             unittest.mock.patch.multiple('suricata_analyzer', **(patches or {'create_sqlite_db': db.create_sqlite_db})):
+            shark.enabled.return_value = False
+            self.assertTrue(suricata_analyzer.spawn_suricata(tmpdir, pcap_path, data_dir=tmpdir))
+            for _ in range(100):
+                if not os.path.exists(os.path.join(tmpdir, '.phase')):
+                    break
+                time.sleep(0.05)
+        self.assertFalse(os.path.exists(os.path.join(tmpdir, '.phase')))
+
+    def test_removed_after_import(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._run(tmpdir)
+            self.assertFalse(os.path.exists(os.path.join(tmpdir, 'eve.json')))
+            conn = sqlite3.connect(os.path.join(tmpdir, 'events.db'))
+            try:
+                rows = [json.loads(r[0]) for r in conn.execute('SELECT json_data FROM events')]
+            finally:
+                conn.close()
+            self.assertEqual(rows, [self.EVENT], 'events.db must keep the event in full')
+
+    def test_kept_when_the_import_fails(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self._run(tmpdir, create_sqlite_db=unittest.mock.Mock(side_effect=RuntimeError('disk full')))
+            self.assertTrue(os.path.exists(os.path.join(tmpdir, 'eve.json')))
+            with open(os.path.join(tmpdir, '.error')) as f:
+                self.assertIn('Database creation failed', f.read())
+
+    def _analysis(self, data_dir, name, *files):
+        dir_path = os.path.join(data_dir, name)
+        os.makedirs(dir_path)
+        for f in ('eve.json',) + files:
+            with open(os.path.join(dir_path, f), 'w') as fh:
+                fh.write('x' * 10)
+        return dir_path
+
+    def test_startup_removes_it_from_finished_analyses_only(self):
+        with tempfile.TemporaryDirectory() as data_dir:
+            done = self._analysis(data_dir, 'a' * 32, 'events.db')
+            running = self._analysis(data_dir, 'b' * 32, 'events.db', '.phase')
+            failed = self._analysis(data_dir, 'c' * 32, 'events.db', '.error')
+            unimported = self._analysis(data_dir, 'd' * 32)
+            self.assertEqual(storage.remove_imported_eve_files(data_dir), 10)
+            self.assertFalse(os.path.exists(os.path.join(done, 'eve.json')))
+            for dir_path in (running, failed, unimported):
+                self.assertTrue(os.path.exists(os.path.join(dir_path, 'eve.json')), dir_path)
+
+    def test_main_runs_the_startup_cleanup_before_serving(self):
+        with open(SERVER_FILE, 'r') as f:
+            main_section = f.read().split('\ndef main():')[1]
+        self.assertLess(main_section.index('remove_imported_eve_files(DATA_DIR)'), main_section.index('serve_forever()'))
+
+    def test_a_zip_pcap_already_imported_is_a_duplicate(self):
+        """Duplicate detection for a ZIP's pcaps can't rely on eve.json,
+        which a finished analysis no longer has."""
+        with open(SERVER_FILE, 'r') as f:
+            content = f.read()
+        section = content.split('def _commit_and_spawn_pcap_analysis(')[1].split('\n    def ')[0]
+        self.assertIn("('eve.json', 'events.db')", section)
+
+
 class TestServerBinding(unittest.TestCase):
     def test_server_binds_localhost(self):
         with open(SERVER_FILE, 'r') as f:

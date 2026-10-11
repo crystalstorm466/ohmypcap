@@ -38,7 +38,7 @@ from validators import (
 from url_fetch import FileTooLargeError, fetch_url_safely
 from storage import (
     PCAP_EXTENSIONS, PCAP_ANALYSIS_ARTIFACTS, FILE_ANALYSIS_ARTIFACTS,
-    upload_tmp_dir, cleanup_upload_tmp_dir, resolve_upload_size_limit, extract_zip_contents,
+    upload_tmp_dir, cleanup_upload_tmp_dir, remove_imported_eve_files, resolve_upload_size_limit, extract_zip_contents,
     hash_file, hash_file_with_prefix, is_pcap_path, write_meta, read_meta, find_pcap_file,
 )
 from analysis_cache import (
@@ -1995,7 +1995,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         pcap_path = os.path.join(dir_path, pcap_filename)
 
         deduped = self._commit_file_or_return_ready(
-            dir_path, md5_hash, ('eve.json',),
+            dir_path, md5_hash, ('eve.json', 'events.db'),
             lambda: shutil.move(extracted_pcap_path, pcap_path)
         )
         if not deduped:
@@ -2818,6 +2818,7 @@ def main():
     os.makedirs(DATA_DIR, exist_ok=True)
     os.makedirs(os.path.join(DATA_DIR, config.UPLOAD_TMP_SUBDIR), exist_ok=True)
     cleanup_upload_tmp_dir(DATA_DIR)
+    remove_imported_eve_files(DATA_DIR)
 
     # Check for required executables
     missing = check_executables()

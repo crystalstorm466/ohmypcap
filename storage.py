@@ -62,6 +62,31 @@ def cleanup_upload_tmp_dir(data_dir):
             pass
 
 
+def remove_imported_eve_files(data_dir):
+    """Remove eve.json from every finished PCAP analysis in data_dir.
+    events.db keeps each of its events in full, and nothing reads eve.json
+    once it has been imported, so it only doubles the disk an analysis
+    takes (spawn_suricata removes it itself as soon as the import
+    succeeds - this catches analyses made before it did). One still
+    running (.phase) or with an error (.error, which may be a failed
+    import) keeps it. Meant to be called once at startup, before
+    any analysis can be under way. Returns the bytes freed."""
+    freed = 0
+    for entry in os.listdir(data_dir):
+        dir_path = os.path.join(data_dir, entry)
+        eve_path = os.path.join(dir_path, 'eve.json')
+        if not os.path.isfile(eve_path) or not os.path.isfile(os.path.join(dir_path, 'events.db')) or \
+                any(os.path.exists(os.path.join(dir_path, f)) for f in ('.phase', '.error')):
+            continue
+        try:
+            size = os.path.getsize(eve_path)
+            os.unlink(eve_path)
+            freed += size
+        except OSError:
+            pass
+    return freed
+
+
 def resolve_upload_size_limit(requested):
     """Resolve the effective per-request upload-size ceiling from a
     client-provided override (X-Max-Upload-Size header for /api/upload, or

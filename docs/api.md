@@ -67,7 +67,7 @@ Tells the frontend whether the "Sync theme to OhMyDebn theme" toggle could ever 
 
 ### `GET /api/events`
 
-Returns event data from Suricata's eve.json (via SQLite index or direct JSON parse).
+Returns event data from the analysis's events.db (Suricata's eve.json events, imported).
 
 **Query Parameters:**
 
@@ -366,7 +366,7 @@ Loads a historical analysis by MD5.
 {"success": true, "md5": "<hash>", "file_name": "<filename>", "notes": "<notes text or empty string>"}
 ```
 
-**Errors:** `400` if MD5 is invalid or path is unsafe. `404` if analysis not found. `400` if eve.json exceeds size limit.
+**Errors:** `400` if MD5 is invalid or path is unsafe. `404` if analysis not found. `400` if a not-yet-imported eve.json exceeds the size limit.
 
 ---
 
@@ -582,12 +582,12 @@ If the upload was a ZIP archive containing more than one supported file, every e
 **Processing flow:**
 1. Detects file type (PCAP magic bytes, log content, or ZIP `PK` magic bytes - except files with Office extensions like `.docx`/`.xlsx`, which are ZIPs internally but analyzed as regular files)
 2. Computes MD5 hash
-3. If already analyzed (`eve.json` for PCAPs, `events.db` for non-PCAPs), returns `ready`
+3. If already analyzed (`eve.json` or `events.db` for PCAPs, `events.db` for non-PCAPs), returns `ready`
 4. For PCAPs: saves file, spawns Suricata in background thread, returns `processing` with `phase: "network"`
 5. For log files: saves the file and imports it into `events.db` in the background, returns `processing` with `phase: "logs"`
 6. For email messages: saves the message, then in the background parses it into `email`/`link` events and stores and YARA-scans the message and each decoded attachment (in the analysis's `filestore/`, the same layout Suricata uses), returns `processing` with `phase: "email"`
 7. For other files: saves file, runs YARA/EXIF scans in the background, returns `processing` with `phase: "files"`
-8. When analysis finishes, results are available in `events.db` (or `eve.json` for PCAPs)
+8. When analysis finishes, results are available in `events.db` (a PCAP's `eve.json` is removed once imported)
 
 **Special handling:** Password-protected zips are auto-decrypted using the common `infected` password; if the filename contains a `YYYY-MM-DD` date, the MTA-style dated password (`infected_YYYYMMDD`) is also tried.
 

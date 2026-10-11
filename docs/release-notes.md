@@ -86,6 +86,14 @@ Suricata is now 8.0.7, the current release in Debian's `trixie-backports`
 repo (up from 8.0.6), and tshark 4.4.19, from Debian's security updates.
 On the test captures, Suricata 8.0.7 logs the same records 8.0.6 did.
 
+### Less disk for each PCAP analysis
+
+Suricata's `eve.json` is removed once its events are in the analysis's
+database, which keeps every one of them - nothing read it after that. It
+was about a fifth of a PCAP analysis's size (820 MB of 3.8 GB for a 209 MB
+capture). The first start of 5.0.0 removes it from existing analyses too;
+reanalyzing still works, since it runs Suricata again.
+
 ### Fixes
 
 - When a refresh's data no longer has the open tab's type of event (a
