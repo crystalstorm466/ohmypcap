@@ -795,11 +795,18 @@ class SOCKS:
                 named = [layer for layer in above if layer not in _SOCKS_UNNAMED]
                 body['tunneled'] = named[0] if named else 'unknown'
             return
-        if body is None:
-            body = self.sessions[pkt.flow.key] = {}
-            self.records.append((pkt.flow, pkt.when, self.event_type, body))
         host = first('socks.dst') or (ipv6_exploded(first('socks.dstV6')) if first('socks.dstV6') else '')
         port = _int(first('socks.port') or first('socks.dstport'))
+        if body is None:
+            # tshark calls anything on port 1080 SOCKS - an HTTP proxy check
+            # sent there, a DCE/RPC connection whose client port it was - so
+            # a record starts only at a client's greeting or request
+            if not (v['socks.auth_method'] or (first('vals(socks.command)') and not first('socks.results')
+                                                 and (host or first('socks.remote_name')
+                                                      or first('socks.v4a_dns_name')))):
+                return
+            body = self.sessions[pkt.flow.key] = {}
+            self.records.append((pkt.flow, pkt.when, self.event_type, body))
         if v['socks.auth_method']:
             body['version'] = first('socks.version')
             body['auth_methods'] = [_socks_auth_method(m) for m in v['socks.auth_method']]

@@ -821,6 +821,21 @@ class TestSOCKS(unittest.TestCase):
                                                 'auth_method': 'no acceptable methods',
                                                 'status': 'no acceptable authentication method'})
 
+    def test_only_a_socks_handshake_starts_a_record(self):
+        """tshark calls anything on port 1080 SOCKS: a scanner's HTTP proxy
+        check sent there, or a DCE/RPC connection whose client port it was,
+        which starts 05 00 like a SOCKS 5 reply."""
+        from tests.pcap_fixtures import write_pcap
+        from tests.protocol_fixtures import _Tcp
+        probe = _Tcp('198.51.100.20', '10.1.0.45', 12345, 1080)
+        rpc = _Tcp('10.1.0.32', '10.1.0.33', 1080, 49188)
+        pkts = (probe.open() + probe.send(True, b'GET / HTTP/1.1\r\nHost: www.example.com\r\n\r\n') + probe.close()
+                + rpc.open() + rpc.send(True, bytes.fromhex('05000083100000009000100001000000'))
+                + rpc.send(False, bytes.fromhex('05000203100000004000100001000000')) + rpc.close())
+        pcap = os.path.join(self.tmpdir, 'not_socks.pcap')
+        write_pcap(pcap, pkts)
+        self.assertEqual([r for r in shark_analyzer.run_tshark(pcap) if r['event_type'] == 'socks'], [])
+
     def test_flows_match_suricatas_and_the_merge_adds_every_record(self):
         from scripts.compare_shark_suricata import compare
         report = compare(_load_eve('socks_fixture.eve.json'), self.records)['flow']
