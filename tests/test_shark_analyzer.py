@@ -774,6 +774,73 @@ class TestRPC(unittest.TestCase):
 
 
 @unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
+class TestRADIUS(unittest.TestCase):
+    """tests/protocol_fixtures.write_radius_pcap: one record per login -
+    its challenges and final answer - and per accounting message, with
+    what Suricata 8.0.7 logged for the capture
+    (tests/data/radius_fixture.eve.json): flows it gives no protocol."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests.protocol_fixtures import write_radius_pcap
+        cls.tmpdir = tempfile.mkdtemp()
+        cls.pcap = os.path.join(cls.tmpdir, 'radius.pcap')
+        write_radius_pcap(cls.pcap)
+        cls.records = shark_analyzer.run_tshark(cls.pcap)
+        cls.radius = [r['radius'] for r in cls.records if r['event_type'] == 'radius']
+        cls.by_user = {(r.get('user'), r['message']): r for r in cls.radius}
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    def test_a_wifi_login_challenged_then_accepted_is_one_record(self):
+        login = self.by_user[('alice', 'Access-Request')]
+        self.assertEqual({k: login[k] for k in ('requests', 'challenges', 'result', 'eap_methods', 'reply_message',
+                                                 'framed_ip', 'calling_station', 'called_station', 'nas_identifier',
+                                                 'nas_ip', 'port_type', 'service_type', 'response_time')},
+                         {'requests': 2, 'challenges': 1, 'result': 'accepted', 'eap_methods': ['EAP-PEAP'],
+                          'reply_message': 'Welcome, alice', 'framed_ip': '10.1.5.20',
+                          'calling_station': 'AA-BB-CC-DD-EE-01', 'called_station': '00-11-22-33-44-55:CorpWiFi',
+                          'nas_identifier': 'wlc-1', 'nas_ip': '10.1.0.2', 'port_type': 'Wireless - IEEE 802.11',
+                          'service_type': 'Framed', 'response_time': 3.0})
+
+    def test_a_rejected_login_and_a_retransmitted_one(self):
+        bob, carol = self.by_user[('bob', 'Access-Request')], self.by_user[('carol', 'Access-Request')]
+        self.assertEqual((bob['result'], bob['reply_message']), ('rejected', 'Authentication failed'))
+        self.assertEqual((carol['result'], carol['requests'], carol['retransmissions'], carol['response_time']),
+                         ('accepted', 1, 1, 2.0))
+        self.assertFalse([r for r in self.radius if 'password' in json.dumps(r).lower()])
+
+    def test_accounting_start_and_stop(self):
+        start, stop = self.by_user[('alice', 'Accounting Start')], self.by_user[('alice', 'Accounting Stop')]
+        self.assertEqual((start['session_id'], start['framed_ip'], start['result']), ('sess-0001', '10.1.5.20', 'acknowledged'))
+        self.assertEqual({k: stop[k] for k in ('session_time', 'bytes_in', 'bytes_out', 'terminate_cause')},
+                         {'session_time': 3600, 'bytes_in': 1048576, 'bytes_out': 52428800,
+                          'terminate_cause': 'User Request'})
+
+    def test_a_scanners_request_nobody_answered(self):
+        scan = self.by_user[('infragrab-0123@invalid.invalid', 'Access-Request')]
+        self.assertEqual(scan, {'message': 'Access-Request', 'requests': 1, 'user': 'infragrab-0123@invalid.invalid'})
+
+    def test_flows_match_suricatas_and_the_merge_adds_the_records(self):
+        from scripts.compare_shark_suricata import compare
+        report = compare(_load_eve('radius_fixture.eve.json'), self.records)['flow']
+        self.assertEqual((report['matched'], report['named_by_tshark'], report['differences']), (5, 5, []))
+        d = os.path.join(self.tmpdir, 'analysis')
+        os.makedirs(d)
+        shutil.copy(self.pcap, d)
+        events_db = os.path.join(d, 'events.db')
+        db.create_sqlite_db(events_db, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data',
+                                                    'radius_fixture.eve.json'))
+        self.assertTrue(shark_analyzer.build(d, os.path.join(d, 'radius.pcap')))
+        shark_analyzer.merge(d)
+        counts = db.get_event_types_sqlite(events_db)
+        self.assertEqual(counts.get('radius'), 6)
+        self.assertFalse([t for t in counts if t.startswith('conn_')], 'records, not connection cards')
+
+
+@unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
 class TestSOCKS(unittest.TestCase):
     """tests/protocol_fixtures.write_socks_pcap: one record per connection
     through the proxy - with what Suricata 8.0.7 logged for the capture

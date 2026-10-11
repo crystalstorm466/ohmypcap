@@ -1411,6 +1411,15 @@ AGGREGATION_JSON_PATHS = {
         'Reply': ['$.rpc.reply'],
         'Machine Name': ['$.rpc.machine_name'],
     },
+    'radius': {
+        'Message': ['$.radius.message'],
+        'User': ['$.radius.user'],
+        'Calling Station': ['$.radius.calling_station'],
+        'NAS': ['$.radius.nas_identifier', '$.radius.nas_ip'],
+        'Result': ['$.radius.result'],
+        'EAP Method': ['$.radius.eap_methods[0]'],
+        'Reply Message': ['$.radius.reply_message'],
+    },
     'socks': {
         'Version': ['$.socks.version'],
         'Command': ['$.socks.command'],

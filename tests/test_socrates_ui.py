@@ -21824,6 +21824,10 @@ class TestTsharkUI(unittest.TestCase):
         'browser': {'event_type': 'browser', 'browser': {'message': 'Local Master Announcement', 'source_name': 'DC1',
                                                       'destination_name': 'FIXTUREDOM', 'os_version': '10.0',
                                                       'roles': ['workstation', 'domain controller'], 'count': 3}},
+        'radius': {'event_type': 'radius', 'radius': {'message': 'Access-Request', 'user': 'alice', 'calling_station': 'AA-BB-CC-DD-EE-01',
+                                                    'nas_identifier': 'wlc-1', 'nas_ip': '10.1.0.2', 'result': 'accepted',
+                                                    'eap_methods': ['EAP-PEAP'], 'reply_message': 'Welcome, alice',
+                                                    'challenges': 1, 'response_time': 3.0}},
         'socks': {'event_type': 'socks', 'socks': {'version': '5', 'command': 'connect', 'request_name': 'files.example.net',
                                                   'request_port': 80, 'status': 'succeeded', 'user': 'proxyuser',
                                                   'tunneled': 'http', 'bound_host': '192.0.2.10', 'bound_port': 50123}},
@@ -21881,6 +21885,7 @@ class TestTsharkUI(unittest.TestCase):
         'iec104': ['Single command', '7', '2001', 'on', 'confirmed, terminated'],
         'browser': ['Local Master Announcement', 'DC1', 'FIXTUREDOM', '10.0', 'workstation, domain controller', '3'],
         'rpc': ['mountd', '3', 'MNT', 'RPC executed successfully', 'client1'],
+        'radius': ['Access-Request', 'alice', 'AA-BB-CC-DD-EE-01', 'wlc-1', 'accepted', 'EAP-PEAP', 'Welcome, alice'],
         'socks': ['5', 'connect', 'files.example.net', '80', 'succeeded', 'proxyuser', 'http'],
         'dtls': ['dtls.example', 'DTLS 1.2', 'completed', 'C=US, O=Fixture Ltd, CN=dtls.example',
                  'dd2d0105wc_648b5c445417_7d72a171e567'],
@@ -21967,7 +21972,7 @@ class TestTsharkUI(unittest.TestCase):
         import db
         from tests.jsdom_helper import js_statements
         cols = js_statements("""window.__jsdom_result = Object.fromEntries(
-            ['llmnr', 'nbns', 's7comm', 'ssdp', 'telnet', 'iec104', 'iec104_point', 'bacnet', 'bacnet_property', 'bacnet_device', 'opcua', 'opcua_action', 'goose', 'browser', 'lldp', 'cdp', 'dhcpv6', 'syslog', 'dtls', 'rpc', 'socks'].map(t => [t, getColumnsForType(t).slice(6)]));""")
+            ['llmnr', 'nbns', 's7comm', 'ssdp', 'telnet', 'iec104', 'iec104_point', 'bacnet', 'bacnet_property', 'bacnet_device', 'opcua', 'opcua_action', 'goose', 'browser', 'lldp', 'cdp', 'dhcpv6', 'syslog', 'dtls', 'rpc', 'socks', 'radius'].map(t => [t, getColumnsForType(t).slice(6)]));""")
         for t, columns in cols.items():
             self.assertEqual(list(db.AGGREGATION_JSON_PATHS[t]), columns, t)
 

@@ -50,6 +50,12 @@ each card marked with a dot:
   record for each call and its reply: program, version, procedure and
   result, the AUTH_UNIX machine name and uid; the portmapper's list of
   the RPC services a host runs, and mountd's exports and mounts
+- **RADIUS** (how Wi-Fi, VPNs and network devices check logins -
+  Suricata doesn't parse it) - a record for each login, its rounds of
+  challenges and the final accept or reject: the user name (never the
+  password), the device that asked, the client's MAC, the EAP method,
+  the address given and the server's reply message; and one for each
+  accounting Start, Stop or update, with the session's length and bytes
 - **SOCKS** (proxies on port 1080 - Suricata doesn't parse it) - a
   record for each connection through the proxy: the host and port the
   client asked it to reach (the flow shows only the proxy), the proxy's

@@ -843,6 +843,143 @@ class SOCKS:
         return self.records
 
 
+# ---------------------------------------------------------------- RADIUS
+#
+# How Wi-Fi (802.1X), VPNs and network devices check a login: the device
+# (the NAS) asks a RADIUS server, which accepts, rejects or challenges.
+# Like Zeek's radius.log, one record per login - its Access-Request, any
+# rounds of challenges (an EAP method's exchange), and the final accept
+# or reject: the user name (never the password, which RADIUS hides
+# anyway), the device that asked and the client's MAC, the EAP method,
+# the address given and the server's reply message. Accounting gets a
+# record per message: a session's Start, Stop or update, with its length
+# and bytes. A scanner's Access-Request nobody answered is still a record.
+
+_RADIUS_SERVICE_TYPES = {1: 'Login', 2: 'Framed', 3: 'Callback Login', 4: 'Callback Framed', 5: 'Outbound',
+                         6: 'Administrative', 7: 'NAS Prompt', 8: 'Authenticate Only', 9: 'Callback NAS Prompt',
+                         10: 'Call Check', 11: 'Callback Administrative'}
+_RADIUS_PORT_TYPES = {0: 'Async', 1: 'Sync', 2: 'ISDN Sync', 3: 'ISDN Async V.120', 4: 'ISDN Async V.110',
+                      5: 'Virtual', 15: 'Ethernet', 16: 'xDSL', 17: 'Cable', 18: 'Wireless - Other',
+                      19: 'Wireless - IEEE 802.11', 30: 'PPPoA', 31: 'PPPoEoA', 32: 'PPPoEoE', 33: 'PPPoEoVLAN',
+                      34: 'PPPoEoQinQ'}
+_RADIUS_ACCT_STATUS = {1: 'Start', 2: 'Stop', 3: 'Interim-Update', 7: 'Accounting-On', 8: 'Accounting-Off'}
+_RADIUS_TERMINATE_CAUSES = {1: 'User Request', 2: 'Lost Carrier', 3: 'Lost Service', 4: 'Idle Timeout',
+                            5: 'Session Timeout', 6: 'Admin Reset', 7: 'Admin Reboot', 8: 'Port Error',
+                            9: 'NAS Error', 10: 'NAS Request', 11: 'NAS Reboot', 12: 'Port Unneeded',
+                            13: 'Port Preempted', 14: 'Port Suspended', 15: 'Service Unavailable', 16: 'Callback',
+                            17: 'User Error', 18: 'Host Request'}
+_RADIUS_RESULTS = {'Access-Accept': 'accepted', 'Access-Reject': 'rejected', 'Accounting-Response': 'acknowledged'}
+# EAP types that aren't a login method
+_EAP_NOT_METHODS = {'Identity', 'Notification', 'Legacy Nak (Response Only)'}
+_EAP_SHORT_NAME = re.compile(r'\((EAP-[^)]+)\)$')
+
+
+def _radius_named(names, value):
+    number = _int(value)
+    return names.get(number, str(number)) if number is not None else ''
+
+
+class RADIUS:
+    """RADIUS - see the comment above."""
+    event_type = 'radius'
+    app_protos = ('radius',)
+    fields = ('vals(radius.code)', 'radius.id', 'radius.dup', 'radius.User_Name', 'radius.NAS_IP_Address',
+              'radius.NAS_IPv6_Address', 'radius.NAS_Identifier', 'radius.NAS_Port_Type', 'radius.Service_Type',
+              'radius.Called_Station_Id', 'radius.Calling_Station_Id', 'radius.Framed-IP-Address',
+              'radius.Framed_IP_Address', 'radius.Reply_Message', 'vals(eap.type)', 'radius.Acct_Status_Type',
+              'radius.Acct_Session_Id', 'radius.Acct_Session_Time', 'radius.Acct_Input_Octets',
+              'radius.Acct_Output_Octets', 'radius.Acct_Terminate_Cause')
+
+    def __init__(self):
+        self.records = []
+        self.logins = {}         # flow key -> the login under way on it
+        self.open = {}           # (flow key, id) -> the record its request is in
+        self.started = {}        # id(record) -> its first request's time
+
+    def feed(self, pkt, v):
+        def first(name):
+            return (v[name] or [''])[0]
+        code, ident = first('vals(radius.code)'), _int(first('radius.id'))
+        if not code or ident is None:
+            return
+        key = (pkt.flow.key, ident)
+        if code.endswith('-Request') or code == 'Status-Server':
+            if key in self.open and first('radius.dup'):
+                self.open[key]['retransmissions'] = self.open[key].get('retransmissions', 0) + 1
+                return
+            body = self.logins.get(pkt.flow.key) if code == 'Access-Request' else None
+            if body is None:
+                body = {'message': 'Accounting-Request' if code == 'Accounting-Request' else code}
+                self.records.append((pkt.flow, pkt.when, self.event_type, body))
+                self.started[id(body)] = pkt.when
+                if code == 'Access-Request':
+                    self.logins[pkt.flow.key] = body
+            body['requests'] = body.get('requests', 0) + 1
+            self.open[key] = body
+            self._request(body, v, first)
+            return
+        body = self.open.pop(key, None)
+        if body is None:
+            return               # a response to a request before the capture began
+        body['reply'] = code
+        if code == 'Access-Challenge':
+            body['challenges'] = body.get('challenges', 0) + 1
+        else:
+            body['result'] = _RADIUS_RESULTS.get(code, code)
+            if body.get('message') == 'Access-Request':
+                self.logins.pop(pkt.flow.key, None)
+            # from the first request - a login's every round, like Zeek's ttl
+            body['response_time'] = round(pkt.when - self.started[id(body)], 6)
+        if first('radius.Reply_Message'):
+            body['reply_message'] = ' '.join(v['radius.Reply_Message'])[:512]
+        self._addresses(body, v, first)
+        self._eap(body, v)
+
+    def _request(self, body, v, first):
+        for name, field in (('user', 'radius.User_Name'), ('nas_identifier', 'radius.NAS_Identifier'),
+                            ('called_station', 'radius.Called_Station_Id'),
+                            ('calling_station', 'radius.Calling_Station_Id'),
+                            ('session_id', 'radius.Acct_Session_Id')):
+            if first(field):
+                body[name] = first(field)
+        nas = first('radius.NAS_IP_Address') or (ipv6_exploded(first('radius.NAS_IPv6_Address'))
+                                                 if first('radius.NAS_IPv6_Address') else '')
+        if nas:
+            body['nas_ip'] = nas
+        if first('radius.NAS_Port_Type'):
+            body['port_type'] = _radius_named(_RADIUS_PORT_TYPES, first('radius.NAS_Port_Type'))
+        if first('radius.Service_Type'):
+            body['service_type'] = _radius_named(_RADIUS_SERVICE_TYPES, first('radius.Service_Type'))
+        if first('radius.Acct_Status_Type'):
+            body['message'] = 'Accounting ' + _radius_named(_RADIUS_ACCT_STATUS, first('radius.Acct_Status_Type'))
+        for name, field in (('session_time', 'radius.Acct_Session_Time'), ('bytes_in', 'radius.Acct_Input_Octets'),
+                            ('bytes_out', 'radius.Acct_Output_Octets')):
+            if _int(first(field)) is not None:
+                body[name] = _int(first(field))
+        if first('radius.Acct_Terminate_Cause'):
+            body['terminate_cause'] = _radius_named(_RADIUS_TERMINATE_CAUSES, first('radius.Acct_Terminate_Cause'))
+        self._addresses(body, v, first)
+        self._eap(body, v)
+
+    @staticmethod
+    def _addresses(body, v, first):
+        framed = first('radius.Framed-IP-Address') or first('radius.Framed_IP_Address')
+        if framed:
+            body['framed_ip'] = framed
+
+    @staticmethod
+    def _eap(body, v):
+        for kind in v['vals(eap.type)']:
+            if kind and kind not in _EAP_NOT_METHODS:
+                short = _EAP_SHORT_NAME.search(kind)
+                method = short.group(1) if short else kind
+                if method not in body.setdefault('eap_methods', []):
+                    body['eap_methods'].append(method)
+
+    def finish(self):
+        return self.records
+
+
 # ---------------------------------------------------------------- SSDP
 
 class SSDP:
@@ -2377,7 +2514,7 @@ def _pdus(layer):
 
 # Every protocol with records here, from tshark's fields, in the order their
 # fields follow the base fields in tshark's output.
-PROTOCOLS = (LLMNR, NBNS, DHCPv6, Syslog, DTLS, RPC, SOCKS, SSDP, S7comm, Telnet, IEC104, BACnet, GOOSE, Browser, LLDP, CDP)
+PROTOCOLS = (LLMNR, NBNS, DHCPv6, Syslog, DTLS, RPC, SOCKS, RADIUS, SSDP, S7comm, Telnet, IEC104, BACnet, GOOSE, Browser, LLDP, CDP)
 # ... and from the structured pass (shark_analyzer._structured_pass): none
 # yet - it's for a protocol whose messages nest, which flat fields can't
 # keep apart (several commands per packet, a token inside a command).

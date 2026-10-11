@@ -1090,3 +1090,66 @@ def socks_packets():
 
 def write_socks_pcap(path):
     write_pcap(path, socks_packets())
+
+
+# ---------------------------------------------------------------- RADIUS
+#
+# A Wi-Fi controller (RADIUS_NAS) asking its RADIUS server: alice's PEAP
+# login, challenged then accepted; bob's PAP login, rejected with a reply
+# message; carol's request sent twice before it was accepted; alice's
+# accounting Start and Stop - and a scanner's Access-Request nobody
+# answered.
+
+RADIUS_NAS, RADIUS_SERVER, RADIUS_SCANNER = '10.1.0.2', '10.1.0.12', '198.51.100.11'
+
+
+def _radius_attr(kind, value):
+    if isinstance(value, int):
+        value = struct.pack('!I', value)
+    elif isinstance(value, str):
+        value = value.encode()
+    return struct.pack('!BB', kind, len(value) + 2) + value
+
+
+def _radius(code, ident, attrs=()):
+    body = b''.join(_radius_attr(k, v) for k, v in attrs)
+    return struct.pack('!BBH', code, ident, 20 + len(body)) + bytes(range(16)) + body
+
+
+def _eap(code, ident, kind=None, data=b''):
+    body = (bytes([kind]) + data) if kind is not None else b''
+    return struct.pack('!BBH', code, ident, 4 + len(body)) + body
+
+
+def radius_packets():
+    wifi = ((4, socket.inet_aton(RADIUS_NAS)), (32, 'wlc-1'), (30, '00-11-22-33-44-55:CorpWiFi'), (61, 19), (6, 2))
+
+    def exchange(sport, dport, request, reply=None, client=RADIUS_NAS):
+        pkts = [_udp_packet(client, RADIUS_SERVER, sport, dport, request)]
+        if reply:
+            pkts.append(_udp_packet(RADIUS_SERVER, client, dport, sport, reply))
+        return pkts
+    peap = 25
+    return (exchange(50001, 1812, _radius(1, 1, ((1, 'alice'), (31, 'AA-BB-CC-DD-EE-01')) + wifi
+                                          + ((79, _eap(2, 1, 1, b'alice')),)),
+                     _radius(11, 1, ((79, _eap(1, 2, peap, b'\x20')), (24, 'state1'))))
+            + exchange(50001, 1812, _radius(1, 2, ((1, 'alice'), (31, 'AA-BB-CC-DD-EE-01')) + wifi
+                                            + ((79, _eap(2, 2, peap, b'\x00')), (24, 'state1'))),
+                       _radius(2, 2, ((79, _eap(3, 2)), (18, 'Welcome, alice'), (8, socket.inet_aton('10.1.5.20')))))
+            + exchange(50002, 1812, _radius(1, 3, ((1, 'bob'), (2, bytes(16)), (31, 'AA-BB-CC-DD-EE-02')) + wifi),
+                       _radius(3, 3, ((18, 'Authentication failed'),)))
+            + exchange(50003, 1812, _radius(1, 4, ((1, 'carol'), (2, bytes(16)), (31, 'AA-BB-CC-DD-EE-03')) + wifi))
+            + exchange(50003, 1812, _radius(1, 4, ((1, 'carol'), (2, bytes(16)), (31, 'AA-BB-CC-DD-EE-03')) + wifi),
+                       _radius(2, 4))
+            + exchange(50004, 1813, _radius(4, 5, ((40, 1), (1, 'alice'), (44, 'sess-0001'),
+                                                   (8, socket.inet_aton('10.1.5.20')), (31, 'AA-BB-CC-DD-EE-01')) + wifi),
+                       _radius(5, 5))
+            + exchange(50004, 1813, _radius(4, 6, ((40, 2), (1, 'alice'), (44, 'sess-0001'), (46, 3600),
+                                                   (42, 1048576), (43, 52428800), (49, 1),
+                                                   (31, 'AA-BB-CC-DD-EE-01')) + wifi),
+                       _radius(5, 6))
+            + exchange(40001, 1812, _radius(1, 181, ((1, 'infragrab-0123@invalid.invalid'),)), client=RADIUS_SCANNER))
+
+
+def write_radius_pcap(path):
+    write_pcap(path, radius_packets())

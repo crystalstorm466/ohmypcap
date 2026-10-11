@@ -2167,6 +2167,7 @@
                 dtls: '#4dd0e1',
                 rpc: '#a1887f',
                 socks: '#ab47bc',
+                radius: '#ef5350',
                 opcua_action: '#ff7043',
                 bacnet_property: '#5c6bc0',
                 bacnet_device: '#8d6e63',
@@ -3832,6 +3833,37 @@
             return html;
         }
 
+        // tshark's RADIUS records (shark_protocols.RADIUS): one per login -
+        // its rounds of challenges and the final answer - and one per
+        // accounting message.
+        function renderRadiusDetails(e) {
+            const r = e.radius || {};
+            const count = n => n !== undefined ? n.toLocaleString() : '';
+            let html = htmlSection('RADIUS Details', COLORS.EVENT.radius);
+            html += htmlRowText('Message', r.message);
+            html += htmlRowText('Result', r.result || (r.reply ? `${r.reply}, no final answer` : 'no reply'));
+            html += htmlRowText('User', r.user, 'mono');
+            html += htmlRowText('Calling Station', r.calling_station, 'mono');
+            html += htmlRowText('Called Station', r.called_station, 'mono');
+            html += htmlRowText('NAS', r.nas_identifier);
+            html += htmlRowText('NAS IP', r.nas_ip, 'mono');
+            html += htmlRowText('Port Type', r.port_type);
+            html += htmlRowText('Service Type', r.service_type);
+            html += htmlRowText('EAP Methods', (r.eap_methods || []).join(', '));
+            html += htmlRowText('Challenges', count(r.challenges));
+            html += htmlRowText('Reply Message', r.reply_message);
+            html += htmlRowText('Framed IP', r.framed_ip, 'mono');
+            html += htmlRowText('Session ID', r.session_id, 'mono');
+            html += htmlRowText('Session Time', r.session_time !== undefined ? `${r.session_time.toLocaleString()} s` : '');
+            html += htmlRowText('Bytes In', count(r.bytes_in));
+            html += htmlRowText('Bytes Out', count(r.bytes_out));
+            html += htmlRowText('Terminate Cause', r.terminate_cause);
+            html += htmlRowText('Requests', count(r.requests));
+            html += htmlRowText('Retransmissions', count(r.retransmissions));
+            html += htmlRowText('Response Time', r.response_time !== undefined ? `${r.response_time} s` : '');
+            return html;
+        }
+
         // tshark's SOCKS records (shark_protocols.SOCKS): one per connection
         // through the proxy - the host it was asked to reach, and its answer.
         function renderSocksDetails(e) {
@@ -4496,6 +4528,7 @@
             syslog: renderSyslogDetails,
             dtls: renderDtlsDetails,
             socks: renderSocksDetails,
+            radius: renderRadiusDetails,
             rpc: renderRpcDetails,
             lldp: renderNeighborDetails,
             cdp: renderNeighborDetails,
@@ -7171,6 +7204,7 @@
             dtls: 'DTLS',
             rpc: 'ONC RPC',
             socks: 'SOCKS',
+            radius: 'RADIUS',
             lldp: 'LLDP',
             cdp: 'CDP',
             opcua_action: 'OPC UA Actions',
@@ -7565,6 +7599,8 @@
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Program', 'Version', 'Procedure', 'Reply', 'Machine Name'];
                 case 'dtls':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'SNI / Host', 'Version', 'Handshake', 'Subject', 'JA4'];
+                case 'radius':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Message', 'User', 'Calling Station', 'NAS', 'Result', 'EAP Method', 'Reply Message'];
                 case 'socks':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Version', 'Command', 'Destination', 'Destination Port', 'Status', 'User', 'Tunneled'];
                 case 'syslog':
@@ -8064,10 +8100,11 @@
                 case 'syslog':
                 case 'dtls':
                 case 'rpc':
-                case 'socks': {
+                case 'socks':
+                case 'radius': {
                     const cols = getColumnsForType(etype).slice(6);
                     colSpan = cols.length + 6;
-                    row = rowPrefixCells(e) + cols.map(col => `<td${['Search Target', 'Location', 'User', 'Password', 'Chassis ID', 'Port ID', 'Device ID', 'Management IP', 'Hostname', 'Client MAC', 'Assigned IP', 'Host', 'Program', 'Message', 'SNI / Host', 'Subject', 'JA4', 'Machine Name', 'Destination', 'Destination Port'].includes(col) ? ' class="mono"' : ''}>${escapeHtml(extractValue(e, col))}</td>`).join('') + '</tr>';
+                    row = rowPrefixCells(e) + cols.map(col => `<td${['Search Target', 'Location', 'User', 'Password', 'Chassis ID', 'Port ID', 'Device ID', 'Management IP', 'Hostname', 'Client MAC', 'Assigned IP', 'Host', 'Program', 'Message', 'SNI / Host', 'Subject', 'JA4', 'Machine Name', 'Destination', 'Destination Port', 'Calling Station'].includes(col) ? ' class="mono"' : ''}>${escapeHtml(extractValue(e, col))}</td>`).join('') + '</tr>';
                     break;
                 }
                 case 'nbns': {
@@ -10271,7 +10308,7 @@
                     if (r?.value !== undefined) return String(r.value);
                     return e.opcua_action?.arguments ? e.opcua_action.arguments.join(', ') : '';
                 }
-                case 'Result': return e.iec104?.result || e.bacnet?.result || e.opcua_action?.result || e.dhcpv6?.status || '';
+                case 'Result': return e.iec104?.result || e.bacnet?.result || e.opcua_action?.result || e.dhcpv6?.status || e.radius?.result || '';
                 case 'Updates': return e.iec104_point?.updates !== undefined ? String(e.iec104_point.updates) : '';
                 case 'Last Value': { const r = e.iec104_point || e.bacnet_property; return r?.last_value !== undefined ? String(r.last_value) : ''; }
                 // BACnet: an action's, a read/notification summary's, a device's
@@ -10289,7 +10326,7 @@
                 case 'VLAN': return e.lldp?.vlan !== undefined ? String(e.lldp.vlan) : '';
                 case 'Native VLAN': return e.cdp?.native_vlan !== undefined ? String(e.cdp.native_vlan) : '';
                 // Windows Browser: a host's announcements, elections...
-                case 'Message': return e.browser?.message || e.dhcpv6?.message || e.syslog?.message || '';
+                case 'Message': return e.browser?.message || e.dhcpv6?.message || e.syslog?.message || e.radius?.message || '';
                 // Syslog: a message's
                 case 'Facility': return e.syslog?.facility || '';
                 case 'Program': return e.syslog?.program || e.rpc?.program || '';
@@ -10302,7 +10339,7 @@
                 case 'Device': return e.bacnet_device?.device !== undefined ? String(e.bacnet_device.device) : '';
                 case 'Vendor': { const d = e.bacnet_device; return d?.vendor || (d?.vendor_id !== undefined ? String(d.vendor_id) : ''); }
                 case 'Announcements': return e.bacnet_device?.announcements !== undefined ? String(e.bacnet_device.announcements) : '';
-                case 'User': return e.telnet?.username || e.opcua?.username || e.socks?.user || '';
+                case 'User': return e.telnet?.username || e.opcua?.username || e.socks?.user || e.radius?.user || '';
                 // GOOSE: a state change's
                 case 'Control Block': return e.goose?.gocb_ref || '';
                 case 'Dataset': return e.goose?.dataset || '';
@@ -10339,6 +10376,11 @@
                 case 'Destination': return e.socks?.request_name || e.socks?.request_host || '';
                 case 'Destination Port': return e.socks?.request_port !== undefined ? String(e.socks.request_port) : '';
                 case 'Tunneled': return e.socks?.tunneled || '';
+                // RADIUS: a login's, an accounting message's
+                case 'Calling Station': return e.radius?.calling_station || '';
+                case 'NAS': return e.radius?.nas_identifier || e.radius?.nas_ip || '';
+                case 'EAP Method': return (e.radius?.eap_methods || [])[0] || '';
+                case 'Reply Message': return e.radius?.reply_message || '';
                 case 'Version': {
                     if (e.event_type === 'ntp') return e.ntp?.version !== undefined ? String(e.ntp.version) : '';
                     if (e.dtls) return e.dtls.version || '';
