@@ -709,6 +709,71 @@ class TestGOOSE(unittest.TestCase):
 
 
 @unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
+class TestRPC(unittest.TestCase):
+    """tests/protocol_fixtures.write_rpc_pcap: one record per RPC call and
+    its reply - with what Suricata 8.0.7 logged for the capture
+    (tests/data/rpc_fixture.eve.json): flows it gives no protocol (it
+    parses NFS, not the portmapper or mountd), and a portmap-listing
+    alert on the scanner's DUMP."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests.protocol_fixtures import write_rpc_pcap
+        cls.tmpdir = tempfile.mkdtemp()
+        cls.pcap = os.path.join(cls.tmpdir, 'rpc.pcap')
+        write_rpc_pcap(cls.pcap)
+        cls.records = shark_analyzer.run_tshark(cls.pcap)
+        cls.calls = {r['rpc']['xid']: r['rpc'] for r in cls.records if r['event_type'] == 'rpc'}
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    def test_the_portmappers_dump_is_an_inventory(self):
+        dump = self.calls['0x00000001']
+        self.assertEqual((dump['program'], dump['version'], dump['procedure'], dump['reply']),
+                         ('portmapper', 2, 'DUMP', 'RPC executed successfully'))
+        self.assertEqual(dump['mappings'], [{'program': 'portmapper', 'version': 2, 'transport': 'udp', 'port': 111},
+                                            {'program': 'mountd', 'version': 3, 'transport': 'udp', 'port': 20048},
+                                            {'program': 'nfs', 'version': 3, 'transport': 'tcp', 'port': 2049}])
+
+    def test_getport_found_and_not(self):
+        found, missing = self.calls['0x00000002'], self.calls['0x00000006']
+        self.assertEqual((found['query'], found['port']), ({'program': 'mountd', 'version': 3, 'transport': 'udp'}, 20048))
+        self.assertEqual((missing['query']['program'], missing['reply']), ('100099', 'not registered'))
+
+    def test_mountd_who_mounted_what_and_what_it_exports(self):
+        mnt, export = self.calls['0x00000003'], self.calls['0x00000004']
+        self.assertEqual({k: mnt[k] for k in ('program', 'procedure', 'path', 'auth', 'machine_name', 'uid', 'gid',
+                                              'mount_status')},
+                         {'program': 'mountd', 'procedure': 'MNT', 'path': '/export/home', 'auth': 'AUTH_UNIX',
+                          'machine_name': 'client1', 'uid': 1000, 'gid': 1000, 'mount_status': 'OK'})
+        self.assertEqual((export['exports'], export['export_clients']), (['/export/home'], ['10.1.0.0/24']),
+                         "its own flow, though tshark gives every client of mountd's port one UDP stream")
+
+    def test_a_scanners_unanswered_dump(self):
+        scan = self.calls['0x00000005']
+        self.assertEqual((scan['procedure'], scan['calls']), ('DUMP', 1))
+        self.assertNotIn('reply', scan)
+
+    def test_flows_match_suricatas_and_the_merge_adds_the_records(self):
+        from scripts.compare_shark_suricata import compare
+        report = compare(_load_eve('rpc_fixture.eve.json'), self.records)['flow']
+        self.assertEqual((report['matched'], report['named_by_tshark'], report['differences']), (6, 6, []))
+        d = os.path.join(self.tmpdir, 'analysis')
+        os.makedirs(d)
+        shutil.copy(self.pcap, d)
+        events_db = os.path.join(d, 'events.db')
+        db.create_sqlite_db(events_db, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data',
+                                                    'rpc_fixture.eve.json'))
+        self.assertTrue(shark_analyzer.build(d, os.path.join(d, 'rpc.pcap')))
+        shark_analyzer.merge(d)
+        counts = db.get_event_types_sqlite(events_db)
+        self.assertEqual(counts.get('rpc'), 6)
+        self.assertFalse([t for t in counts if t.startswith('conn_')], 'records, not connection cards')
+
+
+@unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
 class TestDTLS(unittest.TestCase):
     """tests/protocol_fixtures.write_dtls_pcap: one record per connection's
     handshake, named like Suricata's tls records - with what Suricata

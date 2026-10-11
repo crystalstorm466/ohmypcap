@@ -46,6 +46,10 @@ each card marked with a dot:
   for each handshake, named like Suricata's TLS records: SNI, version,
   the certificate, JA3/JA3S/JA4, the cipher suite, WebRTC's SRTP
   profile, and how far the handshake got
+- **ONC RPC** (Suricata parses NFS, not the services around it) - a
+  record for each call and its reply: program, version, procedure and
+  result, the AUTH_UNIX machine name and uid; the portmapper's list of
+  the RPC services a host runs, and mountd's exports and mounts
 - **Windows Browser** (NetBIOS datagrams) - a passive inventory of the
   Windows machines on the network: each one's name, workgroup or domain,
   Windows version and roles (domain controller, SQL server, master

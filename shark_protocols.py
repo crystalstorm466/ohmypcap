@@ -414,6 +414,132 @@ class Syslog:
         return self.records
 
 
+# ---------------------------------------------------------------- ONC RPC
+#
+# Sun RPC, under NFS and the services around it - Suricata parses NFS
+# itself, but not the rest: the portmapper (port 111), which tells a
+# client which port each RPC program is on, the mount daemon, the lock
+# and status monitors, NIS. One record per call, with its reply: the
+# program, version and procedure, who the caller said it was (AUTH_UNIX's
+# machine name and uid/gid), and the reply's status. The portmapper's
+# replies are an inventory of the RPC services a host runs (DUMP lists
+# them all; GETPORT asks for one), and the mount daemon's which exports
+# it offers to whom (EXPORT) and who has them mounted (DUMP). A scanner's
+# DUMP to port 111 nobody answered is still a record.
+
+_RPC_PROGRAMS = {100000: 'portmapper', 100001: 'rstatd', 100002: 'rusersd', 100003: 'nfs', 100004: 'ypserv',
+                 100005: 'mountd', 100007: 'ypbind', 100008: 'walld', 100009: 'yppasswdd', 100011: 'rquotad',
+                 100012: 'sprayd', 100021: 'nlockmgr', 100024: 'status', 100026: 'bootparam', 100068: 'cmsd',
+                 100069: 'ypxfrd', 100083: 'ttdbserverd', 100227: 'nfs_acl', 100232: 'sadmind', 150001: 'pcnfsd',
+                 300019: 'amd'}
+_RPC_PROCEDURES = {
+    'portmapper': ('NULL', 'SET', 'UNSET', 'GETPORT', 'DUMP', 'CALLIT', 'GETTIME', 'UADDR2TADDR', 'TADDR2UADDR',
+                   'GETVERSADDR', 'INDIRECT', 'GETADDRLIST', 'GETSTAT'),
+    'mountd': ('NULL', 'MNT', 'DUMP', 'UMNT', 'UMNTALL', 'EXPORT', 'EXPORTALL', 'PATHCONF'),
+    'status': ('NULL', 'STAT', 'MON', 'UNMON', 'UNMON_ALL', 'SIMU_CRASH', 'NOTIFY'),
+    'nlockmgr': ('NULL', 'TEST', 'LOCK', 'CANCEL', 'UNLOCK', 'GRANTED', 'TEST_MSG', 'LOCK_MSG', 'CANCEL_MSG',
+                 'UNLOCK_MSG', 'GRANTED_MSG', 'TEST_RES', 'LOCK_RES', 'CANCEL_RES', 'UNLOCK_RES', 'GRANTED_RES'),
+}
+# portmapper v3/v4 (rpcbind) number GETADDR where v2 has GETPORT
+_RPCBIND_PROCEDURES = ('NULL', 'SET', 'UNSET', 'GETADDR', 'DUMP', 'CALLIT', 'GETTIME', 'UADDR2TADDR',
+                       'TADDR2UADDR', 'GETVERSADDR', 'INDIRECT', 'GETADDRLIST', 'GETSTAT')
+_RPC_TRANSPORTS = {6: 'tcp', 17: 'udp'}
+_RPC_MAX_LIST = 100
+
+
+def _rpc_program(number):
+    return _RPC_PROGRAMS.get(number, str(number)) if number is not None else ''
+
+
+class RPC:
+    """ONC RPC - see the comment above."""
+    event_type = 'rpc'
+    app_protos = ('rpc', 'portmap', 'mount', 'nlm', 'stat', 'ypbind', 'ypserv', 'yppasswd', 'ypxfr', 'rquota',
+                  'rstat', 'rwall', 'spray', 'bootparams', 'pcnfsd', 'klm', 'nfsacl', 'nfsauth', 'sadmind', 'nisplus')
+    fields = ('rpc.xid', 'rpc.msgtyp', 'rpc.program', 'rpc.programversion', 'rpc.procedure',
+              'vals(rpc.auth.flavor)', 'rpc.auth.machinename', 'rpc.auth.uid', 'rpc.auth.gid', 'vals(rpc.replystat)',
+              'vals(rpc.state_accept)', 'portmap.prog', 'portmap.version', 'portmap.proto', 'portmap.port',
+              'mount.path', 'vals(mount.status)', 'mount.export.directory', 'mount.export.group',
+              'mount.dump.hostname', 'mount.dump.directory')
+
+    def __init__(self):
+        self.records = []
+        self.open = {}           # (flow key, xid) -> body
+
+    def feed(self, pkt, v):
+        def first(name):
+            return (v[name] or [''])[0]
+        xid, kind = _int(first('rpc.xid')), _int(first('rpc.msgtyp'))
+        if xid is None or kind not in (0, 1):
+            return               # tshark's RPC heuristic, matching a packet that isn't
+        key = (pkt.flow.key, xid)
+        body = self.open.get(key)
+        if body is None:
+            number = _int(first('rpc.program'))
+            body = self.open[key] = {'xid': f'0x{xid:08x}', 'program': _rpc_program(number)}
+            if number is not None:
+                body['program_number'] = number
+            version, procedure = _int(first('rpc.programversion')), _int(first('rpc.procedure'))
+            if version is not None:
+                body['version'] = version
+            if procedure is not None:
+                names = _RPCBIND_PROCEDURES if body['program'] == 'portmapper' and (version or 2) > 2 \
+                    else _RPC_PROCEDURES.get(body['program'], ())
+                body['procedure'] = names[procedure] if procedure < len(names) else f'procedure {procedure}'
+            self.records.append((pkt.flow, pkt.when, self.event_type, body))
+        if kind == 0:
+            body['calls'] = body.get('calls', 0) + 1
+            flavor = first('vals(rpc.auth.flavor)')
+            if flavor:
+                body['auth'] = flavor
+            for name, field in (('machine_name', 'rpc.auth.machinename'), ('uid', 'rpc.auth.uid'),
+                                ('gid', 'rpc.auth.gid')):
+                if first(field):
+                    body[name] = _int(first(field), first(field)) if name != 'machine_name' else first(field)
+            self._call(body, v, first)
+        else:
+            stat, accept = first('vals(rpc.replystat)'), first('vals(rpc.state_accept)')
+            body['reply'] = accept if stat == 'accepted' and accept else stat or 'reply'
+            self._reply(body, v, first)
+
+    @staticmethod
+    def _call(body, v, first):
+        if body['program'] == 'portmapper' and v['portmap.prog']:
+            body['query'] = {'program': _rpc_program(_int(first('portmap.prog'))),
+                             'version': _int(first('portmap.version')),
+                             'transport': _RPC_TRANSPORTS.get(_int(first('portmap.proto')), first('portmap.proto'))}
+        if first('mount.path'):
+            body['path'] = first('mount.path')
+
+    @staticmethod
+    def _reply(body, v, first):
+        if body['program'] == 'portmapper':
+            if body.get('procedure') == 'DUMP' and v['portmap.prog']:
+                body['mappings'] = [
+                    {'program': _rpc_program(_int(p)), 'version': _int(ver),
+                     'transport': _RPC_TRANSPORTS.get(_int(proto), proto), 'port': _int(port)}
+                    for p, ver, proto, port in zip(v['portmap.prog'], v['portmap.version'], v['portmap.proto'],
+                                                   v['portmap.port'])][:_RPC_MAX_LIST]
+            elif v['portmap.port']:
+                port = _int(first('portmap.port'))
+                body['port'] = port
+                if port == 0:
+                    body['reply'] = 'not registered'
+        if body['program'] == 'mountd':
+            if first('vals(mount.status)'):
+                body['mount_status'] = first('vals(mount.status)')
+            if v['mount.export.directory']:
+                body['exports'] = list(dict.fromkeys(v['mount.export.directory']))[:_RPC_MAX_LIST]
+                if v['mount.export.group']:
+                    body['export_clients'] = list(dict.fromkeys(v['mount.export.group']))[:_RPC_MAX_LIST]
+            if v['mount.dump.hostname']:
+                body['mounted_by'] = [f'{host}:{path}' for host, path in
+                                      zip(v['mount.dump.hostname'], v['mount.dump.directory'])][:_RPC_MAX_LIST]
+
+    def finish(self):
+        return self.records
+
+
 # ---------------------------------------------------------------- DTLS
 #
 # TLS over UDP (VPNs, WebRTC, CoAP and IoT security, CAPWAP) - Suricata
@@ -2148,7 +2274,7 @@ def _pdus(layer):
 
 # Every protocol with records here, from tshark's fields, in the order their
 # fields follow the base fields in tshark's output.
-PROTOCOLS = (LLMNR, NBNS, DHCPv6, Syslog, DTLS, SSDP, S7comm, Telnet, IEC104, BACnet, GOOSE, Browser, LLDP, CDP)
+PROTOCOLS = (LLMNR, NBNS, DHCPv6, Syslog, DTLS, RPC, SSDP, S7comm, Telnet, IEC104, BACnet, GOOSE, Browser, LLDP, CDP)
 # ... and from the structured pass (shark_analyzer._structured_pass): none
 # yet - it's for a protocol whose messages nest, which flat fields can't
 # keep apart (several commands per packet, a token inside a command).

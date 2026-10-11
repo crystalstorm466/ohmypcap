@@ -2165,6 +2165,7 @@
                 dhcpv6: '#9ccc65',
                 syslog: '#ffca28',
                 dtls: '#4dd0e1',
+                rpc: '#a1887f',
                 opcua_action: '#ff7043',
                 bacnet_property: '#5c6bc0',
                 bacnet_device: '#8d6e63',
@@ -3803,6 +3804,33 @@
             return html;
         }
 
+        // tshark's ONC RPC records (shark_protocols.RPC): one per call, with
+        // its reply - the portmapper's mappings, mountd's exports.
+        function renderRpcDetails(e) {
+            const r = e.rpc || {};
+            let html = htmlSection('ONC RPC Details', COLORS.EVENT.rpc);
+            html += htmlRowText('Program', r.program_number !== undefined && String(r.program_number) !== r.program
+                ? `${r.program} (${r.program_number})` : r.program);
+            html += htmlRowText('Version', r.version !== undefined ? String(r.version) : '');
+            html += htmlRowText('Procedure', r.procedure);
+            html += htmlRowText('Reply', r.reply || 'none');
+            html += htmlRowText('Auth', r.auth);
+            html += htmlRowText('Machine Name', r.machine_name, 'mono');
+            html += htmlRowText('UID / GID', r.uid !== undefined ? `${r.uid} / ${r.gid ?? ''}` : '', 'mono');
+            if (r.query) html += htmlRowText('Asked For', `${r.query.program} v${r.query.version ?? '?'} ${r.query.transport || ''}`);
+            html += htmlRowText('Port', r.port !== undefined ? String(r.port) : '', 'mono');
+            html += htmlRowText('Path', r.path, 'mono');
+            html += htmlRowText('Mount Status', r.mount_status);
+            html += htmlRow('Registered', (r.mappings || []).map(m =>
+                escapeHtml(`${m.program} v${m.version ?? '?'} ${m.transport || ''} ${m.port ?? ''}`)).join('<br>'), 'mono');
+            html += htmlRowText('Exports', (r.exports || []).join(', '), 'mono');
+            html += htmlRowText('Export Clients', (r.export_clients || []).join(', '), 'mono');
+            html += htmlRowText('Mounted By', (r.mounted_by || []).join(', '), 'mono');
+            html += htmlRowText('XID', r.xid, 'mono');
+            html += htmlRowText('Calls', r.calls ? r.calls.toLocaleString() : '');
+            return html;
+        }
+
         // tshark's DTLS records (shark_protocols.DTLS): one per connection's
         // handshake, with the fields Suricata's tls records have.
         function renderDtlsDetails(e) {
@@ -4446,6 +4474,7 @@
             dhcpv6: renderDhcpv6Details,
             syslog: renderSyslogDetails,
             dtls: renderDtlsDetails,
+            rpc: renderRpcDetails,
             lldp: renderNeighborDetails,
             cdp: renderNeighborDetails,
             opcua_action: renderOpcuaActionDetails,
@@ -7118,6 +7147,7 @@
             dhcpv6: 'DHCPv6',
             syslog: 'Syslog',
             dtls: 'DTLS',
+            rpc: 'ONC RPC',
             lldp: 'LLDP',
             cdp: 'CDP',
             opcua_action: 'OPC UA Actions',
@@ -7508,6 +7538,8 @@
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Service', 'Object', 'Property', 'Value', 'Password', 'Result'];
                 case 'browser':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Message', 'NetBIOS Name', 'Workgroup', 'Windows', 'Roles', 'Count'];
+                case 'rpc':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Program', 'Version', 'Procedure', 'Reply', 'Machine Name'];
                 case 'dtls':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'SNI / Host', 'Version', 'Handshake', 'Subject', 'JA4'];
                 case 'syslog':
@@ -8005,10 +8037,11 @@
                 case 'cdp':
                 case 'dhcpv6':
                 case 'syslog':
-                case 'dtls': {
+                case 'dtls':
+                case 'rpc': {
                     const cols = getColumnsForType(etype).slice(6);
                     colSpan = cols.length + 6;
-                    row = rowPrefixCells(e) + cols.map(col => `<td${['Search Target', 'Location', 'User', 'Password', 'Chassis ID', 'Port ID', 'Device ID', 'Management IP', 'Hostname', 'Client MAC', 'Assigned IP', 'Host', 'Program', 'Message', 'SNI / Host', 'Subject', 'JA4'].includes(col) ? ' class="mono"' : ''}>${escapeHtml(extractValue(e, col))}</td>`).join('') + '</tr>';
+                    row = rowPrefixCells(e) + cols.map(col => `<td${['Search Target', 'Location', 'User', 'Password', 'Chassis ID', 'Port ID', 'Device ID', 'Management IP', 'Hostname', 'Client MAC', 'Assigned IP', 'Host', 'Program', 'Message', 'SNI / Host', 'Subject', 'JA4', 'Machine Name'].includes(col) ? ' class="mono"' : ''}>${escapeHtml(extractValue(e, col))}</td>`).join('') + '</tr>';
                     break;
                 }
                 case 'nbns': {
@@ -10233,7 +10266,9 @@
                 case 'Message': return e.browser?.message || e.dhcpv6?.message || e.syslog?.message || '';
                 // Syslog: a message's
                 case 'Facility': return e.syslog?.facility || '';
-                case 'Program': return e.syslog?.program || '';
+                case 'Program': return e.syslog?.program || e.rpc?.program || '';
+                // ONC RPC: a call's
+                case 'Machine Name': return e.rpc?.machine_name || '';
                 case 'Workgroup': return e.browser?.destination_name || '';
                 case 'Windows': return e.browser?.os_version || '';
                 case 'Roles': return (e.browser?.roles || []).join(', ');
@@ -10276,6 +10311,7 @@
                 case 'Version': {
                     if (e.event_type === 'ntp') return e.ntp?.version !== undefined ? String(e.ntp.version) : '';
                     if (e.dtls) return e.dtls.version || '';
+                    if (e.rpc) return e.rpc.version !== undefined ? String(e.rpc.version) : '';
                     return e.tls?.version || '-';
                 }
                 case 'Issuer': return (e.tls?.issuerdn || '-').slice(0, CONFIG.TLS_SUBJECT_MAX_LENGTH);
@@ -10430,7 +10466,7 @@
                 case 'Exchange Type': return e.ike?.exchange_type || '';
                 case 'IKE Version': return e.ike?.version_major !== undefined ? `${e.ike.version_major}.${e.ike.version_minor || 0}` : '';
                 case 'Init SPI': return e.ike?.init_spi || '';
-                case 'Procedure': return e.nfs?.procedure || '';
+                case 'Procedure': return e.nfs?.procedure || e.rpc?.procedure || '';
                 case 'Security Type': return String(e.rfb?.authentication?.security_type ?? '');
                 case 'Request Type': return e.bittorrent_dht?.request_type || e.bittorrent_dht?.request?.request_type || '';
                 case 'Info Hash': return e.bittorrent_dht?.info_hash || e.bittorrent_dht?.request?.info_hash || '';
@@ -10439,7 +10475,11 @@
                 case 'Rcpt To': return (e.smtp?.rcpt_to || []).join(', ');
                 case 'Command Data': return e.ftp?.command_data || '';
                 case 'Completion Code': return (e.ftp?.completion_code || []).join(', ');
-                case 'Reply': return e.dhcpv6 ? e.dhcpv6.reply || '' : (e.ftp?.reply || []).join(' | ');
+                case 'Reply': {
+                    if (e.dhcpv6) return e.dhcpv6.reply || '';
+                    if (e.rpc) return e.rpc.reply || '';
+                    return (e.ftp?.reply || []).join(' | ');
+                }
                 case 'Event': return e.anomaly?.event || '';
                 case 'Layer': return e.anomaly?.layer || '';
                 case 'Answered': return e.shark?.answered || '';

@@ -994,3 +994,53 @@ def dtls_packets():
 
 def write_dtls_pcap(path):
     write_pcap(path, dtls_packets())
+
+
+# ---------------------------------------------------------------- ONC RPC
+#
+# A client (RPC_CLIENT) and an NFS server (RPC_SERVER), over UDP: the
+# portmapper's DUMP (three programs registered) and GETPORT for mountd,
+# mountd's MNT of /export/home as AUTH_UNIX client1 (uid 1000) and its
+# EXPORT list, a GETPORT for a program not registered - and a scanner's
+# DUMP nobody answered.
+
+RPC_CLIENT, RPC_SERVER, RPC_SCANNER = '10.1.0.30', '10.1.0.40', '198.51.100.7'
+
+
+def _xdr(*values):
+    return b''.join(struct.pack('!I', v) for v in values)
+
+
+def _xdr_string(text):
+    raw = text.encode()
+    return _xdr(len(raw)) + raw + b'\x00' * (-len(raw) % 4)
+
+
+def _rpc_call(xid, program, version, procedure, args=b'', cred=_xdr(0, 0)):
+    return _xdr(xid, 0, 2, program, version, procedure) + cred + _xdr(0, 0) + args
+
+
+def _rpc_reply(xid, results=b''):
+    return _xdr(xid, 1, 0, 0, 0, 0) + results          # accepted, AUTH_NULL verifier, SUCCESS
+
+
+def rpc_packets():
+    unix = _xdr(0) + _xdr_string('client1') + _xdr(1000, 1000, 1, 1000)
+    cred = _xdr(1, len(unix)) + unix
+    mappings = _xdr(1, 100000, 2, 17, 111, 1, 100005, 3, 17, 20048, 1, 100003, 3, 6, 2049, 0)
+    exports = _xdr(1) + _xdr_string('/export/home') + _xdr(1) + _xdr_string('10.1.0.0/24') + _xdr(0, 0)
+
+    def exchange(port, server_port, call, reply):
+        return [_udp_packet(RPC_CLIENT, RPC_SERVER, port, server_port, call),
+                _udp_packet(RPC_SERVER, RPC_CLIENT, server_port, port, reply)]
+    return (exchange(700, 111, _rpc_call(1, 100000, 2, 4), _rpc_reply(1, mappings))
+            + exchange(701, 111, _rpc_call(2, 100000, 2, 3, _xdr(100005, 3, 17, 0)), _rpc_reply(2, _xdr(20048)))
+            + exchange(702, 20048, _rpc_call(3, 100005, 3, 1, _xdr_string('/export/home'), cred),
+                       _rpc_reply(3, _xdr(0) + _xdr_string('ABCDEFGH') + _xdr(1, 1)))
+            + exchange(703, 20048, _rpc_call(4, 100005, 3, 5), _rpc_reply(4, exports))
+            + exchange(704, 111, _rpc_call(6, 100000, 2, 3, _xdr(100099, 1, 17, 0)), _rpc_reply(6, _xdr(0)))
+            + [_udp_packet(RPC_SCANNER, RPC_SERVER, 40000, 111, _rpc_call(5, 100000, 2, 4))])
+
+
+def write_rpc_pcap(path):
+    write_pcap(path, rpc_packets())

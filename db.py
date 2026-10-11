@@ -1402,6 +1402,13 @@ AGGREGATION_JSON_PATHS = {
         'Roles': ['$.browser.roles'],
         'Count': ['$.browser.count'],
     },
+    'rpc': {
+        'Program': ['$.rpc.program'],
+        'Version': ['$.rpc.version'],
+        'Procedure': ['$.rpc.procedure'],
+        'Reply': ['$.rpc.reply'],
+        'Machine Name': ['$.rpc.machine_name'],
+    },
     'dtls': {
         'SNI / Host': ['$.dtls.sni'],
         'Version': ['$.dtls.version'],

@@ -62,7 +62,7 @@ SHARK_ARTIFACTS = (SHARK_DB, SHARK_DB + '-wal', SHARK_DB + '-shm', SHARK_DB + '.
 # change here or in shark_protocols changes what a run produces: a
 # shark.db stamped with an older version is rebuilt the next time its
 # status is asked for, so existing analyses pick up the change.
-SHARK_FORMAT_VERSION = 20
+SHARK_FORMAT_VERSION = 21
 
 # The fields every packet is read for, one per column of tshark's
 # tab-separated output, in this order - then each of shark_protocols'
@@ -405,8 +405,10 @@ def build_records(lines):
 def _packet_key(f, app):
     """A packet's IP version, addresses, transport, stream, ports and flow
     key, from its base fields (f: each one's last occurrence - see
-    _FIELDS). A TCP or UDP flow is tshark's stream; any other is its
-    addresses (and, below IP, its protocol)."""
+    _FIELDS). A TCP flow is tshark's stream, a UDP one its stream between
+    these two ends (tshark gives one stream to every client a portmapper
+    or SIP told it to expect on a port, whatever port each came from); any
+    other is its addresses (and, below IP, its protocol)."""
     if f[_F_IP_SRC] or f[_F_IP6_SRC]:
         ip_v = 4 if f[_F_IP_SRC] else 6
         if ip_v == 4:
@@ -423,7 +425,7 @@ def _packet_key(f, app):
     elif f[_F_UDP_STREAM]:
         proto, stream = 'UDP', _int(f[_F_UDP_STREAM])
         sport, dport = _int(f[_F_UDP_SPORT]), _int(f[_F_UDP_DPORT])
-        key = ('udp', stream)
+        key = ('udp', stream) + tuple(sorted(((src, sport), (dst, dport))))
     else:
         number = f[_F_IP_PROTO] or f[_F_IP6_NXT]
         proto = _IP_PROTO_NAMES.get(number, number) if ip_v else (app.upper() or 'ETH')
