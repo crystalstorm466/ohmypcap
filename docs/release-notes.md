@@ -8,14 +8,12 @@ Suricata doesn't parse every protocol on a network. Every PCAP analysis now
 also runs tshark (Wireshark's command-line engine), alongside Suricata, and
 the protocols Suricata doesn't parse join the analysis's results - same
 tabs, tables, aggregations, Sankey diagram, search, pivots and row notes,
-each card marked with a dot:
+each card marked with a dot.
 
-- **NBNS, LLMNR, SSDP and S7comm** - one record per transaction: Windows
-  name resolution and registration, UPnP device discovery, and Siemens PLC
-  reads, writes and control
-- **Telnet** - one record per session: the device's banner, the user name
-  and password typed at its login, whether the login failed, and the
-  commands typed (Suricata recognizes Telnet but logs nothing about it)
+**Industrial and IoT**
+
+- **S7comm** (Siemens PLCs) - one record per request and response: reads,
+  writes and control
 - **IEC 104** (power grid telecontrol) - a record for each control action
   (command, set point, interrogation, clock sync, file transfer) with
   whether the substation confirmed, refused or finished it, and one for
@@ -34,14 +32,59 @@ each card marked with a dot:
   change a protection relay publishes: its values and which ones changed,
   how many times it was repeated, and a jump or reset in its state number,
   which is what a forged message looks like
+- **CoAP** (HTTP for IoT devices, over UDP 5683) - a record for each
+  request and its response, like Suricata's HTTP records: method, URI,
+  response code and content format - and, for a device's discovery
+  (`/.well-known/core`), the resources it listed
+
+**Logins, remote access and management**
+
+- **Telnet** (Suricata recognizes it but logs nothing about it) - one
+  record per session: the device's banner, the user name and password
+  typed at its login, whether the login failed, and the commands typed
+- **RADIUS** (how Wi-Fi, VPNs and network devices check logins) - a
+  record for each login, its rounds of challenges and the final accept or
+  reject: the user name, the device that asked, the client's MAC, the EAP
+  method, the address given and the server's reply message; and one for
+  each accounting Start, Stop or update, with the session's length and
+  bytes
+- **SOCKS** (proxies on port 1080) - a record for each connection through
+  the proxy: the host and port the client asked it to reach (the flow
+  shows only the proxy), the proxy's answer, the login method and user
+  name, and the protocol tunneled through it afterwards
+- **IPMI** (server management controllers - iDRAC, iLO, Supermicro - over
+  RMCP, UDP 623) - a record for each flow to a controller, of what it says
+  before any login: whether it answered a presence ping, the IPMI versions
+  and login methods it offers, whether it allows anonymous logins or null
+  user names, and the cipher an IPMI 2.0 session asked for and was given -
+  with the weaknesses those show, such as cipher zero (CVE-2013-4782)
+- **L2TP** (the tunnel of L2TP/IPsec VPNs, UDP 1701) - a record for each
+  control connection, which seen at all is outside IPsec: the messages
+  exchanged, each end's host name, vendor and firmware (scanners name
+  themselves - masscan, Censys, Xpanse), how far it got and how it ended,
+  the calls placed and how many data messages crossed it
+- **XDMCP** (X display login managers, UDP 177) - a record for each client
+  and login manager: whether the server offered its graphical login
+  screen, its host name and status (often its OS and load), the
+  authentication and authorization methods named, and the display that
+  asked for a session; a broadcast query lists every server that answered
+
+The only passwords kept are the ones typed or sent in the clear where
+they're what an investigator is after: Telnet's login, OPC UA's
+unencrypted login and BACnet's device password. No other secret is ever
+read - not a RADIUS or SOCKS password, the password hash an IPMI 2.0
+controller sends, L2TP's CHAP exchange or the PPP login inside it,
+RIPv2's password, or the X authorization cookie XDMCP hands a session.
+
+**Network services and routing**
+
 - **DHCPv6** (Suricata parses DHCP for IPv4 only) - a record for each
   transaction, the client's message paired with the server's reply: the
   client's hostname, MAC address and vendor class, and the addresses or
   prefixes, DNS servers and search domains it was given
-- **Syslog** (Suricata has no syslog parser) - a record for each message
-  a device sent its log collector: severity, facility, host, program and
-  PID, and the message, in either format (RFC 3164 or RFC 5424, with its
-  structured data)
+- **Syslog** - a record for each message a device sent its log
+  collector: severity, facility, host, program and PID, and the message,
+  in either format (RFC 3164 or RFC 5424, with its structured data)
 - **DTLS** (TLS over UDP - Suricata parses TLS over TCP only) - a record
   for each handshake, named like Suricata's TLS records: SNI, version,
   the certificate, JA3/JA3S/JA4, the cipher suite, WebRTC's SRTP
@@ -50,77 +93,38 @@ each card marked with a dot:
   record for each call and its reply: program, version, procedure and
   result, the AUTH_UNIX machine name and uid; the portmapper's list of
   the RPC services a host runs, and mountd's exports and mounts
-- **CoAP** (HTTP for IoT devices, over UDP 5683) - a record for each
-  request and its response, like Suricata's HTTP records: method, URI,
-  response code and content format - and, for a device's discovery
-  (`/.well-known/core`), the resources it listed
-- **SLP** (Service Location Protocol, UDP and TCP 427 - Suricata doesn't
-  parse it) - a record for each request and its replies: the service
-  type, scope and URL asked about, the URLs, service types and
-  attributes returned (an ESXi host's product and build), the status,
-  every host that answered a multicast request, and each side's size.
-  Internet scanners hunt ESXi hosts with SLP and register services
-  with exposed hosts for the CVE-2023-29552 amplification attack; their
-  registrations and unanswered probes are records too
-- **IPMI** (server management controllers - iDRAC, iLO, Supermicro -
-  over RMCP, UDP 623; Suricata doesn't parse it) - a record for each
-  flow to a controller, of what it says before any login: whether it
-  answered a presence ping, the IPMI versions and login methods it
-  offers, whether it allows anonymous logins or null user names, and the
-  cipher an IPMI 2.0 session asked for and was given - with the
-  weaknesses those show, such as cipher zero (CVE-2013-4782). The
-  password hash a controller sends during an IPMI 2.0 login is never
-  read, nor anything inside a session
-- **L2TP** (the tunnel of L2TP/IPsec VPNs, UDP 1701 - Suricata doesn't
-  parse it) - a record for each control connection, which seen at all
-  is outside IPsec: the messages exchanged, each end's host name,
-  vendor and firmware (scanners name themselves - masscan, Censys,
-  Xpanse), how far it got, how it ended (result, error and message),
-  the calls placed and how many data messages crossed it. The tunnel's
-  authentication is only noted, and the PPP inside it - the user's
-  login - is never read
-- **RIP and RIPng** (routing, UDP 520 and 521 - Suricata doesn't parse
-  them) - a record for each sender and kind of message: the routes it
-  announced (prefix, next hop, metric, tag), the ones it withdrew, the
-  metric changes between its updates, and what a request asked for -
-  a map of the networks and the routers reaching them, a host that
-  isn't a router announcing a default route, and scanners asking a
-  router for its whole table. RIPv2's authentication is only named: its
-  password, sent in the clear, is never kept
+- **STUN** (NAT discovery and TURN relays, for WebRTC, VoIP and games -
+  and malware finding its public address) - a record for each flow's
+  exchanges of one kind: the public address and port the server
+  reported, a TURN relay's address, errors, the client's and server's
+  software and a TURN login's user name
+- **RIP and RIPng** (routing, UDP 520 and 521) - a record for each sender
+  and kind of message: the routes it announced (prefix, next hop, metric,
+  tag), the ones it withdrew, the metric changes between its updates, and
+  what a request asked for - a map of the networks and the routers
+  reaching them, a host that isn't a router announcing a default route,
+  and scanners asking a router for its whole table
 - **Tunnels** (Suricata decodes them but logs none) - a record for each
   tunnel, like Zeek's tunnel.log: its type (GRE, VXLAN, Geneve, Teredo,
   AYIYA, GTP-U, IP in IP, 6in4...), its outer endpoints, packets and
   bytes each way, how long it lasted, and the inner flows and hosts that
   crossed it - and whether its inner packet goes back to whoever sent
   it, which is a scanner testing whether a host unwraps tunnels from
-  anyone. A tunneled packet's flows now match Suricata's: the inner
-  flow is addressed, named and counted from the inner packet on (an
-  IPv6 packet over IPv4 was given its outer IPv4 addresses), and the
-  tunnel's outer flow is there too
-- **XDMCP** (X display login managers, UDP 177 - Suricata doesn't parse
-  it) - a record for each client and login manager: whether the server
-  offered its graphical login screen (willing, unwilling, accepted,
-  declined), its host name and status (often its OS and load), the
-  authentication and authorization methods named, and the display that
-  asked for a session; a broadcast query lists every server that
-  answered. Only the methods' names are kept - never the X authorization
-  cookie a session is given
-- **STUN** (NAT discovery and TURN relays, for WebRTC, VoIP and games -
-  and malware finding its public address) - a record for each flow's
-  exchanges of one kind: the public address and port the server
-  reported, a TURN relay's address, errors, the client's and server's
-  software and a TURN login's user name
-- **RADIUS** (how Wi-Fi, VPNs and network devices check logins -
-  Suricata doesn't parse it) - a record for each login, its rounds of
-  challenges and the final accept or reject: the user name (never the
-  password), the device that asked, the client's MAC, the EAP method,
-  the address given and the server's reply message; and one for each
-  accounting Start, Stop or update, with the session's length and bytes
-- **SOCKS** (proxies on port 1080 - Suricata doesn't parse it) - a
-  record for each connection through the proxy: the host and port the
-  client asked it to reach (the flow shows only the proxy), the proxy's
-  answer, the login method and user name (never the password), and the
-  protocol tunneled through it afterwards
+  anyone. A tunneled packet's flows are Suricata's: the inner flow from
+  the inner packet on, and the tunnel's outer flow beside it
+
+**Discovery and inventory**
+
+- **NBNS, LLMNR and SSDP** - one record per transaction: Windows name
+  resolution and registration, and UPnP device discovery
+- **SLP** (Service Location Protocol, UDP and TCP 427) - a record for
+  each request and its replies: the service type, scope and URL asked
+  about, the URLs, service types and attributes returned (an ESXi host's
+  product and build), the status and every host that answered a
+  multicast request. Internet scanners hunt ESXi hosts with SLP and
+  register services with exposed hosts for the CVE-2023-29552
+  amplification attack; their registrations and unanswered probes are
+  records too
 - **Windows Browser** (NetBIOS datagrams) - a passive inventory of the
   Windows machines on the network: each one's name, workgroup or domain,
   Windows version and roles (domain controller, SQL server, master
@@ -130,8 +134,11 @@ each card marked with a dot:
   device's name, the port it announced from, what it is, its management
   address and VLAN, its platform and software (CDP) or maker, model and
   serial number (LLDP-MED)
+
+**Everything else**
+
 - **A card for every other protocol tshark recognizes** - OpenVPN, PRP,
-  RADIUS, MongoDB and so on - listing its connections, each marked with
+  HART-IP, MongoDB and so on - listing its connections, each marked with
   whether the server answered (yes, no, or only with an ICMP error - a
   scanner's probe of a closed port); the protocols nothing ever answered
   share one card, **Probed Only**, so a week of scans hitting an
