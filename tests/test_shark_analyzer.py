@@ -2105,6 +2105,27 @@ class TestFlowOrientation(unittest.TestCase):
             with self.subTest(values=values):
                 self.assertIs(shark_analyzer._is_reply(cols(**values)), expected)
 
+    def test_a_255_address_that_answers_is_a_host(self):
+        """In a /23 or larger, 10.1.2.255 is a host: one that answers isn't
+        a broadcast address, which never does. And a broadcast is known by
+        its frames' Ethernet broadcast destination, whatever its last octet."""
+        def flow(server):
+            return shark_analyzer._Flow(('k',), 'UDP', 4, '10.1.0.5', server, 40000, 161, 1.0, '0')
+        host = flow('10.1.2.255')
+        host.add('10.1.0.5', 40000, 80, 1.0, 'snmp', '', False)
+        self.assertEqual(host.answered(), '', 'unanswered, it may be the broadcast address')
+        host.add('10.1.2.255', 161, 120, 1.1, 'snmp', '', False)
+        self.assertFalse(host.to_group())
+        self.assertEqual(host.answered(), 'yes')
+        subnet = flow('10.1.1.127')
+        subnet.mac_broadcast = True
+        subnet.add('10.1.0.5', 40000, 80, 1.0, 'snmp', '', False)
+        self.assertTrue(subnet.to_group(), "a /25's broadcast, sent to ff:ff:ff:ff:ff:ff")
+        self.assertEqual(subnet.answered(), '')
+        limited = flow('255.255.255.255')
+        limited.add('255.255.255.255', 161, 120, 1.1, 'snmp', '', False)
+        self.assertTrue(limited.to_group(), '255.255.255.255 is always the broadcast')
+
     def test_group_addresses(self):
         self.assertEqual([shark_analyzer._is_group_address(a) for a in
                           ('224.0.0.251', '239.255.255.250', '255.255.255.255', '10.1.0.255', 'ff02::fb', '10.1.0.10', '2001:db8::1', 'aa:bb:cc:dd:ee:ff')],
@@ -2268,6 +2289,69 @@ class TestHostileInput(unittest.TestCase):
         self.assertEqual((_dict({'a': 1}), _dict('text'), _dict(None)), ({'a': 1}, {}, {}))
         self.assertEqual(shark_analyzer._unescape('a\\x41b\\xzz\\tc'), 'aAbxzz\tc')
 
+    def test_a_transaction_id_reused_after_its_answer_is_a_new_transaction(self):
+        """NBNS and DHCPv6, like LLMNR: a request after its transaction's
+        answer is a new transaction, not a retransmission folded into the
+        old one - a retransmission before the answer still is."""
+        from shark_protocols import DHCPv6, NBNS, Packet
+        flow = shark_analyzer._Flow(('k',), 'UDP', 4, '10.0.0.5', '10.0.0.255', 137, 137, 1.0, '0')
+        nbns = NBNS()
+        ask = dict({f: [] for f in NBNS.fields}, **{'nbns.id': ['0x10'], 'nbns.flags.response': ['False'],
+                                                     'nbns.name': ['WPAD<00>']})
+        answer = dict(ask, **{'nbns.flags.response': ['True'], 'nbns.flags.rcode': ['0']})
+        asker = Packet(1, 1.0, flow, 137, 137, 'nbns', '10.0.0.5', '10.0.0.255')
+        answerer = Packet(2, 1.1, flow, 137, 137, 'nbns', '10.0.0.9', '10.0.0.5')
+        for packet, fields in ((asker, ask), (asker, ask), (answerer, answer), (asker, ask)):
+            nbns.feed(packet, fields)
+        self.assertEqual([(b['type'], b.get('transmissions')) for _, _, _, b in nbns.finish()],
+                         [('response', 2), ('request', 1)])
+        dhcp = DHCPv6()
+        solicit = dict({f: [] for f in DHCPv6.fields}, **{'dhcpv6.msgtype': ['1'], 'dhcpv6.xid': ['0x00abcd']})
+        advertise = dict(solicit, **{'dhcpv6.msgtype': ['2']})
+        client = Packet(1, 1.0, flow, 546, 547, 'dhcpv6', 'fe80::5', 'ff02::1:2')
+        server = Packet(2, 1.1, flow, 547, 546, 'dhcpv6', 'fe80::9', 'fe80::5')
+        for packet, fields in ((client, solicit), (server, advertise), (client, solicit)):
+            dhcp.feed(packet, fields)
+        self.assertEqual([(b.get('message'), b.get('reply')) for _, _, _, b in dhcp.finish()],
+                         [('Solicit', 'Advertise'), ('Solicit', None)])
+
+    @unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
+    def test_s7_pdus_sharing_a_packet_each_get_their_own_fields(self):
+        """REGRESSION: a packet's fields were read by PDU position - but an
+        ack's error class is listed only for acks, a userdata's function
+        group only for userdata - so after a userdata PDU an ack_data's
+        error was read from the wrong place and missed."""
+        from tests.pcap_fixtures import tcp_segments, write_pcap
+        from tests.protocol_fixtures import CLIENT, S7_PLC, _s7_ack, _s7_job, _tpkt_s7
+        read_item = b'\x12\x0a\x10\x02\x00\x01\x00\x01\x84' + (10 << 3).to_bytes(3, 'big')
+        userdata = _tpkt_s7(struct.pack('!BBHHHH', 0x32, 7, 0, 4, 8, 8) + b'\x00\x01\x12\x04\x11\x44\x01\x00'
+                            + b'\xff\x09\x00\x04\x00\x11\x00\x00')
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(d, ignore_errors=True))
+        pcap = os.path.join(d, 's7.pcap')
+        write_pcap(pcap, tcp_segments(CLIENT, S7_PLC, 41100, 102, [
+            (True, _s7_job(3, b'\x05\x01' + read_item, b'\x00\x04\x00\x08\x07')),
+            (False, userdata + _s7_ack(3, b'\x05\x01', b'\x0a', errcls=0x85, errcod=0x04)),
+            (True, _s7_job(5, b'\x04\x01' + read_item) + userdata)]))
+        records = [r['s7comm'] for r in shark_analyzer.run_tshark(pcap) if r['event_type'] == 's7comm']
+        write = next(r for r in records if r.get('pdu_ref') == 3)
+        self.assertEqual((write['response'].get('error_class'), write['response'].get('error_code')),
+                         ('Error on supplies', 4))
+        self.assertEqual([r['function_group'] for r in records if r['type'] == 'userdata'],
+                         ['CPU functions', 'CPU functions'], 'a userdata second in its packet too')
+
+    def test_bacnet_requests_awaiting_replies_are_capped(self):
+        """The routed device is part of a pending request's key, so a flood
+        of reads naming made-up devices grew it per packet - capped, the
+        oldest dropped."""
+        import shark_protocols
+        bacnet = shark_protocols.BACnet()
+        for i in range(shark_protocols._BACNET_MAX_PENDING + 5):
+            bacnet._wait(('flow', i, 1), ('readProperty', 'read', None))
+        self.assertEqual(len(bacnet.pending), shark_protocols._BACNET_MAX_PENDING)
+        self.assertNotIn(('flow', 0, 1), bacnet.pending)
+        self.assertIn(('flow', shark_protocols._BACNET_MAX_PENDING + 4, 1), bacnet.pending)
+
     def test_a_measurement_that_isnt_a_finite_number_stays_text(self):
         """A sensor's NaN or infinity - which JSON can't hold - kept as
         tshark wrote it, not stored as invalid JSON."""
@@ -2345,6 +2429,9 @@ class TestMergeRows(unittest.TestCase):
             return {'1:http': [(1767225000.0, {'sni': 'earlier.example'}), (1767225609.0, {'sni': 'b.example'})]}
         kept = list(shark_analyzer.merge_rows(rows, self.SURICATA, tls_records=tls_records))
         self.assertEqual([e['tls_failure'] for e in kept], [{'sni': 'b.example'}, {}])
+        far = lambda cids: {'1:http': [(1767225610.0 + 3600, {'sni': 'an-hour-later.example'})]}
+        self.assertEqual([e['tls_failure'] for e in shark_analyzer.merge_rows(rows, self.SURICATA, tls_records=far)],
+                         [{}, {}], "a tls record an hour away is the reused 5-tuple's, not this connection's")
         self.assertEqual(asked, [{'1:http', '1:other'}], 'one lookup, for all of them')
         self.assertEqual(len(list(shark_analyzer.merge_rows(rows, self.SURICATA))), 2)
 

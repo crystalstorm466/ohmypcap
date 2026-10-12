@@ -240,6 +240,15 @@ reanalyzing still works, since it runs Suricata again.
 
 ### Fixes
 
+- tshark's connections: a host whose address ends in .255 (a public one,
+  or one in a /23 or larger) is no longer taken for a broadcast address -
+  one that answers is a host - and a broadcast is known by its frames'
+  Ethernet broadcast destination, whatever its last octet
+- tshark's records: a TLS failure takes the certificate only from
+  Suricata's record of the same connection, not one of a reused port
+  long after; S7comm PDUs sharing a packet each get their own error and
+  function group; NBNS and DHCPv6 requests that reuse an answered
+  transaction ID are new transactions, not retransmissions
 - A YARA scan that fails or times out no longer looks like a clean one:
   the analysis opens as usual, with a line above its results saying File
   Alerts may be missing, and why

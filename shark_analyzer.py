@@ -67,7 +67,7 @@ SHARK_ARTIFACTS = (SHARK_DB, SHARK_DB + '-wal', SHARK_DB + '-shm', SHARK_DB + '.
 # change here or in shark_protocols changes what a run produces: a
 # shark.db stamped with an older version is rebuilt the next time its
 # status is asked for, so existing analyses pick up the change.
-SHARK_FORMAT_VERSION = 35
+SHARK_FORMAT_VERSION = 36
 
 # The fields every packet is read for, one per column of tshark's
 # tab-separated output, in this order - then each of shark_protocols'
@@ -293,7 +293,7 @@ class _Flow:
     __slots__ = ('key', 'proto', 'ip_v', 'client', 'server', 'cport', 'sport', 'first', 'last',
                  'pkts_ts', 'pkts_tc', 'bytes_ts', 'bytes_tc', 'protocols', 'app_proto', 'community_id',
                  'stream', 'client_set_by_syn', 'client_set_by_message', 'first_frame', 'last_frame', 'recorded',
-                 'icmp_ts', 'icmp_tc', 'tunnel')
+                 'icmp_ts', 'icmp_tc', 'tunnel', 'mac_broadcast')
 
     def __init__(self, key, proto, ip_v, src, dst, sport, dport, when, stream):
         self.key, self.proto, self.ip_v, self.stream = key, proto, ip_v, stream
@@ -308,6 +308,7 @@ class _Flow:
         self.first_frame = self.last_frame = 0     # its first and last packet's frame numbers
         self.recorded = False      # whether it carries a protocol with records (iter_records)
         self.tunnel = False        # whether it's a tunnel's outer flow (its tunnel record says more)
+        self.mac_broadcast = False # whether the client sent to the Ethernet broadcast address
 
     def _swap(self):
         self.client, self.server = self.server, self.client
@@ -331,8 +332,22 @@ class _Flow:
         # Never make a multicast or broadcast address the client: an
         # announcement (an mDNS response to the group) is a reply nobody
         # asked for, and the group sent nothing.
-        if is_reply == sent_by_client and not _is_group_address(self.server):
+        if is_reply == sent_by_client and not self.to_group():
             self._swap()
+
+    def to_group(self):
+        """Whether the server is a group - a multicast or broadcast address -
+        by what the traffic says: sent to the Ethernet broadcast address
+        (a subnet's broadcast, whatever its last octet), or to multicast or
+        255.255.255.255. An IPv4 address ending in .255 is taken for a
+        broadcast too - unless it ever answered, which a broadcast address
+        never does: in a /23 or larger, 10.1.2.255 is a host."""
+        if self.mac_broadcast:
+            return True
+        if not _is_group_address(self.server):
+            return False
+        return not (self.server != '255.255.255.255' and self.server.endswith('.255')
+                    and self.pkts_tc > self.icmp_tc)
 
     def add(self, src, sport, length, when, app, community_id, syn_only, from_client=None):
         """from_client, if given, says which way the packet went instead
@@ -413,7 +428,7 @@ class _Flow:
         packets back but no reply. '' for a flow to a multicast or
         broadcast address, whose replies come back on another flow, and
         for one that isn't IP (STP, LLDP...), which nothing answers."""
-        if not self.ip_v or _is_group_address(self.server):
+        if not self.ip_v or self.to_group():
             return ''
         if self.pkts_tc > self.icmp_tc:
             return 'yes'
@@ -588,6 +603,11 @@ class _Tunnels:
 # turning a client away (Handshake Failure, Protocol Version). One record
 # per TCP connection that sent any.
 TLS_FAILURE_TYPE = 'tls_failure'
+# How far from a failure Suricata's tls record of the same Community ID can
+# be and still be its connection's: Suricata logs a handshake within
+# seconds of its alerts, and TCP's TIME_WAIT keeps a 5-tuple from being
+# reused for longer than this
+_TLS_CONTEXT_SECONDS = 60
 _TLS_MAX_ALERTS = 10
 # An orderly close - readable only where the capture carries the session's
 # keys - is no failure
@@ -813,6 +833,8 @@ def iter_records(lines, pcap_path=None, deadline=None, combined=()):
             flow.add(src, sport, length, when, '', '', False, from_client=outer_src == flow.client)
             continue
         flow.add(src, sport, length, when, app, f[_F_CID], syn_only)
+        if f[_F_ETH_DST] == 'ff:ff:ff:ff:ff:ff' and src == flow.client and sport == flow.cport:
+            flow.mac_broadcast = True
         if proto == 'TCP' and _TLS_ALERT_COLUMN < len(cols) and cols[_TLS_ALERT_COLUMN]:
             tls_failures.add(flow, src, sport, when, cols[_TLS_ALERT_COLUMN].split(_AGGREGATOR))
         frame = _int(f[_F_FRAME])
@@ -1633,8 +1655,9 @@ def merge_rows(shark_rows, identified, probed=frozenset(), tls_records=None):
     The exception is TLS failures (_TLSFailures): alerts Suricata never
     logs, kept on the flows it identified too - each with what Suricata's
     tls record of its connection says (tls_records: Community IDs ->
-    db.suricata_tls_records), the nearest in time, so the record names the
-    certificate refused."""
+    db.suricata_tls_records), the nearest in time and within
+    _TLS_CONTEXT_SECONDS of it, so the record names the certificate
+    refused."""
     from db import CONNECTION_TYPE_PREFIX, PROBED_CONNECTION_TYPE
 
     def suricata_knows(cid, first, last):
@@ -1670,9 +1693,12 @@ def merge_rows(shark_rows, identified, probed=frozenset(), tls_records=None):
         candidates = known.get(event.get('community_id'))
         when = _iso_epoch(event.get('timestamp'))
         if candidates and when is not None:
-            context = min(candidates, key=lambda c: abs(c[0] - when))[1]
-            body = event[TLS_FAILURE_TYPE]
-            event[TLS_FAILURE_TYPE] = {**context, **body}
+            nearest = min(candidates, key=lambda c: abs(c[0] - when))
+            # Only the same connection's: a 5-tuple reused later (a busy
+            # NAT, a scanner) is another connection with another certificate
+            if abs(nearest[0] - when) <= _TLS_CONTEXT_SECONDS:
+                body = event[TLS_FAILURE_TYPE]
+                event[TLS_FAILURE_TYPE] = {**nearest[1], **body}
         yield event
 
 

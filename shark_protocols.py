@@ -193,7 +193,8 @@ class NBNS:
     """NetBIOS name service (Windows name resolution - Suricata doesn't
     parse it): a record per transaction - a query and its answer, or a
     name registration, refresh or release, usually broadcast and
-    unanswered - with its retransmissions (same transaction ID) folded in.
+    unanswered - with its retransmissions (same transaction ID, before an
+    answer) folded in.
     The name is split into name, its 16th-byte suffix and the service that
     suffix means (<20> is the Server service)."""
     event_type = 'nbns'
@@ -214,6 +215,10 @@ class NBNS:
         is_response = _first(v['nbns.flags.response']) in ('True', '1')
         key = (pkt.dst if is_response else pkt.src, txid)
         body = self.open.get(key)
+        # A request after its transaction's answer is a new one - the same
+        # ID reused - not a retransmission (as LLMNR has it)
+        if body is not None and not is_response and body['type'] == 'response':
+            body = None
         if body is None:
             opcode = _int(_first(v['nbns.flags.opcode']), 0)
             body = self.open[key] = {'type': 'request', 'id': txid,
@@ -298,6 +303,11 @@ class DHCPv6:
         from_server = outer in _DHCPV6_FROM_SERVER
         key = (pkt.dst if from_server else pkt.src, txid)
         body = self.open.get(key)
+        # A client's message after the server's reply is a new exchange
+        # (RFC 8415 gives each its own transaction ID; one reused is still
+        # a new one), not a retransmission
+        if body is not None and not from_server and 'reply' in body:
+            body = None
         if body is None:
             body = self.open[key] = {'transaction_id': f'0x{txid:06x}'}
             self.records.append((pkt.flow, pkt.when, self.event_type, body))
@@ -1263,9 +1273,14 @@ _SLP_ATTRIBUTES = ('srvloc.attrrply.attrlist', 'srvloc.daadvert.attrlist', 'srvl
 _SLP_ADVERT_SCOPES = ('srvloc.daadvert.scopelist', 'srvloc.saadvert.scopelist')
 
 
-def _to_group_address(address):
+def _to_group(pkt):
+    """Whether a packet went to a multicast or broadcast address - its
+    flow's server's, by what the flow's traffic says (shark_analyzer._Flow
+    .to_group), or else by the address."""
+    if pkt.dst == pkt.flow.server:
+        return pkt.flow.to_group()
     from shark_analyzer import _is_group_address   # shark_analyzer imports this module
-    return _is_group_address(address)
+    return _is_group_address(pkt.dst)
 
 
 class SLP:
@@ -1314,7 +1329,7 @@ class SLP:
             self.records.append((pkt.flow, pkt.when, self.event_type, body))
             self.started[id(body)] = (pkt.when, pkt.flow)
             self.open[key] = body
-            if _to_group_address(pkt.dst):
+            if _to_group(pkt):
                 self.open[('group', pkt.src, pkt.sport, xid)] = body
             return
         body = self.open.get((pkt.flow.key, xid)) or self.open.get(('group', pkt.dst, pkt.dport, xid))
@@ -1895,7 +1910,7 @@ class XDMCP:
             version = _int(first('xdmcp.version'), None)
             body = self.flows[pkt.flow.key] = {'version': version} if version is not None else {}
             self.records.append((pkt.flow, pkt.when, self.event_type, body))
-            if opcode == 1 or _to_group_address(pkt.dst):
+            if opcode == 1 or _to_group(pkt):
                 self.flows[('broadcast', pkt.src, pkt.sport)] = body
         self._add(body, 'messages', [message])
         self._add(body, 'authentication_names', v['xdmcp.authentication_name'])
@@ -1993,6 +2008,16 @@ _S7_ERROR_CLASSES = {0x00: 'No error', 0x81: 'Application relationship', 0x82: '
                      0x85: 'Error on supplies', 0x87: 'Access error'}
 
 
+# Which PDU kinds (header ROSCTR) list each per-PDU field - every kind
+# lists the PDU reference
+_S7_ALL_KINDS = frozenset((1, 2, 3, 7))
+_S7_FIELD_KINDS = {
+    's7comm.param.func': frozenset((1, 3, 7)),         # a bare ack (2) has no parameters
+    's7comm.header.errcls': frozenset((2, 3)), 's7comm.header.errcod': frozenset((2, 3)),
+    's7comm.param.userdata.funcgroup': frozenset((7,)), 's7comm.param.userdata.subfunc': frozenset((7,)),
+}
+
+
 class S7comm:
     """Siemens S7 (S7comm, PLC programming and data access over ISO-on-TCP -
     Suricata doesn't parse it): a record per job - Read Var, Write Var,
@@ -2018,10 +2043,23 @@ class S7comm:
     def feed(self, pkt, v):
         rosctrs = v['s7comm.header.rosctr']
         single = len(rosctrs) == 1
-        for i, rosctr in enumerate(rosctrs):
-            def at(field):
-                values = v[field]
-                return values[i] if i < len(values) else ''
+        # A field is listed once for each of the packet's PDUs that has it,
+        # in order - and not every kind of PDU has every field (only an
+        # acknowledgement's header has the error class, only userdata a
+        # function group, and a bare ack no parameters) - so each is read
+        # in step with the PDUs of the kinds that carry it, not by position.
+        taken = {}
+
+        def take(field, kinds, rosctr):
+            if _int(rosctr) not in kinds:
+                return ''
+            n = taken.get(field, 0)
+            taken[field] = n + 1
+            values = v[field]
+            return values[n] if n < len(values) else ''
+        for rosctr in rosctrs:
+            def at(field, _rosctr=rosctr):
+                return take(field, _S7_FIELD_KINDS.get(field, _S7_ALL_KINDS), _rosctr)
             kind = _S7_ROSCTR.get(_int(rosctr), f'rosctr {rosctr}')
             pduref = _int(at('s7comm.header.pduref'))
             func = _int(at('s7comm.param.func'))
@@ -2524,6 +2562,11 @@ class _BACnetSummary:
         self.flow, self.first, self.body = flow, first, body
 
 
+# Requests awaiting their reply, across a capture's BACnet - far more than
+# any real network has in flight at once
+_BACNET_MAX_PENDING = 10_000
+
+
 class BACnet:
     """BACnet - see the comment above."""
     event_type = 'bacnet'
@@ -2641,6 +2684,11 @@ class BACnet:
                 body['last_update'] = pkt.when
 
     def _wait(self, key, entry):
+        if key not in self.pending and len(self.pending) >= _BACNET_MAX_PENDING:
+            # Nor should requests to a device never heard from: the routed
+            # device is part of the key, so a flood of reads naming made-up
+            # ones would otherwise grow this without end - the oldest goes
+            del self.pending[next(iter(self.pending))]
         waiting = self.pending.setdefault(key, [])
         waiting.append(entry)
         # a request never answered shouldn't hold its slot forever
