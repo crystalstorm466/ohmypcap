@@ -169,10 +169,10 @@ Settings can turn tshark off.
 
 ### Findings
 
-A new **Findings** tab gathers what the protocol
-records show is worth a look, from every protocol, into one list ranked
-by severity. One row for each record that trips a rule, with a detail line
-and the record's own details a click away:
+A new **Findings** tab gathers what the protocol records show is worth a
+look, from every protocol, into one list ranked by severity - one row for
+each finding, with a detail line and the records' own details a click
+away:
 
 - **High** - IPMI controllers that accept cipher zero, anonymous logins
   or no authentication; OPC UA passwords sent unencrypted; Telnet logins;
@@ -181,17 +181,16 @@ and the record's own details a click away:
   forged or replayed message); an SLP host accepting registrations
   (CVE-2023-29552)
 - **Medium** - S7 writes, IEC 104 commands and set points, OPC UA writes
-  and method calls, a TLS certificate refused by the other end,
-  self-signed TLS certificates (in malware captures, mostly
-  command-and-control servers'), open SOCKS proxies, XDMCP login screens offered, RIP default routes and
-  cleartext RIPv2 passwords, tunnel probes addressed back to their
-  sender, NFS exports listed, critical syslog messages
+  and method calls, TLS certificates refused by the other end, self-signed
+  TLS certificates (in malware captures, mostly command-and-control
+  servers'), open SOCKS proxies, XDMCP login screens offered, RIP default
+  routes and cleartext RIPv2 passwords, tunnel probes addressed back to
+  their sender, NFS exports listed, critical syslog messages
 - **Low** - TLS certificates expired or not yet valid at the time of the
-  connection, and ones that don't name the host the client asked for
-  (from Suricata's TLS records); RIP
-  tables handed out, RPC service lists, BACnet writes, SLP answers, CoAP
-  resource lists, L2TP without tunnel authentication, rejected RADIUS
-  logins
+  connection, and ones that don't name the host the client asked for;
+  RIP tables handed out, RPC service lists, BACnet writes, SLP answers,
+  CoAP resource lists, L2TP without tunnel authentication, rejected
+  RADIUS logins
 
 The same finding on the same server is one row, however many records
 show it - a certificate fetched 200 times, a PLC written all day - with
@@ -218,6 +217,13 @@ Suricata is now 8.0.7, the current release in Debian's `trixie-backports`
 repo (up from 8.0.6), and tshark 4.4.19, from Debian's security updates.
 On the test captures, Suricata 8.0.7 logs the same records 8.0.6 did.
 
+### Faster PCAP analyses
+
+Loading Suricata's output into the analysis's database is about a quarter
+faster (90 seconds to 69 for a capture's 1.2 million events), and tshark's
+run about a third faster (121 seconds to 78 for the same capture) - with
+the same results.
+
 ### Less disk for each PCAP analysis
 
 Suricata's `eve.json` is removed once its events are in the analysis's
@@ -231,7 +237,6 @@ reanalyzing still works, since it runs Suricata again.
 - When a refresh's data no longer has the open tab's type of event (a
   search that matched none of them), the first tab now opens instead of
   every section staying hidden
-
 - Suricata now caches its compiled rules between analyses, so a PCAP
   analysis no longer spends about 16 seconds rebuilding them every time -
   after the first analysis, the built-in Sample PCAP file takes about 9

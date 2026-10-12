@@ -389,10 +389,12 @@ async def main(base_url):
         await caption(page, "Analysis complete")
         await page.wait_for_timeout(2500)
 
-        # Look at each of the individual data types
-        card_count = await page.locator('.stat-card:not(.stat-disabled)').count()
+        # Look at each of the individual data types (not a collapsed
+        # section's - hidden, they can't be clicked)
+        cards = '.stat-card:not(.stat-disabled):not(.stat-card-collapsed)'
+        card_count = await page.locator(cards).count()
         for i in range(card_count):
-            card = page.locator('.stat-card:not(.stat-disabled)').nth(i)
+            card = page.locator(cards).nth(i)
             label = (await card.inner_text()).strip().split('\n')[-1]
             if label == 'ALL EVENTS':
                 continue

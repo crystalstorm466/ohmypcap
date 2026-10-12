@@ -6,6 +6,7 @@ Arrow keys navigate rather than scroll the page, and adapt to what's on screen:
 
 - **Left/Right** - on the main screen, moves between the sample-file cards; on an analysis page, moves a highlight between stat-card tabs (Enter switches to the highlighted one), or between Aggregation Tables (or, once on a table's Prev/Next stop, toggles between the two) when the keyboard highlight is inside that section
 - **Up/Down** - on the main screen, moves between rows in Previous Analyses; on an analysis page, steps through everything on screen in order - filter chips, stat cards, the section toggles, Aggregation Tables, data-table rows, and an expanded row's own controls. Inside the Aggregation Tables section, Down walks a table's own rows and then its Prev/Next stop before continuing into the next visual row of tables (or the Data Table if there isn't one) - Up retraces the same path in reverse
+- A collapsed section of stat cards (see [Exploring Results](exploring-results.md#navigate-results)) is skipped by both: its cards aren't stops until it's opened. Its heading isn't an arrow stop either - Tab reaches the heading's button, and Enter there opens or collapses the section
 - **Enter** - activates whatever's currently highlighted (opens a sample or previous analysis, or expands/collapses a table row) - the same as clicking it
 - **Escape** - closes whatever's open (a modal, the gear menu, a pivot menu) one level at a time, then returns to the main screen once nothing else is open
 - **`?`** - opens Help
