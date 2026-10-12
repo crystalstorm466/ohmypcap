@@ -1363,6 +1363,8 @@ class TestUXFeatures(unittest.TestCase):
         func = JS_CONTENT.split('async function loadAnalysis')[1].split('async function')[0]
         self.assertIn('dnsHeuristicsCountStale = true;', func,
                       'loadAnalysis must re-arm the DNS Heuristics count refresh')
+        self.assertIn('findingsCountStale = true;', func,
+                      'loadAnalysis must re-arm the Findings count refresh')
         self.assertIn('acknowledgedAlertsCountStale = true;', func,
                       'loadAnalysis must re-arm the Acknowledged Alerts count refresh')
 
@@ -12033,6 +12035,138 @@ class TestDnsHeuristicsScoring(unittest.TestCase):
         self.assertEqual(len(result['items']), 2)
         self.assertGreaterEqual(result['items'][0]['score'], result['items'][1]['score'])
         self.assertEqual(result['items'][0]['domain'], 'high-score.example')
+
+
+class TestFindingsTab(unittest.TestCase):
+    """The Findings tab: a view of other types' records from
+    /api/findings, wired in like DNS Heuristics - a card of its own, a
+    section, and loadTabData's own branch."""
+
+    FINDINGS = {
+        'rules': [
+            {'id': 'ipmi_cipher_zero', 'title': 'IPMI accepts cipher zero', 'severity': 'high',
+             'event_type': 'ipmi', 'why': 'logs anyone in (CVE-2013-4782).', 'count': 1},
+            {'id': 'bacnet_write', 'title': 'BACnet property or file written', 'severity': 'low',
+             'event_type': 'bacnet', 'why': 'Routine in building automation.', 'count': 501},
+        ],
+        'findings': [
+            {'rule': 'ipmi_cipher_zero', 'severity': 'high', 'title': 'IPMI accepts cipher zero',
+             'detail': 'privilege administrator',
+             'event': {'id': 6, 'event_type': 'ipmi', 'timestamp': '2026-01-01T00:00:05.000000+0000',
+                       'src_ip': '10.1.0.38', 'src_port': 50101, 'dest_ip': '10.1.0.59', 'dest_port': 623,
+                       'proto': 'UDP', 'source': 'tshark',
+                       'ipmi': {'weaknesses': ['cipher zero accepted'], 'result': 'answered'}}},
+            {'rule': 'bacnet_write', 'severity': 'low', 'title': 'BACnet property or file written',
+             'detail': 'writeProperty analog-value,0 present-value - ok',
+             'event': {'id': 9, 'event_type': 'bacnet', 'timestamp': '2026-01-01T00:00:01.000000+0000',
+                       'src_ip': 'fe80::1', 'src_port': 47808, 'dest_ip': '10.0.0.9', 'dest_port': 47808,
+                       'proto': 'UDP', 'source': 'tshark',
+                       'bacnet': {'service': 'writeProperty', 'object': 'analog-value,0', 'result': 'ok'}}},
+        ],
+    }
+
+    def _mock_fetch_js(self, data):
+        return '''
+            window.__findingsUrls = [];
+            window.fetch = function(url) {
+                var u = String(url);
+                if (u.indexOf('/api/findings') >= 0) {
+                    window.__findingsUrls.push(u);
+                    return Promise.resolve({ ok: true, json: function() { return Promise.resolve(''' + json.dumps(data) + '''); } });
+                }
+                return Promise.resolve({ ok: true, json: function() { return Promise.resolve([]); } });
+            };
+        '''
+
+    def test_loadTabData_findings_renders_rows_and_rules(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements('''
+            await new Promise(function(r) { setTimeout(r, 100); });
+            document.getElementById('inputBoxes').style.display = 'none';
+            currentMd5 = 'abc123';
+            safeStorageRemove(localStorage, 'socrates_findingsInfoCollapsed');
+            ''' + self._mock_fetch_js(self.FINDINGS) + '''
+            buildSections();
+            await loadTabData('findings');
+            var sectionEl = document.getElementById('section-findings');
+            var rows = Array.from(sectionEl.querySelectorAll('tbody tr[data-id]'));
+            window.__jsdom_result = {
+                html: sectionEl.innerHTML,
+                text: sectionEl.textContent,
+                rows: rows.map(function(r) { return [r.dataset.id, r.dataset.eventType, r.cells[0].textContent, r.cells[4].textContent]; }),
+                detailRows: sectionEl.querySelectorAll('tr.detail-row').length,
+                urls: window.__findingsUrls,
+            };
+        ''')
+        self.assertEqual(result['rows'], [['6', 'ipmi', 'high', '10.1.0.38:50101'],
+                                          ['9', 'bacnet', 'low', '[fe80::1]:47808']])
+        self.assertEqual(result['detailRows'], 2, "each row expands to its record's details")
+        self.assertIn('About Findings', result['text'])
+        self.assertIn('CVE-2013-4782', result['text'], "the card says what each rule that matched looks for")
+        self.assertIn('the first 500 shown', result['text'])
+        self.assertIn('privilege administrator', result['text'])
+        self.assertNotIn('counts=1', result['urls'][0])
+
+    def test_findings_empty_state(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements('''
+            await new Promise(function(r) { setTimeout(r, 100); });
+            document.getElementById('inputBoxes').style.display = 'none';
+            currentMd5 = 'abc123';
+            ''' + self._mock_fetch_js({'rules': [], 'findings': []}) + '''
+            buildSections();
+            await loadTabData('findings');
+            window.__jsdom_result = { text: document.getElementById('section-findings').textContent };
+        ''')
+        self.assertIn('No findings', result['text'])
+
+    def test_severity_sorts_by_rank(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements('''
+            var items = [{severity: 'low'}, {severity: 'high'}, {severity: 'medium'}].map(function(f) { f.event = {}; return f; });
+            var sorted = sortItemsByColumn(items, ['Severity'], extractFindingValue, 0, true);
+            window.__jsdom_result = sorted.map(function(f) { return f.severity; });
+        ''')
+        self.assertEqual(result, ['high', 'medium', 'low'])
+
+    def test_findings_card_counts_and_sits_before_all_events(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements('''
+            await new Promise(function(r) { setTimeout(r, 100); });
+            currentMd5 = 'abc123';
+            ''' + self._mock_fetch_js(self.FINDINGS) + '''
+            eventTypes = ['ipmi', 'bacnet'];
+            eventStats = {ipmi: 1, bacnet: 3};
+            findingsCountStale = true;
+            buildStats();
+            await new Promise(function(r) { setTimeout(r, 50); });
+            var labels = Array.from(document.querySelectorAll('#statsGrid .stat-card')).map(function(c) {
+                return [c.querySelector('.stat-label').textContent, c.querySelector('.stat-number').getAttribute('aria-label')];
+            });
+            window.__jsdom_result = { labels: labels, urls: window.__findingsUrls };
+        ''')
+        labels = [label for label, _ in result['labels']]
+        self.assertEqual(labels.index('Findings') + 1, labels.index('All Events'))
+        self.assertIn(['Findings', '502'], result['labels'])
+        self.assertIn('counts=1', result['urls'][0], 'the card needs only the counts')
+
+    def test_findings_rows_are_keyboard_navigable(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements('''
+            buildSections();
+            document.querySelectorAll('.section').forEach(function(s) { s.classList.add('section-hidden'); });
+            document.getElementById('section-findings').classList.remove('section-hidden');
+            findingsRules = [];
+            buildFindingsSectionContent('section-findings', ''' + json.dumps(self.FINDINGS['findings']) + ''');
+            var ids = [];
+            for (var i = 0; i < 6 && ids.length < 2; i++) {
+                navigateVertical(1);
+                var sel = document.querySelector('.keyboard-selected');
+                if (sel && sel.tagName === 'TR') ids.push(sel.dataset.id);
+            }
+            window.__jsdom_result = ids;
+        ''')
+        self.assertEqual(result, ['6', '9'])
 
 
 class TestDnsHeuristicsTab(unittest.TestCase):

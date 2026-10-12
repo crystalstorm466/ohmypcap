@@ -158,6 +158,31 @@ tshark runs at low priority with a 4 GB memory limit; captures of more
 than 3 million packets wait until you click **Add tshark protocols**, and
 Settings can turn tshark off.
 
+### Findings
+
+A new **Findings** tab, just before All Events, gathers what the protocol
+records show is worth a look, from every protocol, into one list ranked
+by severity. One row for each record that trips a rule, with a detail line
+and the record's own details a click away:
+
+- **High** - IPMI controllers that accept cipher zero, anonymous logins
+  or no authentication; OPC UA passwords sent unencrypted; Telnet logins;
+  a Siemens PLC started, stopped or sent a program; a BACnet device
+  restarted or silenced; a GOOSE state number that jumped or reset (a
+  forged or replayed message); an SLP host accepting registrations
+  (CVE-2023-29552)
+- **Medium** - S7 writes, IEC 104 commands and set points, OPC UA writes
+  and method calls, open SOCKS proxies, XDMCP login screens offered, RIP
+  default routes and cleartext RIPv2 passwords, tunnel probes addressed
+  back to their sender, NFS exports listed, critical syslog messages
+- **Low** - RIP tables handed out, RPC service lists, BACnet writes, SLP
+  answers, CoAP resource lists, L2TP without tunnel authentication,
+  rejected RADIUS logins
+
+An **About Findings** card says what each rule that matched looks for. A
+search narrows the list like any other tab. No password is shown, even
+where the record keeps one. Suricata's alerts stay on their own tab.
+
 ### Suricata 8.0.7 and tshark 4.4.19
 
 Suricata is now 8.0.7, the current release in Debian's `trixie-backports`

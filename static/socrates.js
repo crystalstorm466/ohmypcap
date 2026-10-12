@@ -2644,6 +2644,16 @@
                 return;
             }
 
+            // Findings, like DNS Heuristics, is a view of other types'
+            // records - no Sankey or aggregations of its own
+            if (eventType === 'findings') {
+                if (sankeyPanel) sankeyPanel.style.display = 'none';
+                if (aggContainer) aggContainer.innerHTML = '';
+                if (sectionEl) await buildFindingsSection();
+                updateFilterBarVisibility();
+                return;
+            }
+
             if (eventType === 'all') {
                 if (canUseScalableFetch()) {
                     if (needsFullBatch('all')) await ensureCappedBatch('all');
@@ -5554,6 +5564,7 @@
             sankey: '#sankeyPanel > .section-toggle-bar',
             agg: '#aggregations .section-toggle-bar',
             dnsHeuristicsInfo: '#section-dns_heuristics .dns-heuristics-info-toggle',
+            findingsInfo: '#section-findings .findings-info-toggle',
         };
 
         // Groups the currently-visible aggregation tables into visual rows
@@ -5653,6 +5664,7 @@
                 document.querySelector(TOGGLE_BAR_SELECTORS.sankey),
                 document.querySelector(TOGGLE_BAR_SELECTORS.agg),
                 document.querySelector(TOGGLE_BAR_SELECTORS.dnsHeuristicsInfo),
+                document.querySelector(TOGGLE_BAR_SELECTORS.findingsInfo),
             ];
             const aggRows = aggTableAndPaginationItems();
             // Positioned right after the filter chips, matching where
@@ -6071,6 +6083,7 @@
                 : verticalNavSelection.matches(TOGGLE_BAR_SELECTORS.sankey) ? 'sankey'
                 : verticalNavSelection.matches(TOGGLE_BAR_SELECTORS.agg) ? 'agg'
                 : verticalNavSelection.matches(TOGGLE_BAR_SELECTORS.dnsHeuristicsInfo) ? 'dnsHeuristicsInfo'
+                : verticalNavSelection.matches(TOGGLE_BAR_SELECTORS.findingsInfo) ? 'findingsInfo'
                 : null;
             verticalNavSelection.classList.add('keyboard-selected');
             scrollKeyboardSelectionIntoView(verticalNavSelection);
@@ -7442,6 +7455,7 @@
             bacnet_device: 'BACnet Devices',
             iec104_point: 'IEC 104 Points',
             dns_heuristics: 'DNS Heuristics',
+            findings: 'Findings',
             email: 'Emails',
             filealerts: 'File Alerts',
             fileinfo: 'File Info',
@@ -9266,6 +9280,135 @@
             buildDnsHeuristicsSectionContent('section-dns_heuristics', items);
         }
 
+        // Findings: what the protocol records show is worth a look - a
+        // weakness, a control action, a probe - from every protocol in one
+        // list, one row per record each rule matched (see findings.py,
+        // which holds the rules). Like DNS Heuristics, a derived view: its
+        // rows come from /api/findings, not /api/events, and are kept in
+        // tabDataCache.findings so a column sort (sortCurrentTable's
+        // ensureCappedBatch) finds them already there. Each row expands to
+        // its record's own details.
+        const FINDING_COLUMNS = ['Severity', 'Finding', 'Detail', 'Type', 'Source', 'Destination', 'Time'];
+        const FINDING_SEVERITY_RANK = { high: 0, medium: 1, low: 2 };
+        const FINDING_SEVERITY_COLORS = { high: 'var(--badge-danger-text)', medium: 'var(--badge-warning-text)', low: 'var(--text-muted)' };
+        let findingsRules = [];
+
+        function findingEndpoint(ip, port) {
+            if (!ip) return '';
+            if (!port) return ip;
+            return ip.includes(':') ? `[${ip}]:${port}` : `${ip}:${port}`;
+        }
+
+        function extractFindingValue(item, col) {
+            const e = item.event;
+            switch (col) {
+                // The rank, so a sort puts high before medium before low
+                case 'Severity': return FINDING_SEVERITY_RANK[item.severity];
+                case 'Finding': return item.title;
+                case 'Detail': return item.detail;
+                case 'Type': return eventTypeLabel(e.event_type || '');
+                case 'Source': return findingEndpoint(e.src_ip, e.src_port);
+                case 'Destination': return findingEndpoint(e.dest_ip, e.dest_port);
+                case 'Time': return (e.timestamp || '').slice(0, 19);
+                default: return '';
+            }
+        }
+
+        function findingRowHtml(item) {
+            const e = item.event;
+            const etype = e.event_type || '';
+            // data-event-type and data-community-id as on every event row,
+            // for the detail panel's pivots (see the data-detail-pivot
+            // click handler); no data-pivot, so a click anywhere in the row
+            // just expands it.
+            const communityIdAttr = e.community_id ? ` data-community-id="${escapeHtml(e.community_id)}"` : '';
+            return `<tr data-id="${escapeHtml(String(e.id))}" data-event-type="${escapeHtml(etype)}"${communityIdAttr} data-action="toggle-row">` +
+                `<td>${valueDotSpan(FINDING_SEVERITY_COLORS[item.severity])}${escapeHtml(item.severity)}</td>` +
+                `<td>${escapeHtml(item.title)}</td>` +
+                `<td class="mono">${escapeHtml(item.detail)}</td>` +
+                `<td>${valueDotSpan(COLORS.EVENT[etype])}${escapeHtml(eventTypeLabel(etype))}</td>` +
+                `<td class="mono-fixed">${escapeHtml(findingEndpoint(e.src_ip, e.src_port))}</td>` +
+                `<td class="mono-fixed">${escapeHtml(findingEndpoint(e.dest_ip, e.dest_port))}</td>` +
+                `<td class="timestamp">${escapeHtml((e.timestamp || '').slice(0, 19))}</td>` +
+                rowNoteIconHtml('events', e.id, e.row_note) +
+                `</tr><tr class="detail-row"><td colspan="${FINDING_COLUMNS.length + 1}"><div class="detail-content">${formatEvent(e)}</div></td></tr>`;
+        }
+
+        const FINDINGS_INFO_COLLAPSED_KEY = 'socrates_findingsInfoCollapsed';
+
+        // What each rule that matched looks for, and how many it found -
+        // the rules come from the server, so this card lists only the ones
+        // this capture tripped. Collapsible, like DNS Heuristics' card.
+        function findingsInfoCardHtml(rules) {
+            const collapsed = safeStorageGet(localStorage, FINDINGS_INFO_COLLAPSED_KEY) === 'true';
+            const arrow = collapsed ? '▸' : '▾';
+            const display = collapsed ? 'none' : 'block';
+            const shown = rules.reduce((n, r) => n + Math.min(r.count, FINDINGS_MAX_PER_RULE), 0);
+            const total = rules.reduce((n, r) => n + r.count, 0);
+            const items = rules.map(r => `<li>${valueDotSpan(FINDING_SEVERITY_COLORS[r.severity])}<strong>${escapeHtml(r.title)}</strong> (${escapeHtml(eventTypeLabel(r.event_type))}, ${r.count.toLocaleString()}${r.count > FINDINGS_MAX_PER_RULE ? `, the first ${FINDINGS_MAX_PER_RULE} shown` : ''}) - ${escapeHtml(r.why)}</li>`).join('');
+            return `<div class="agg-panel" style="margin-bottom: 15px;">
+                <div class="section-toggle-bar findings-info-toggle" data-action="toggle-findings-info">${arrow} About Findings</div>
+                <div class="findings-info-body" style="display:${display}; padding: 16px 20px; color: var(--text-muted); font-size: 0.85rem; line-height: 1.7;">
+                    <p style="margin:0 0 10px 0;">What the protocol records in this capture show is worth a look - a weakness a host exposes, a control action on industrial equipment, a probe - gathered from every protocol into one list, most severe first. Each one is a lead to check, not a verdict: a PLC write is routine to its engineering workstation and alarming from anywhere else. Suricata's own alerts stay on their own tab.</p>
+                    ${items ? `<p style="margin:0 0 6px 0; color: var(--text-bright);">In this capture${total > shown ? ` (${shown.toLocaleString()} of ${total.toLocaleString()} shown)` : ''}:</p><ul style="margin:0 0 10px 0; padding-left: 20px;">${items}</ul>` : ''}
+                    <p style="margin:0;">Click a row for its record's details. No password is shown here, even where the record keeps one.</p>
+                </div>
+            </div>`;
+        }
+
+        // Matches findings.py's MAX_PER_RULE
+        const FINDINGS_MAX_PER_RULE = 500;
+
+        function toggleFindingsInfo(bar) {
+            const body = bar.nextElementSibling;
+            const collapsed = body.style.display === 'none';
+            body.style.display = collapsed ? 'block' : 'none';
+            bar.textContent = (collapsed ? '▾' : '▸') + ' About Findings';
+            if (collapsed) {
+                safeStorageRemove(localStorage, FINDINGS_INFO_COLLAPSED_KEY);
+            } else {
+                safeStorageSet(localStorage, FINDINGS_INFO_COLLAPSED_KEY, 'true');
+            }
+        }
+
+        function buildFindingsSectionContent(sectionId, items) {
+            const container = document.getElementById(sectionId);
+            if (!container) return;
+            let html = '<div class="section-content">';
+            html += findingsInfoCardHtml(findingsRules);
+            if (items.length === 0) {
+                html += `<div class="no-matches">No findings${currentSearch.length > 0 ? ' for the current search' : ''}</div>`;
+            } else {
+                html += renderPaginatedTable({
+                    sectionKey: sectionId,
+                    columns: FINDING_COLUMNS,
+                    items,
+                    extractFn: extractFindingValue,
+                    rowRenderer: findingRowHtml,
+                    rerender: () => buildFindingsSectionContent(sectionId, items),
+                });
+            }
+            html += '</div>';
+            container.innerHTML = html;
+        }
+
+        async function fetchFindings(md5, countsOnly) {
+            const resp = await fetch(`/api/findings?md5=${encodeURIComponent(md5)}${countsOnly ? '&counts=1' : ''}${buildSearchQuery()}&t=${Date.now()}`);
+            const data = await resp.json();
+            return data && Array.isArray(data.rules) ? data : null;
+        }
+
+        async function buildFindingsSection() {
+            if (!tabDataCache.findings) {
+                const md5 = currentMd5;
+                const data = await fetchFindings(md5, false);
+                if (currentMd5 !== md5) return;
+                findingsRules = data ? data.rules : [];
+                tabDataCache.findings = data ? data.findings : [];
+            }
+            buildFindingsSectionContent('section-findings', tabDataCache.findings);
+        }
+
         function buildLogSectionContent(sectionId, events) {
             const container = document.getElementById(sectionId);
             if (!container) return;
@@ -9977,6 +10120,35 @@
             buildStats(await computeFilteredStats());
         }
 
+        // The Findings card's count - the same lazy refresh as DNS
+        // Heuristics' (see dnsHeuristicsFlaggedCount), from the server's
+        // per-rule counts, which a search narrows like every other card's.
+        let findingsCount = 0;
+        let findingsCountStale = true;
+        let findingsCountMd5 = null;
+
+        async function refreshFindingsCount() {
+            if (isLogAnalysisMode || isEmailAnalysisMode || !currentMd5) {
+                findingsCount = 0;
+                findingsCountMd5 = currentMd5;
+                return;
+            }
+            const md5 = currentMd5;
+            try {
+                const data = await fetchFindings(md5, true);
+                if (currentMd5 !== md5 || !data) {
+                    findingsCountStale = true;
+                    return;
+                }
+                findingsCount = data.rules.reduce((n, r) => n + r.count, 0);
+                findingsCountMd5 = md5;
+            } catch (e) {
+                findingsCountStale = true;
+                return;
+            }
+            buildStats(await computeFilteredStats());
+        }
+
         async function refreshAcknowledgedAlertsCount() {
             if (isLogAnalysisMode || isEmailAnalysisMode || !currentMd5) {
                 acknowledgedAlertsCount = 0;
@@ -10159,6 +10331,16 @@
             const firstConnection = stats.findIndex(s => s.connection);
             const connectionStats = firstConnection === -1 ? [] : stats.splice(firstConnection);
             if (!isLogAnalysisMode && !isEmailAnalysisMode) {
+                // Findings lead the cards that gather other types' records
+                // - zero (no card) until this analysis's own count lands,
+                // as with DNS Heuristics
+                stats.push({
+                    id: 'findings',
+                    label: 'Findings',
+                    count: findingsCountMd5 === currentMd5 ? findingsCount : 0,
+                    color: 'var(--badge-danger-text)',
+                    title: 'Weaknesses, control actions and probes the protocol records show, from every protocol',
+                });
                 stats.push({
                     id: 'all',
                     label: 'All Events',
@@ -10244,6 +10426,12 @@
                 dnsHeuristicsCountStale = false;
                 refreshDnsHeuristicsCount();
             }
+
+            // And for the Findings card
+            if (findingsCountStale) {
+                findingsCountStale = false;
+                refreshFindingsCount();
+            }
         }
 
         function buildSections() {
@@ -10258,6 +10446,7 @@
             html += '<div class="section section-hidden" id="section-all"><div class="section-header">All Events</div><div class="loading">Loading...</div></div>';
             html += '<div class="section section-hidden" id="section-acknowledged"><div class="section-header">Acknowledged Alerts</div><div class="loading">Loading...</div></div>';
             html += '<div class="section section-hidden" id="section-dns_heuristics"><div class="section-header">DNS Heuristics</div><div class="loading">Loading...</div></div>';
+            html += '<div class="section section-hidden" id="section-findings"><div class="section-header">Findings</div><div class="loading">Loading...</div></div>';
             sectionsEl.innerHTML = html;
             
         }
@@ -12392,6 +12581,7 @@
             // themselves.
             acknowledgedAlertsCountStale = true;
             dnsHeuristicsCountStale = true;
+            findingsCountStale = true;
             const gen = bumpFetchGeneration();
             showLoading(currentSearch.length > 0 ? 'Searching...' : 'Loading events...');
 
@@ -12987,6 +13177,7 @@
                     // re-arm makes the right one get computed.
                     acknowledgedAlertsCountStale = true;
                     dnsHeuristicsCountStale = true;
+                    findingsCountStale = true;
                     resetPagination();
                     hiddenAggregations = new Set();
                     aggPage = {}; aggFullCountsCache = {}; aggTotalsCache = {};
@@ -13842,6 +14033,7 @@
             },
             'view-dns-heuristic-domain': (el) => viewDnsHeuristicDomain(el.dataset.id),
             'toggle-dns-heuristics-info': (el) => toggleDnsHeuristicsInfo(el),
+            'toggle-findings-info': (el) => toggleFindingsInfo(el),
 
             // Sankey / Aggregation panels.
             'toggle-diagram': () => toggleDiagram(),

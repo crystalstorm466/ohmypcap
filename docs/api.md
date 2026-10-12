@@ -136,6 +136,22 @@ Returns total event count, optionally filtered by type or search query.
 
 ---
 
+### `GET /api/findings`
+
+Returns the analysis's findings: what its protocol records show is worth a look - a weakness, a control action, a probe - from every protocol, as the **Findings** tab lists them. The rules are in `findings.py`.
+
+**Query Parameters:**
+
+| Parameter | Required | Default | Description |
+|---|---|---|---|
+| `md5` | Yes | - | MD5 hash of a historical analysis |
+| `q` | No | none | Full-text search query (only matching records). Multiple `q` params AND together. |
+| `counts` | No | none | `1` returns only each rule's count, with an empty `findings` list |
+
+**Response:** `{"rules": [{"id", "title", "severity", "event_type", "why", "count"}], "findings": [{"rule", "severity", "title", "detail", "event"}]}` - only the rules that matched. `severity` is `high`, `medium` or `low`; `findings` are in the rules' order (most severe first), then by time, at most 500 per rule (`count` is always the full number). `event` is the matching record, as `GET /api/events` returns it. A `detail` never has a password in it, even when the record does.
+
+---
+
 ### `GET /api/limits`
 
 Returns server-enforced limits the client should respect (e.g. when validating the user-configurable query-limit setting).

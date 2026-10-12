@@ -66,6 +66,7 @@ from ohmydebn_colors import (
 )
 from email_analyzer import analyze_message, remove_filestore
 import shark_analyzer
+from findings import query_findings
 from playbook_lookup import get_playbook
 from samples import SAMPLES
 from ai_summary_lookup import get_ai_summary
@@ -598,6 +599,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         '/api/events': 'handle_get_events',
         '/api/stats': 'handle_get_stats',
         '/api/count': 'handle_get_count',
+        '/api/findings': 'handle_get_findings',
         '/api/sankey-data': 'handle_get_sankey_data',
         '/api/aggregation-data': 'handle_get_aggregation_data',
         '/api/aggregation-totals': 'handle_get_aggregation_totals',
@@ -881,6 +883,26 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         else:
             count = 0
         self._send_json({'count': count})
+
+    def handle_get_findings(self, params):
+        md5 = params.get('md5', [''])[0]
+        dir_path, error = self._resolve_md5_dir(md5)
+        if error:
+            self._send_error(400, error)
+            return
+        q = self._parse_search_terms(params)
+        counts_only = params.get('counts', [''])[0] == '1'
+
+        db_file = os.path.join(dir_path, 'events.db')
+        if not os.path.exists(db_file):
+            self._send_json({'rules': [], 'findings': []})
+            return
+        try:
+            result = query_findings(db_file, q, counts_only)
+        except Exception:
+            self._send_error(500, 'Database error')
+            return
+        self._send_json(result)
 
     def handle_get_sankey_data(self, params):
         md5 = params.get('md5', [''])[0]

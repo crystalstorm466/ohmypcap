@@ -845,6 +845,32 @@ class TestAPIEndpoints(unittest.TestCase):
         data = json.loads(body)
         self.assertEqual(data['count'], 1)
 
+    def test_findings_endpoint(self):
+        md5 = 'f1d1f1d1f1d1f1d1f1d1f1d1f1d1f1d1'
+        md5dir = os.path.join(self.tmpdir, md5)
+        os.makedirs(md5dir, exist_ok=True)
+        with open(os.path.join(md5dir, 'eve.json'), 'w') as f:
+            f.write(json.dumps({'event_type': 'tunnel', 'timestamp': '2026-01-01T00:00:00', 'src_ip': '1.2.3.4',
+                                'dest_ip': '5.6.7.8', 'tunnel': {'type': 'GRE', 'returns_to_sender': True}}) + '\n')
+            f.write('{"event_type": "dns", "timestamp": "2026-01-01T00:00:01", "src_ip": "5.6.7.8"}\n')
+        db.create_sqlite_db(os.path.join(md5dir, 'events.db'), os.path.join(md5dir, 'eve.json'))
+
+        status, body = self._get(f'/api/findings?md5={md5}')
+        self.assertEqual(status, 200)
+        data = json.loads(body)
+        self.assertEqual([r['id'] for r in data['rules']], ['tunnel_return'])
+        self.assertEqual(data['findings'][0]['event']['tunnel']['type'], 'GRE')
+
+        status, body = self._get(f'/api/findings?md5={md5}&counts=1')
+        data = json.loads(body)
+        self.assertEqual((data['rules'][0]['count'], data['findings']), (1, []))
+
+        status, body = self._get(f'/api/findings?md5={md5}&q=9.9.9.9')
+        self.assertEqual(json.loads(body), {'rules': [], 'findings': []})
+
+        status, _ = self._get('/api/findings?md5=../etc/passwd')
+        self.assertEqual(status, 400)
+
     def test_events_all_types_excludes_stats_row(self):
         md5 = '11223344556677889900aabbccddeeff'
         md5dir = os.path.join(self.tmpdir, md5)

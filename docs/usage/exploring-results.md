@@ -6,7 +6,7 @@ After analysis completes, the UI displays different views depending on the file 
 
 **For PCAP files:**
 
-- **Stats Grid** - clickable cards showing event counts by type (Alerts, DNS, HTTP, TLS, Flows, etc.). If you've enabled "Show protocol-anomaly noise alerts" (Gear Menu → Rules), those alerts get their own **Decoder Alerts** card instead of mixing into Network Alerts. A **DNS Heuristics** card appears immediately before the **DNS Queries** card whenever any domain in the capture trips a scoring flag; see [DNS Heuristics](#dns-heuristics) below
+- **Stats Grid** - clickable cards showing event counts by type (Alerts, DNS, HTTP, TLS, Flows, etc.). If you've enabled "Show protocol-anomaly noise alerts" (Gear Menu → Rules), those alerts get their own **Decoder Alerts** card instead of mixing into Network Alerts. A **DNS Heuristics** card appears immediately before the **DNS Queries** card whenever any domain in the capture trips a scoring flag; see [DNS Heuristics](#dns-heuristics) below. A **Findings** card, just before **All Events**, gathers what the protocol records show is worth a look; see [Findings](#findings)
 - **Sankey Diagram** - expand the collapsible heading to visualize network flow relationships (Source IP → Dest IP → Dest Port)
 - **Aggregation Tables** - frequency counts for each column; click a value to open the [pivot menu](filtering-and-drilldown.md#pivot-menu). Each table pages through its values with Prev/Next instead of growing the page, at a size (10/25/50/100) set by the "Items per page" selector, which applies to every table in the section and persists across sessions
 - **Data Table** - sortable table with expandable detail rows showing full event JSON, ASCII transcripts, and hexdumps. Every row's flow carries a community ID, and a TLS row's detail panel includes JA3/JA3S/JA4 fingerprints whenever present - both computed by Suricata automatically, no configuration needed
@@ -67,6 +67,16 @@ The message's HTML is read for its links and text but never displayed as a web p
 
 - **File Info** - metadata extracted from the file
 - **File Alerts** - any YARA rules that matched, with tags and author attribution
+
+## Findings
+
+The **Findings** card, just before **All Events**, appears when the capture's protocol records show something worth a look. It lists them from every protocol, one row for each record a rule matched, most severe first:
+
+- **High** - IPMI weaknesses (cipher zero, anonymous or null-user logins, logins with no authentication or a cleartext password); an OPC UA password sent unencrypted; a Telnet login; a Siemens PLC started, stopped or sent a program; a BACnet device restarted or told to stop communicating; a GOOSE state number that jumped or reset; an SLP host accepting a service registration (CVE-2023-29552)
+- **Medium** - an S7 write to PLC memory; an IEC 104 command or set point; an OPC UA write or method call; a SOCKS proxy relaying without authentication; an XDMCP login screen offered; a RIP default route, or a RIPv2 password sent in the clear; a tunnel packet addressed back to its sender (a scanner's test); NFS exports listed; a critical syslog message
+- **Low** - a router handing out its whole RIP table; a portmapper listing its RPC services; a BACnet write; an SLP answer; a CoAP device listing its resources; an L2TP tunnel with no tunnel authentication; a rejected RADIUS login
+
+Each row has its severity, the finding, a detail line (the user, the route, the command...), the record's type, its source and destination, and its time. Click a row to see the record's details, as on its own tab. A collapsible **About Findings** card at the top says what each rule that matched looks for and how many it found. A rule shows at most 500 rows, and the card says when there are more. A search narrows the findings like every other tab. No password is shown in this list, even where the record keeps one. Treat each finding as a lead to check, not a verdict: a PLC write is routine from its engineering workstation and alarming from anywhere else. Suricata's alerts stay on their own tab.
 
 ## DNS Heuristics
 
