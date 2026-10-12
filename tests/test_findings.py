@@ -162,10 +162,45 @@ class TestFindings(unittest.TestCase):
         self.assertEqual(sum(r['count'] for r in counts['rules']), 5)
 
     def test_a_rule_shows_at_most_its_cap(self):
-        events = [_record('bacnet', {'service': 'writeProperty'}, i % 60) for i in range(findings.MAX_PER_RULE + 7)]
+        events = [_record('bacnet', {'service': 'writeProperty'}, i % 60, dest_port=i)
+                  for i in range(findings.MAX_PER_RULE + 7)]
         result = findings.query_findings(self._db(events))
-        self.assertEqual(result['rules'][0]['count'], findings.MAX_PER_RULE + 7)
+        self.assertEqual((result['rules'][0]['count'], result['rules'][0]['groups']),
+                         (findings.MAX_PER_RULE + 7, findings.MAX_PER_RULE + 7), 'a server each')
         self.assertEqual(len(result['findings']), findings.MAX_PER_RULE)
+
+    def _certificates(self):
+        """One self-signed certificate on one server, fetched 3 times by
+        2 clients - and the same certificate on another server."""
+        cert = {'sni': 'lab.example', 'subject': 'CN=lab.example', 'issuerdn': 'CN=lab.example'}
+        return [_record('tls', cert, 1, src_ip='10.0.0.5', dest_port=443),
+                _record('tls', cert, 2, src_ip='10.0.0.6', dest_port=443),
+                _record('tls', cert, 3, src_ip='10.0.0.5', dest_port=443),
+                _record('tls', cert, 4, dest_ip='10.0.0.10', dest_port=443)]
+
+    def test_the_same_finding_on_the_same_server_is_one_row(self):
+        result = findings.query_findings(self._db(self._certificates()))
+        self.assertEqual([(r['count'], r['groups']) for r in result['rules']], [(4, 2)])
+        rows = [(f['event']['dest_ip'], f['count'], f['sources'], f['first'][:19], f['last'][:19], f['event']['src_port'])
+                for f in result['findings']]
+        self.assertEqual(rows, [('10.0.0.9', 3, 2, '2026-01-01T00:00:01', '2026-01-01T00:00:03', 40001),
+                                ('10.0.0.10', 1, 1, '2026-01-01T00:00:04', '2026-01-01T00:00:04', 40004)],
+                         'each with its first record, how many, from how many hosts, and when')
+        counts = findings.query_findings(self._db(self._certificates()), counts_only=True)
+        self.assertEqual((counts['findings'], counts['rules'][0]['groups']), ([], 2), 'the card counts rows')
+
+    def test_a_rows_own_records(self):
+        path = self._db(self._certificates() + [
+            _record('tls', {'sni': 'other.example', 'subject': 'CN=other', 'issuerdn': 'CN=other'}, 5, dest_port=443)])
+        row = findings.query_findings(path)['findings'][0]
+        group = {'rule': row['rule'], 'detail': row['detail'], 'dest_ip': '10.0.0.9', 'dest_port': 443}
+        members = findings.query_findings(path, group=group)
+        self.assertEqual([f['event']['src_port'] for f in members['findings']], [40001, 40002, 40003],
+                         "not the other certificate on that server, nor this one on another")
+        self.assertEqual(members['rules'][0]['count'], 3)
+        self.assertEqual(findings.query_findings(path, group={**group, 'rule': 'no_such_rule'}), {'rules': [], 'findings': []})
+        self.assertEqual(findings.query_findings(path, q=['10.0.0.6'], group=group)['rules'][0]['count'], 1,
+                         'a search narrows them too')
 
     def test_search_narrows_findings(self):
         events = [_record('tunnel', {'type': 'GRE', 'returns_to_sender': True}, 1),

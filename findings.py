@@ -23,8 +23,15 @@ from db import (
 
 SEVERITIES = ('high', 'medium', 'low')
 
-# Matches shown per rule - the counts are always exact
+# A rule's matches are grouped: the same detail on the same server (one
+# certificate seen 200 times, one PLC written all day) is one finding,
+# with how many records, from how many source hosts, and their first and
+# last time. Groups shown per rule, and records listed for one group - the
+# counts are always exact
 MAX_PER_RULE = 500
+# Matches read per rule to group them - past this, a rule's groups are
+# those of its first MAX_SCAN records (the counts stay exact)
+MAX_SCAN = 100_000
 
 
 def _j(event_type, path):
@@ -233,10 +240,11 @@ RULES = (
 RULES_BY_ID = {r.id: r for r in RULES}
 
 
-def _rule_sql(conn, rule, terms, has_fts, columns):
-    """The SELECT of columns (of events) for rule's matches, and its
-    parameters - a search joins the FTS index, whose own json_data column
-    means every reference to events' must be qualified then."""
+def _rule_sql(conn, rule, terms, has_fts, columns, group=None):
+    """The SELECT of columns (of events) for rule's matches - of one
+    group's addresses, given one - and its parameters. A search joins the
+    FTS index, whose own json_data column means every reference to events'
+    must be qualified then."""
     alias = 'e.' if terms and has_fts else ''
     qualify = (lambda sql: sql.replace('json_data', 'e.json_data')) if alias else (lambda sql: sql)
     cols = ', '.join(alias + c if c != 'COUNT(*)' else c for c in columns)
@@ -244,50 +252,102 @@ def _rule_sql(conn, rule, terms, has_fts, columns):
     conditions, params = _build_where_conditions(_has_acknowledged_alerts_table(conn), terms, has_fts,
                                                  rule.event_type, type_col)
     conditions.append(f'({qualify(rule.condition)})')
+    if group is not None:
+        for column, missing in (('dest_ip', "''"), ('dest_port', '0')):
+            # (a record without one is stored with '' or 0, or NULL)
+            if group.get(column) in (None, ''):
+                conditions.append(f'coalesce({alias}{column}, {missing}) = {missing}')
+            else:
+                conditions.append(f'{alias}{column} = ?')
+                params.append(group[column])
     return f"{select} WHERE {' AND '.join(conditions)}", params, alias
 
 
-def query_findings(db_path, q=None, counts_only=False):
-    """Every rule's matches in events.db: {'rules': [{id, title, severity,
-    event_type, why, count}], 'findings': [{rule, severity, title, detail,
-    event}]} - the findings in RULES' order (most severe first), then by
-    time. A search (q)
-    narrows both, as it does every tab."""
+def _detail(rule, event):
+    try:
+        return str(rule.detail(event.get(rule.event_type) or {}))
+    except (AttributeError, TypeError, KeyError):
+        return ''
+
+
+def _group_key(event, detail):
+    return detail, event.get('dest_ip') or '', event.get('dest_port')
+
+
+def _matches(conn, rule, terms, has_fts, group=None, limit=MAX_SCAN):
+    """A rule's matching records, oldest first, each with its detail line."""
+    sql, params, alias = _rule_sql(conn, rule, terms, has_fts, ['id', 'json_data'], group)
+    for row_id, data in conn.execute(f'{sql} ORDER BY {alias}timestamp LIMIT {limit}', params):
+        try:
+            event = json.loads(data)
+        except ValueError:
+            continue
+        event['id'] = row_id
+        yield event, _detail(rule, event)
+
+
+def query_findings(db_path, q=None, counts_only=False, group=None):
+    """Every rule's matches in events.db, grouped (MAX_PER_RULE):
+    {'rules': [{id, title, severity, event_type, why, count, groups}],
+    'findings': [{rule, severity, title, detail, event, count, sources,
+    first, last}]} (counts_only: no findings, but each rule's groups) - event being a group's first record, sources how many
+    source hosts its records came from - in RULES' order (most severe
+    first), then by time. A search (q) narrows both, as it does every tab.
+    Given a group - {rule, detail, dest_ip, dest_port}, as a finding names
+    it - its own records instead, one finding each, at most MAX_PER_RULE
+    of them."""
     result = {'rules': [], 'findings': []}
+    rules = RULES
+    if group is not None:
+        rule = RULES_BY_ID.get(group.get('rule'))
+        if rule is None:
+            return result
+        rules = (rule,)
     with _db_connection(db_path) as conn:
         if not _has_events_table(conn):
             return result
         types = {row[0] for row in conn.execute('SELECT DISTINCT event_type FROM events')}
         terms = _build_search_terms(q)
         has_fts = _has_fts5(conn) if terms else False
-        for rule in RULES:
+        for rule in rules:
             if rule.event_type not in types:
                 continue
             try:
-                sql, params, _ = _rule_sql(conn, rule, terms, has_fts, ['COUNT(*)'])
+                sql, params, _ = _rule_sql(conn, rule, terms, has_fts, ['COUNT(*)'], group)
                 count = conn.execute(sql, params).fetchone()[0]
             except sqlite3.OperationalError:
                 continue
             if not count:
                 continue
-            result['rules'].append({'id': rule.id, 'title': rule.title, 'severity': rule.severity,
-                                    'event_type': rule.event_type, 'why': rule.why, 'count': count})
-            if counts_only:
+            entry = {'id': rule.id, 'title': rule.title, 'severity': rule.severity,
+                     'event_type': rule.event_type, 'why': rule.why, 'count': count}
+            result['rules'].append(entry)
+            base = {'rule': rule.id, 'severity': rule.severity, 'title': rule.title}
+            if group is not None:
+                members = [(e, d) for e, d in _matches(conn, rule, terms, has_fts, group) if d == group.get('detail', '')]
+                entry['count'] = len(members)
+                for event, detail in members[:MAX_PER_RULE] if not counts_only else ():
+                    when = event.get('timestamp') or ''
+                    result['findings'].append({**base, 'detail': detail, 'event': event, 'count': 1, 'sources': 1,
+                                               'first': when, 'last': when})
                 continue
-            sql, params, alias = _rule_sql(conn, rule, terms, has_fts, ['id', 'json_data'])
-            for row_id, data in conn.execute(f'{sql} ORDER BY {alias}timestamp LIMIT {MAX_PER_RULE}', params):
-                try:
-                    event = json.loads(data)
-                except ValueError:
-                    continue
-                event['id'] = row_id
-                body = event.get(rule.event_type) or {}
-                try:
-                    detail = rule.detail(body)
-                except (AttributeError, TypeError, KeyError):
-                    detail = ''
-                result['findings'].append({'rule': rule.id, 'severity': rule.severity, 'title': rule.title,
-                                           'detail': str(detail), 'event': event})
+            groups, sources = {}, {}
+            for event, detail in _matches(conn, rule, terms, has_fts):
+                key = _group_key(event, detail)
+                when = event.get('timestamp') or ''
+                found = groups.get(key)
+                if found is None:
+                    groups[key] = {**base, 'detail': detail, 'event': event, 'count': 1, 'first': when, 'last': when}
+                    sources[key] = {event.get('src_ip')}
+                else:
+                    found['count'] += 1
+                    found['last'] = max(found['last'], when)
+                    sources[key].add(event.get('src_ip'))
+            for key, found in groups.items():
+                found['sources'] = len(sources[key])
+            entry['groups'] = len(groups)
+            if not counts_only:
+                result['findings'].extend(list(groups.values())[:MAX_PER_RULE])
     if result['findings']:
         ids = sorted({f['event']['id'] for f in result['findings']})
         notes = {}

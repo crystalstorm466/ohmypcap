@@ -146,9 +146,10 @@ Returns the analysis's findings: what its protocol records show is worth a look 
 |---|---|---|---|
 | `md5` | Yes | - | MD5 hash of a historical analysis |
 | `q` | No | none | Full-text search query (only matching records). Multiple `q` params AND together. |
-| `counts` | No | none | `1` returns only each rule's count, with an empty `findings` list |
+| `counts` | No | none | `1` returns only each rule's `count` and `groups`, with an empty `findings` list |
+| `rule`, `detail`, `dest_ip`, `dest_port` | No | none | One finding's own records instead: its rule id, detail line and server, as the finding gives them (an empty `dest_port` for a record without one) |
 
-**Response:** `{"rules": [{"id", "title", "severity", "event_type", "why", "count"}], "findings": [{"rule", "severity", "title", "detail", "event"}]}` - only the rules that matched. `severity` is `high`, `medium` or `low`; `findings` are in the rules' order (most severe first), then by time, at most 500 per rule (`count` is always the full number). `event` is the matching record, as `GET /api/events` returns it. A `detail` never has a password in it, even when the record does.
+**Response:** `{"rules": [{"id", "title", "severity", "event_type", "why", "count", "groups"}], "findings": [{"rule", "severity", "title", "detail", "event", "count", "sources", "first", "last"}]}` - only the rules that matched. A rule's matches are grouped: the records with the same `detail` on the same server (`dest_ip` and `dest_port`) are one finding, whose `event` is the first of them, `count` how many there are, `sources` how many source hosts they came from, and `first` and `last` their earliest and latest times. `severity` is `high`, `medium` or `low`; `findings` are in the rules' order (most severe first), then by time, at most 500 per rule. A rule's `count` (its records) is always the full number, and `groups` the number of findings it makes - of its first 100,000 records, for a rule with more. Given `rule` (and the rest), `findings` holds that finding's records instead, one each with a `count` of 1, oldest first, at most 500, and the rule's `count` says how many there are. `event` is a record as `GET /api/events` returns it. A `detail` never has a password in it, even when the record does.
 
 ---
 

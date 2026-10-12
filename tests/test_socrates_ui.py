@@ -448,7 +448,7 @@ class TestCSSLayout(unittest.TestCase):
 
     def test_table_cells_wrap_not_truncate(self):
         """Table cells (including ALERT) must wrap text, not truncate with ellipsis."""
-        td_match = re.search(r'td \{([^}]+)\}', CSS_CONTENT)
+        td_match = re.search(r'(?m)^\s*td \{([^}]+)\}', CSS_CONTENT)   # the global rule, not a table's own
         self.assertIsNotNone(td_match, 'Global td style must exist')
         td_style = td_match.group(1)
         self.assertNotIn('white-space: nowrap', td_style,
@@ -12045,9 +12045,9 @@ class TestFindingsTab(unittest.TestCase):
     FINDINGS = {
         'rules': [
             {'id': 'ipmi_cipher_zero', 'title': 'IPMI accepts cipher zero', 'severity': 'high',
-             'event_type': 'ipmi', 'why': 'logs anyone in (CVE-2013-4782).', 'count': 1},
+             'event_type': 'ipmi', 'why': 'logs anyone in (CVE-2013-4782).', 'count': 1, 'groups': 1},
             {'id': 'bacnet_write', 'title': 'BACnet property or file written', 'severity': 'low',
-             'event_type': 'bacnet', 'why': 'Routine in building automation.', 'count': 501},
+             'event_type': 'bacnet', 'why': 'Routine in building automation.', 'count': 2400, 'groups': 501},
         ],
         'findings': [
             {'rule': 'ipmi_cipher_zero', 'severity': 'high', 'title': 'IPMI accepts cipher zero',
@@ -12103,9 +12103,67 @@ class TestFindingsTab(unittest.TestCase):
         self.assertEqual(result['detailRows'], 2, "each row expands to its record's details")
         self.assertIn('About Findings', result['text'])
         self.assertIn('CVE-2013-4782', result['text'], "the card says what each rule that matched looks for")
-        self.assertIn('the first 500 shown', result['text'])
+        self.assertIn('the first 500 rows shown', result['text'])
+        self.assertIn('2,400 records in 501 rows', result['text'])
+        self.assertIn('IPMI accepts cipher zero (IPMI, 1 record)', result['text'])
         self.assertIn('privilege administrator', result['text'])
         self.assertNotIn('counts=1', result['urls'][0])
+
+    GROUP = {'rule': 'tls_self_signed', 'severity': 'low', 'title': 'TLS self-signed certificate',
+             'detail': 'CN=lab.example (for lab.example)', 'count': 3, 'sources': 2,
+             'first': '2026-01-01T00:00:01.000000+0000', 'last': '2026-01-01T00:00:09.000000+0000',
+             'event': {'id': 4, 'event_type': 'tls', 'timestamp': '2026-01-01T00:00:01.000000+0000',
+                       'src_ip': '10.0.0.5', 'src_port': 40001, 'dest_ip': '10.0.0.9', 'dest_port': 443, 'proto': 'TCP',
+                       'tls': {'subject': 'CN=lab.example', 'issuerdn': 'CN=lab.example'}}}
+
+    def test_a_row_of_several_records_lists_them_when_opened(self):
+        """A grouped row: its hosts counted, its records numbered - and,
+        expanded, its own records fetched by rule, detail and server, each
+        expanding to its details."""
+        from tests.jsdom_helper import js_statements
+        member = lambda i, port: {'rule': 'tls_self_signed', 'severity': 'low', 'title': 'TLS self-signed certificate',
+                                  'detail': self.GROUP['detail'], 'count': 1, 'sources': 1,
+                                  'event': dict(self.GROUP['event'], id=i, src_port=port)}
+        members = {'rules': [{'id': 'tls_self_signed', 'count': 3}], 'findings': [member(4, 40001), member(5, 40002), member(6, 40003)]}
+        result = js_statements('''
+            await new Promise(function(r) { setTimeout(r, 100); });
+            document.getElementById('inputBoxes').style.display = 'none';
+            currentMd5 = 'abc123';
+            ''' + self._mock_fetch_js(members) + '''
+            buildSections();
+            document.querySelectorAll('.section').forEach(function(s) { s.classList.add('section-hidden'); });
+            document.getElementById('section-findings').classList.remove('section-hidden');
+            buildFindingsSectionContent('section-findings', [''' + json.dumps(self.GROUP) + ''']);
+            var section = document.getElementById('section-findings');
+            var row = section.querySelector('.section-content tbody > tr[data-id]');
+            var cells = Array.from(row.cells).map(function(c) { return c.textContent; });
+            var before = window.__findingsUrls.length;
+            toggleDetailRow(row);
+            await new Promise(function(r) { setTimeout(r, 50); });
+            var memberRows = Array.from(section.querySelectorAll('.finding-members-table tbody tr[data-id]'));
+            toggleDetailRow(memberRows[1]);
+            var opened = memberRows[1].nextElementSibling;
+            toggleDetailRow(row); toggleDetailRow(row);
+            await new Promise(function(r) { setTimeout(r, 50); });
+            window.__jsdom_result = {
+                cells: cells, before: before, urls: window.__findingsUrls,
+                summary: section.querySelector('.finding-members-summary').textContent,
+                members: memberRows.map(function(r) { return r.cells[1].textContent; }),
+                openedVisible: opened.classList.contains('visible'),
+                openedText: opened.textContent,
+            };
+        ''')
+        self.assertEqual(result['cells'][4:8], ['2 hosts', '10.0.0.9:443', '3', '2026-01-01T00:00:01'])
+        self.assertEqual(result['before'], 0, 'nothing fetched until the row is opened')
+        self.assertEqual(len(result['urls']), 1, 'once - reopening the row reuses the list')
+        url = result['urls'][0]
+        for part in ('rule=tls_self_signed', 'detail=CN%3Dlab.example%20(for%20lab.example)', 'dest_ip=10.0.0.9',
+                     'dest_port=443'):
+            self.assertIn(part, url)
+        self.assertEqual(result['summary'], '3 records, from 2 source hosts, 2026-01-01T00:00:01 to 2026-01-01T00:00:09')
+        self.assertEqual(result['members'], ['10.0.0.5:40001', '10.0.0.5:40002', '10.0.0.5:40003'])
+        self.assertTrue(result['openedVisible'])
+        self.assertIn('CN=lab.example', result['openedText'])
 
     def test_findings_empty_state(self):
         from tests.jsdom_helper import js_statements
@@ -12147,7 +12205,7 @@ class TestFindingsTab(unittest.TestCase):
         ''')
         labels = [label for label, _ in result['labels']]
         self.assertEqual(labels.index('Findings') + 1, labels.index('All Events'))
-        self.assertIn(['Findings', '502'], result['labels'])
+        self.assertIn(['Findings', '502'], result['labels'], 'rows, not records')
         self.assertIn('counts=1', result['urls'][0], 'the card needs only the counts')
 
     def test_findings_rows_are_keyboard_navigable(self):

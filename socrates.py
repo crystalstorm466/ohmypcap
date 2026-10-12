@@ -892,13 +892,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return
         q = self._parse_search_terms(params)
         counts_only = params.get('counts', [''])[0] == '1'
+        # One finding's own records: its rule, detail and addresses
+        group = None
+        if params.get('rule', [''])[0]:
+            port = params.get('dest_port', [''])[0]
+            group = {'rule': params['rule'][0], 'detail': params.get('detail', [''])[0],
+                     'dest_ip': params.get('dest_ip', [''])[0],
+                     'dest_port': int(port) if port.isdigit() else None}
 
         db_file = os.path.join(dir_path, 'events.db')
         if not os.path.exists(db_file):
             self._send_json({'rules': [], 'findings': []})
             return
         try:
-            result = query_findings(db_file, q, counts_only)
+            result = query_findings(db_file, q, counts_only, group)
         except Exception:
             self._send_error(500, 'Database error')
             return

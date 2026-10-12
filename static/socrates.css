@@ -1357,6 +1357,15 @@
         .stats-grid-heading-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
         .stats-grid-heading-summary { font-weight: normal; text-transform: none; letter-spacing: normal; color: var(--text-bright); }
         .stats-grid-heading-summary[hidden] { display: none; }
+
+        /* A Findings group's records, in its expanded row (loadFindingMembers) */
+        .finding-members-summary { color: var(--text-muted); font-size: 0.85rem; margin: 2px 0 10px; }
+        .finding-members-note { color: var(--text-muted); font-size: 0.85rem; padding: 6px 0; }
+        .finding-members-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+        .finding-members-table th { text-align: left; color: var(--text-muted); font-weight: 600; padding: 4px 8px; border-bottom: 1px solid var(--border-color); }
+        .finding-members-table td { padding: 4px 8px; border-bottom: 1px solid var(--border-color); }
+        .finding-members-table tr[data-action] { cursor: pointer; }
+        .finding-members-table tr[data-action]:hover { background: var(--bg-hover); }
         .stat-card.stat-card-collapsed { display: none; }
         .stats-grid-heading-aside { margin-left: auto; font-weight: normal; text-transform: none; letter-spacing: normal; }
         .stats-grid-heading-aside[hidden] { display: none; }

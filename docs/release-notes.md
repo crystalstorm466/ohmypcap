@@ -190,6 +190,9 @@ and the record's own details a click away:
   resource lists, L2TP without tunnel authentication, rejected RADIUS
   logins
 
+The same finding on the same server is one row, however many records
+show it - a certificate fetched 200 times, a PLC written all day - with
+how many records and source hosts it covers; it opens to a list of them.
 An **About Findings** card says what each rule that matched looks for. A
 search narrows the list like any other tab. No password is shown, even
 where the record keeps one. Suricata's alerts stay on their own tab.

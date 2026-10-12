@@ -3277,6 +3277,7 @@
                     }
                     loadPlaybookSectionIfPresent(detailRow);
                     loadAiSummaryPlaceholders(detailRow);
+                    loadFindingMembersIfPresent(detailRow);
                 }
             }
         }
@@ -9321,13 +9322,16 @@
 
         // Findings: what the protocol records show is worth a look - a
         // weakness, a control action, a probe - from every protocol in one
-        // list, one row per record each rule matched (see findings.py,
-        // which holds the rules). Like DNS Heuristics, a derived view: its
-        // rows come from /api/findings, not /api/events, and are kept in
-        // tabDataCache.findings so a column sort (sortCurrentTable's
-        // ensureCappedBatch) finds them already there. Each row expands to
-        // its record's own details.
-        const FINDING_COLUMNS = ['Severity', 'Finding', 'Detail', 'Type', 'Source', 'Destination', 'Time'];
+        // list (see findings.py, which holds the rules). A rule's matches
+        // come grouped: the same detail on the same server is one row,
+        // with how many records and source hosts it covers. Like DNS
+        // Heuristics, a derived view: its rows come from /api/findings, not
+        // /api/events, and are kept in tabDataCache.findings so a column
+        // sort (sortCurrentTable's ensureCappedBatch) finds them already
+        // there. A row of one record expands to its details; a row of
+        // several, to a list of its records (loadFindingMembers), each of
+        // which expands to its own.
+        const FINDING_COLUMNS = ['Severity', 'Finding', 'Detail', 'Type', 'Source', 'Destination', 'Records', 'Time'];
         const FINDING_SEVERITY_RANK = { high: 0, medium: 1, low: 2 };
         const FINDING_SEVERITY_COLORS = { high: 'var(--badge-danger-text)', medium: 'var(--badge-warning-text)', low: 'var(--text-muted)' };
         let findingsRules = [];
@@ -9346,11 +9350,83 @@
                 case 'Finding': return item.title;
                 case 'Detail': return item.detail;
                 case 'Type': return eventTypeLabel(e.event_type || '');
-                case 'Source': return findingEndpoint(e.src_ip, e.src_port);
+                case 'Source': return findingSource(item);
                 case 'Destination': return findingEndpoint(e.dest_ip, e.dest_port);
-                case 'Time': return (e.timestamp || '').slice(0, 19);
+                case 'Records': return item.count || 1;
+                case 'Time': return (item.first || e.timestamp || '').slice(0, 19);
                 default: return '';
             }
+        }
+
+        // A group's source: its one host (and, for one record, its port),
+        // or how many hosts
+        function findingSource(item) {
+            const e = item.event;
+            if ((item.sources || 1) > 1) return `${item.sources} hosts`;
+            return (item.count || 1) > 1 ? (e.src_ip || '') : findingEndpoint(e.src_ip, e.src_port);
+        }
+
+        function findingTimeSpan(item) {
+            const first = (item.first || '').slice(0, 19);
+            const last = (item.last || '').slice(0, 19);
+            return last && last !== first ? `${first} to ${last}` : first;
+        }
+
+        // A group's records, listed in its expanded row once it's opened
+        function findingMembersHtml(item) {
+            const e = item.event;
+            const attrs = [['rule', item.rule], ['detail', item.detail], ['dest-ip', e.dest_ip || ''],
+                           ['dest-port', e.dest_port === undefined || e.dest_port === null ? '' : String(e.dest_port)]]
+                .map(([k, v]) => ` data-${k}="${escapeHtml(v)}"`).join('');
+            const sources = (item.sources || 1) > 1 ? `, from ${item.sources} source hosts` : '';
+            return `<div class="finding-members"${attrs}>
+                <div class="finding-members-summary">${item.count.toLocaleString()} records${sources}, ${escapeHtml(findingTimeSpan(item))}</div>
+                <div class="finding-members-list"></div>
+            </div>`;
+        }
+
+        function findingMemberRowHtml(f) {
+            const e = f.event;
+            const communityIdAttr = e.community_id ? ` data-community-id="${escapeHtml(e.community_id)}"` : '';
+            return `<tr data-id="${escapeHtml(String(e.id))}" data-event-type="${escapeHtml(e.event_type || '')}"${communityIdAttr} data-action="toggle-row">` +
+                `<td class="timestamp">${escapeHtml((e.timestamp || '').slice(0, 19))}</td>` +
+                `<td class="mono-fixed">${escapeHtml(findingEndpoint(e.src_ip, e.src_port))}</td>` +
+                `<td class="mono-fixed">${escapeHtml(findingEndpoint(e.dest_ip, e.dest_port))}</td>` +
+                rowNoteIconHtml('events', e.id, e.row_note) +
+                `</tr><tr class="detail-row"><td colspan="4"><div class="detail-content">${formatEvent(e)}</div></td></tr>`;
+        }
+
+        function loadFindingMembersIfPresent(detailRow) {
+            const box = detailRow.querySelector(':scope > td > .detail-content > .finding-members');
+            if (box && !box.dataset.loaded) loadFindingMembers(box);
+        }
+
+        async function loadFindingMembers(box) {
+            box.dataset.loaded = '1';
+            const list = box.querySelector('.finding-members-list');
+            list.innerHTML = '<div class="finding-members-note">Loading...</div>';
+            const md5 = currentMd5;
+            const d = box.dataset;
+            let data = null;
+            try {
+                const resp = await fetch(`/api/findings?md5=${encodeURIComponent(md5)}&rule=${encodeURIComponent(d.rule)}` +
+                    `&detail=${encodeURIComponent(d.detail)}&dest_ip=${encodeURIComponent(d.destIp)}` +
+                    `&dest_port=${encodeURIComponent(d.destPort)}${buildSearchQuery()}&t=${Date.now()}`);
+                data = await resp.json();
+            } catch (err) {
+                data = null;
+            }
+            if (currentMd5 !== md5) return;
+            const members = data && Array.isArray(data.findings) ? data.findings : null;
+            if (!members) {
+                delete box.dataset.loaded;
+                list.innerHTML = '<div class="finding-members-note">Couldn\'t load the records - collapse and expand to try again.</div>';
+                return;
+            }
+            const total = data.rules && data.rules[0] ? data.rules[0].count : members.length;
+            const more = total > members.length ? `<div class="finding-members-note">The first ${members.length.toLocaleString()} of ${total.toLocaleString()} shown.</div>` : '';
+            list.innerHTML = `<table class="finding-members-table"><thead><tr><th>Time</th><th>Source</th><th>Destination</th><th></th></tr></thead>` +
+                `<tbody>${members.map(findingMemberRowHtml).join('')}</tbody></table>${more}`;
         }
 
         function findingRowHtml(item) {
@@ -9366,11 +9442,12 @@
                 `<td>${escapeHtml(item.title)}</td>` +
                 `<td class="mono">${escapeHtml(item.detail)}</td>` +
                 `<td>${valueDotSpan(COLORS.EVENT[etype])}${escapeHtml(eventTypeLabel(etype))}</td>` +
-                `<td class="mono-fixed">${escapeHtml(findingEndpoint(e.src_ip, e.src_port))}</td>` +
+                `<td class="mono-fixed">${escapeHtml(findingSource(item))}</td>` +
                 `<td class="mono-fixed">${escapeHtml(findingEndpoint(e.dest_ip, e.dest_port))}</td>` +
-                `<td class="timestamp">${escapeHtml((e.timestamp || '').slice(0, 19))}</td>` +
+                `<td>${(item.count || 1).toLocaleString()}</td>` +
+                `<td class="timestamp" title="${escapeHtml(findingTimeSpan(item))}">${escapeHtml((item.first || e.timestamp || '').slice(0, 19))}</td>` +
                 rowNoteIconHtml('events', e.id, e.row_note) +
-                `</tr><tr class="detail-row"><td colspan="${FINDING_COLUMNS.length + 1}"><div class="detail-content">${formatEvent(e)}</div></td></tr>`;
+                `</tr><tr class="detail-row"><td colspan="${FINDING_COLUMNS.length + 1}"><div class="detail-content">${(item.count || 1) > 1 ? findingMembersHtml(item) : formatEvent(e)}</div></td></tr>`;
         }
 
         const FINDINGS_INFO_COLLAPSED_KEY = 'socrates_findingsInfoCollapsed';
@@ -9382,15 +9459,21 @@
             const collapsed = safeStorageGet(localStorage, FINDINGS_INFO_COLLAPSED_KEY) === 'true';
             const arrow = collapsed ? '▸' : '▾';
             const display = collapsed ? 'none' : 'block';
-            const shown = rules.reduce((n, r) => n + Math.min(r.count, FINDINGS_MAX_PER_RULE), 0);
-            const total = rules.reduce((n, r) => n + r.count, 0);
-            const items = rules.map(r => `<li>${valueDotSpan(FINDING_SEVERITY_COLORS[r.severity])}<strong>${escapeHtml(r.title)}</strong> (${escapeHtml(eventTypeLabel(r.event_type))}, ${r.count.toLocaleString()}${r.count > FINDINGS_MAX_PER_RULE ? `, the first ${FINDINGS_MAX_PER_RULE} shown` : ''}) - ${escapeHtml(r.why)}</li>`).join('');
+            const groupsOf = r => r.groups === undefined ? r.count : r.groups;
+            const shown = rules.reduce((n, r) => n + Math.min(groupsOf(r), FINDINGS_MAX_PER_RULE), 0);
+            const total = rules.reduce((n, r) => n + groupsOf(r), 0);
+            const counted = r => {
+                const groups = groupsOf(r);
+                const records = `${r.count.toLocaleString()} ${r.count === 1 ? 'record' : 'records'}`;
+                return groups === r.count ? records : `${records} in ${groups.toLocaleString()} ${groups === 1 ? 'row' : 'rows'}`;
+            };
+            const items = rules.map(r => `<li>${valueDotSpan(FINDING_SEVERITY_COLORS[r.severity])}<strong>${escapeHtml(r.title)}</strong> (${escapeHtml(eventTypeLabel(r.event_type))}, ${counted(r)}${groupsOf(r) > FINDINGS_MAX_PER_RULE ? `, the first ${FINDINGS_MAX_PER_RULE} rows shown` : ''}) - ${escapeHtml(r.why)}</li>`).join('');
             return `<div class="agg-panel" style="margin-bottom: 15px;">
                 <div class="section-toggle-bar findings-info-toggle" data-action="toggle-findings-info">${arrow} About Findings</div>
                 <div class="findings-info-body" style="display:${display}; padding: 16px 20px; color: var(--text-muted); font-size: 0.85rem; line-height: 1.7;">
                     <p style="margin:0 0 10px 0;">What the protocol records in this capture show is worth a look - a weakness a host exposes, a control action on industrial equipment, a probe - gathered from every protocol into one list, most severe first. Each one is a lead to check, not a verdict: a PLC write is routine to its engineering workstation and alarming from anywhere else. Suricata's own alerts stay on their own tab.</p>
-                    ${items ? `<p style="margin:0 0 6px 0; color: var(--text-bright);">In this capture${total > shown ? ` (${shown.toLocaleString()} of ${total.toLocaleString()} shown)` : ''}:</p><ul style="margin:0 0 10px 0; padding-left: 20px;">${items}</ul>` : ''}
-                    <p style="margin:0;">Click a row for its record's details. No password is shown here, even where the record keeps one.</p>
+                    ${items ? `<p style="margin:0 0 6px 0; color: var(--text-bright);">In this capture${total > shown ? ` (${shown.toLocaleString()} of ${total.toLocaleString()} rows shown)` : ''}:</p><ul style="margin:0 0 10px 0; padding-left: 20px;">${items}</ul>` : ''}
+                    <p style="margin:0;">The same finding on the same server is one row, with how many records it covers: click it for the list, and a record for its details. No password is shown here, even where the record keeps one.</p>
                 </div>
             </div>`;
         }
@@ -10179,7 +10262,8 @@
                     findingsCountStale = true;
                     return;
                 }
-                findingsCount = data.rules.reduce((n, r) => n + r.count, 0);
+                // Rows, as the tab shows them: a rule's records grouped
+                findingsCount = data.rules.reduce((n, r) => n + (r.groups === undefined ? r.count : r.groups), 0);
                 findingsCountMd5 = md5;
             } catch (e) {
                 findingsCountStale = true;

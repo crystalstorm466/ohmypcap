@@ -868,6 +868,13 @@ class TestAPIEndpoints(unittest.TestCase):
         status, body = self._get(f'/api/findings?md5={md5}&q=9.9.9.9')
         self.assertEqual(json.loads(body), {'rules': [], 'findings': []})
 
+        # one row's own records: by its rule, detail and server (no port here)
+        status, body = self._get(f'/api/findings?md5={md5}&rule=tunnel_return&detail=GRE&dest_ip=5.6.7.8&dest_port=')
+        data = json.loads(body)
+        self.assertEqual((data['rules'][0]['count'], [f['event']['src_ip'] for f in data['findings']]), (1, ['1.2.3.4']))
+        status, body = self._get(f'/api/findings?md5={md5}&rule=tunnel_return&detail=VXLAN&dest_ip=5.6.7.8')
+        self.assertEqual(json.loads(body)['findings'], [])
+
         status, _ = self._get('/api/findings?md5=../etc/passwd')
         self.assertEqual(status, 400)
 
