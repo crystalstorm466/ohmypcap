@@ -709,6 +709,37 @@ def suricata_identified_flows(db_path):
     return out
 
 
+# What shark_analyzer's tls_failure records take from Suricata's tls
+# record of the same connection - the certificate refused, and the host
+# the client asked for
+TLS_FAILURE_CONTEXT = ('sni', 'version', 'subject', 'issuerdn', 'subjectaltname', 'serial', 'fingerprint', 'notbefore',
+                       'notafter')
+
+
+def suricata_tls_records(db_path, community_ids):
+    """Community ID -> [(epoch seconds, {the TLS_FAILURE_CONTEXT fields
+    it has})] of Suricata's tls records on these flows."""
+    wanted, out = set(community_ids), {}
+    if not wanted:
+        return out
+    with _db_connection(db_path) as conn:
+        for cid, when, data in conn.execute(
+                "SELECT json_extract(json_data, '$.community_id'), timestamp, json_extract(json_data, '$.tls') "
+                "FROM events WHERE event_type = 'tls' AND json_extract(json_data, '$.source') IS NOT ?",
+                (TSHARK_SOURCE,)):
+            at = _iso_epoch(when)
+            if cid not in wanted or at is None:
+                continue
+            try:
+                tls = json.loads(data) if data else {}
+            except ValueError:
+                continue
+            if isinstance(tls, dict):
+                out.setdefault(cid, []).append(
+                    (at, {f: tls[f] for f in TLS_FAILURE_CONTEXT if tls.get(f) not in (None, '', [])}))
+    return out
+
+
 def _iso_epoch(text):
     """Suricata's (and tshark's) timestamp - 2015-10-21T10:09:16.074689+0000 - in epoch seconds."""
     try:
@@ -1499,6 +1530,13 @@ AGGREGATION_JSON_PATHS = {
         'User': ['$.socks.user'],
         'Tunneled': ['$.socks.tunneled'],
     },
+    'tls_failure': {
+        'Alert': ['$.tls_failure.alert'],
+        'Sent By': ['$.tls_failure.sent_by'],
+        'SNI / Host': ['$.tls_failure.sni'],
+        'Subject': ['$.tls_failure.subject'],
+        'Issuer': ['$.tls_failure.issuerdn'],
+    },
     'dtls': {
         'SNI / Host': ['$.dtls.sni'],
         'Version': ['$.dtls.version'],
@@ -1654,6 +1692,8 @@ AGGREGATION_TRUNCATE = {
     ('tls', 'Subject'): 40,
     ('tls', 'Issuer'): 40,
     ('dtls', 'Subject'): 40,
+    ('tls_failure', 'Subject'): 40,
+    ('tls_failure', 'Issuer'): 40,
 }
 
 # Value transforms beyond plain extraction, matching extractValue's own

@@ -55,6 +55,13 @@ MATCHES = {
     'coap_discovery': ('coap', {'resources': ['/sensors/temp']}),
     'l2tp_no_auth': ('l2tp', {'state': 'established', 'client_host_name': 'WIN-CLIENT7'}),
     'radius_reject': ('radius', {'result': 'rejected', 'user': 'bob', 'nas_ip': '10.1.0.2'}),
+    'tls_certificate_refused': ('tls_failure', {'alert': 'Handshake Failure', 'sent_by': 'server',
+                                                'alerts': ['server: Handshake Failure', 'client: Unknown CA'],
+                                                'sni': 'vpn.example', 'subject': 'CN=vpn.example'}),
+    'tls_certificate_out_of_date': ('tls', {'sni': 'old.example', 'subject': 'CN=old.example', 'issuerdn': 'CN=Some CA',
+                                            'notbefore': '2024-01-01T00:00:00', 'notafter': '2025-06-01T00:00:00'}),
+    'tls_self_signed': ('tls', {'sni': 'lab.example', 'subject': 'CN=lab.example', 'issuerdn': 'CN=lab.example',
+                                'notbefore': '2025-01-01T00:00:00', 'notafter': '2027-01-01T00:00:00'}),
 }
 
 # Records like those the rules look for that no rule should match
@@ -79,6 +86,10 @@ NON_MATCHES = [
     ('l2tp', {'state': 'established', 'tunnel_authentication': True}),
     ('l2tp', {'state': 'refused'}),
     ('radius', {'result': 'accepted'}),
+    ('tls_failure', {'alert': 'Handshake Failure', 'sent_by': 'server', 'alerts': ['server: Handshake Failure']}),
+    ('tls', {'sni': 'www.example', 'subject': 'CN=www.example', 'issuerdn': 'CN=Some CA',
+             'notbefore': '2025-01-01T00:00:00', 'notafter': '2026-01-02T00:00:00'}),
+    ('tls', {'sni': 'www.example', 'version': 'TLS 1.3'}),
 ]
 
 
@@ -127,6 +138,14 @@ class TestFindings(unittest.TestCase):
         self.assertEqual(by_rule['opcua_cleartext_password'], 'user user1 on opc.tcp://plc:4840/')
         self.assertEqual(by_rule['rip_default_route'], '0.0.0.0/0 metric 1')
         self.assertEqual(by_rule['s7_write'], '1 items')
+        self.assertEqual(by_rule['tls_certificate_refused'], 'client: Unknown CA - CN=vpn.example (for vpn.example)',
+                         'the alert that refused the certificate, not the first one')
+        self.assertEqual(by_rule['tls_certificate_out_of_date'],
+                         'valid 2024-01-01 to 2025-06-01 - CN=old.example (for old.example)')
+        self.assertEqual(by_rule['tls_self_signed'], 'CN=lab.example (for lab.example)')
+        tls13 = findings.RULES_BY_ID['tls_certificate_refused'].detail(
+            {'alerts': ['client: Unknown CA'], 'sni': 'vpn.example'})
+        self.assertEqual(tls13, 'client: Unknown CA (for vpn.example)', 'TLS 1.3: no certificate to name')
 
     def test_counts_and_order(self):
         events = [_record('bacnet', {'service': 'writeProperty'}, i) for i in range(3)]
@@ -156,6 +175,21 @@ class TestFindings(unittest.TestCase):
         self.assertEqual([f['event']['tunnel']['type'] for f in result['findings']], ['VXLAN'])
         self.assertEqual(result['rules'][0]['count'], 1)
         self.assertEqual(findings.query_findings(path, q=['nothing-like-this'])['rules'], [])
+
+    def test_a_certificate_is_judged_at_the_time_of_its_connection(self):
+        """Not today: a capture from 2015 isn't full of expired
+        certificates - nor one made before a certificate's start date
+        clean of it. The rule's own column survives a search's FTS join."""
+        cert = {'subject': 'CN=a', 'issuerdn': 'CN=CA', 'notbefore': '2015-01-01T00:00:00',
+                'notafter': '2016-01-01T00:00:00'}
+        events = [_record('tls', cert, 1, timestamp='2015-10-21T10:00:00.000000+0000'),
+                  _record('tls', cert, 2, timestamp='2014-12-31T23:59:59.000000+0000'),
+                  _record('tls', cert, 3, timestamp='2016-01-01T00:00:01.000000+0000')]
+        path = self._db(events)
+        found = [f['event']['src_port'] for f in findings.query_findings(path)['findings']]
+        self.assertEqual(found, [40002, 40003], 'before it starts and after it ends, not during')
+        searched = findings.query_findings(path, q=['CN=CA'])
+        self.assertEqual([r['count'] for r in searched['rules']], [2])
 
     def test_findings_carry_their_row_notes(self):
         path = self._db([_record('tunnel', {'type': 'GRE', 'returns_to_sender': True}, 1)])

@@ -22209,6 +22209,11 @@ class TestTsharkUI(unittest.TestCase):
         'rpc': {'event_type': 'rpc', 'rpc': {'program': 'mountd', 'program_number': 100005, 'version': 3, 'procedure': 'MNT',
                                              'reply': 'RPC executed successfully', 'machine_name': 'client1',
                                              'uid': 1000, 'gid': 1000, 'path': '/export/home'}},
+        'tls_failure': {'event_type': 'tls_failure', 'proto': 'TCP',
+                        'tls_failure': {'alert': 'Unknown CA', 'sent_by': 'client', 'alerts': ['client: Unknown CA'],
+                                        'sni': 'vpn.example', 'version': 'TLS 1.2',
+                                        'subject': 'C=US, O=Fixture Ltd, CN=dtls.example',
+                                        'issuerdn': 'C=US, O=Fixture Ltd, CN=dtls.example'}},
         'dtls': {'event_type': 'dtls', 'dtls': {'sni': 'dtls.example', 'version': 'DTLS 1.2', 'handshake': 'completed',
                                                 'subject': 'C=US, O=Fixture Ltd, CN=dtls.example',
                                                 'ja4': 'dd2d0105wc_648b5c445417_7d72a171e567'}},
@@ -22273,6 +22278,8 @@ class TestTsharkUI(unittest.TestCase):
         'stun': ['Allocate', 'success', '2', '203.0.113.50:40002', '192.0.2.30:50000', 'fixture-client 1.0', 'turnuser'],
         'radius': ['Access-Request', 'alice', 'AA-BB-CC-DD-EE-01', 'wlc-1', 'accepted', 'EAP-PEAP', 'Welcome, alice'],
         'socks': ['5', 'connect', 'files.example.net', '80', 'succeeded', 'proxyuser', 'http'],
+        'tls_failure': ['Unknown CA', 'client', 'vpn.example', 'C=US, O=Fixture Ltd, CN=dtls.example',
+                        'C=US, O=Fixture Ltd, CN=dtls.example'],
         'dtls': ['dtls.example', 'DTLS 1.2', 'completed', 'C=US, O=Fixture Ltd, CN=dtls.example',
                  'dd2d0105wc_648b5c445417_7d72a171e567'],
         'syslog': ['info', 'auth', 'sw-core', 'sshd', 'Failed password for admin from 10.1.0.77'],
@@ -22318,7 +22325,8 @@ class TestTsharkUI(unittest.TestCase):
                 self.assertEqual(r['cells'][6:6 + len(expected)], expected)
                 # one record per point, so its section is a point's
                 section = {'iec104_point': 'IEC 104 Point', 'bacnet_property': 'BACnet Property',
-                           'bacnet_device': 'BACnet Device', 'opcua_action': 'OPC UA Action'}.get(t, r['label'])
+                           'bacnet_device': 'BACnet Device', 'opcua_action': 'OPC UA Action',
+                           'tls_failure': 'TLS Failure'}.get(t, r['label'])
                 self.assertIn(f'{section} Details', r['detail'])
 
     def test_telnet_details_list_the_commands_one_per_line(self):
@@ -22358,7 +22366,7 @@ class TestTsharkUI(unittest.TestCase):
         import db
         from tests.jsdom_helper import js_statements
         cols = js_statements("""window.__jsdom_result = Object.fromEntries(
-            ['llmnr', 'nbns', 's7comm', 'ssdp', 'telnet', 'iec104', 'iec104_point', 'bacnet', 'bacnet_property', 'bacnet_device', 'opcua', 'opcua_action', 'goose', 'browser', 'lldp', 'cdp', 'dhcpv6', 'syslog', 'dtls', 'rpc', 'socks', 'radius', 'stun', 'coap', 'slp', 'ipmi', 'l2tp', 'rip', 'tunnel', 'xdmcp'].map(t => [t, getColumnsForType(t).slice(6)]));""")
+            ['llmnr', 'nbns', 's7comm', 'ssdp', 'telnet', 'iec104', 'iec104_point', 'bacnet', 'bacnet_property', 'bacnet_device', 'opcua', 'opcua_action', 'goose', 'browser', 'lldp', 'cdp', 'dhcpv6', 'syslog', 'dtls', 'tls_failure', 'rpc', 'socks', 'radius', 'stun', 'coap', 'slp', 'ipmi', 'l2tp', 'rip', 'tunnel', 'xdmcp'].map(t => [t, getColumnsForType(t).slice(6)]));""")
         for t, columns in cols.items():
             self.assertEqual(list(db.AGGREGATION_JSON_PATHS[t]), columns, t)
 

@@ -6,6 +6,7 @@ real tshark output skip when tshark isn't installed."""
 
 import json
 import os
+import sqlite3
 import shutil
 import struct
 import subprocess
@@ -16,12 +17,14 @@ import time
 import unittest
 import urllib.error
 import urllib.request
+from contextlib import closing
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 
 import config
 import db
+import findings
 import shark_analyzer
 import socrates as server
 import storage
@@ -1448,6 +1451,83 @@ class TestSOCKS(unittest.TestCase):
 
 
 @unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
+class TestTLSFailures(unittest.TestCase):
+    """tests/protocol_fixtures.write_tls_failure_pcap: a record per TCP
+    connection that sent a TLS alert while it could still be read - with
+    what Suricata 8.0.7 logged for the capture
+    (tests/data/tls_failure_fixture.eve.json): a tls record for each
+    connection that got as far as the server's certificate, and none of
+    the alerts."""
+
+    @classmethod
+    def setUpClass(cls):
+        from tests.protocol_fixtures import write_tls_failure_pcap
+        cls.tmpdir = tempfile.mkdtemp()
+        cls.pcap = os.path.join(cls.tmpdir, 'tls_failure.pcap')
+        write_tls_failure_pcap(cls.pcap)
+        cls.records = shark_analyzer.run_tshark(cls.pcap)
+        cls.failures = {r['dest_ip']: r for r in cls.records if r['event_type'] == 'tls_failure'}
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmpdir, ignore_errors=True)
+
+    def test_a_client_refusing_the_certificate_and_a_server_turning_a_client_away(self):
+        from tests.protocol_fixtures import TLS_FAILURE_CLIENT, TLS_REFUSED_SERVER, TLS_UNWILLING_SERVER
+        refused = self.failures[TLS_REFUSED_SERVER]
+        self.assertEqual(refused['tls_failure'], {'alert': 'Unknown CA', 'sent_by': 'client',
+                                                  'alerts': ['client: Unknown CA']})
+        self.assertEqual((refused['src_ip'], refused['src_port'], refused['dest_port']), (TLS_FAILURE_CLIENT, 41201, 443))
+        self.assertEqual(self.failures[TLS_UNWILLING_SERVER]['tls_failure'],
+                         {'alert': 'Handshake Failure', 'sent_by': 'server', 'alerts': ['server: Handshake Failure']})
+
+    def test_an_encrypted_alert_is_no_record(self):
+        from tests.protocol_fixtures import TLS_GOOD_SERVER
+        self.assertNotIn(TLS_GOOD_SERVER, self.failures)
+        self.assertEqual(len(self.failures), 2)
+
+    def test_an_orderly_close_is_no_failure(self):
+        flow = shark_analyzer._Flow(('k',), 'TCP', 4, '10.0.0.1', '10.0.0.2', 40000, 443, 1.0, '0')
+        failures = shark_analyzer._TLSFailures()
+        failures.add(flow, '10.0.0.1', 40000, 1.0, ['Close Notify'])
+        failures.add(flow, '10.0.0.2', 443, 2.0, ['Close Notify'])
+        self.assertEqual(list(failures.records()), [])
+        failures.add(flow, '10.0.0.2', 443, 3.0, ['Close Notify', 'Decrypt Error'])
+        self.assertEqual([r['tls_failure'] for r in failures.records()],
+                         [{'alert': 'Decrypt Error', 'sent_by': 'server', 'alerts': ['server: Decrypt Error']}])
+
+    def test_the_merge_keeps_them_on_suricatas_tls_flows_and_names_the_certificate(self):
+        from tests.protocol_fixtures import TLS_REFUSED_SERVER, TLS_UNWILLING_SERVER
+        d = os.path.join(self.tmpdir, 'analysis')
+        os.makedirs(d)
+        shutil.copy(self.pcap, d)
+        events_db = os.path.join(d, 'events.db')
+        db.create_sqlite_db(events_db, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data',
+                                                    'tls_failure_fixture.eve.json'))
+        self.assertTrue(shark_analyzer.build(d, os.path.join(d, 'tls_failure.pcap')))
+        shark_analyzer.merge(d)
+        counts = db.get_event_types_sqlite(events_db)
+        self.assertEqual((counts.get('tls_failure'), counts.get('tls')), (2, 2),
+                         'Suricata called all three tls, but logs no alerts')
+        with closing(sqlite3.connect(events_db)) as conn:
+            merged = {e['dest_ip']: e['tls_failure'] for e in (json.loads(r[0]) for r in conn.execute(
+                "SELECT json_data FROM events WHERE event_type = 'tls_failure'"))}
+        self.assertEqual(merged[TLS_REFUSED_SERVER], {
+            'sni': 'vpn.example', 'version': 'TLS 1.2', 'subject': 'C=US, O=Fixture Ltd, CN=dtls.example',
+            'issuerdn': 'C=US, O=Fixture Ltd, CN=dtls.example', 'subjectaltname': ['dtls.example', 'vpn.example'],
+            'serial': '12:34:AB:CD', 'fingerprint': '0b:a9:85:77:db:22:9e:e7:a6:fe:09:ca:65:2c:38:52:2b:c4:04:66',
+            'notbefore': '2026-10-10T20:40:09', 'notafter': '2036-10-07T20:40:09',
+            'alert': 'Unknown CA', 'sent_by': 'client', 'alerts': ['client: Unknown CA']})
+        self.assertEqual(merged[TLS_UNWILLING_SERVER]['alert'], 'Handshake Failure',
+                         'no certificate to name: Suricata has no tls record of a handshake that stopped at the hello')
+        self.assertNotIn('sni', merged[TLS_UNWILLING_SERVER])
+        found = findings.query_findings(events_db)
+        self.assertEqual(sorted((r['id'], r['count']) for r in found['rules']),
+                         [('tls_certificate_out_of_date', 2), ('tls_certificate_refused', 1), ('tls_self_signed', 2)],
+                         'the certificate starts in 2026; the capture is from 2023')
+
+
+@unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
 class TestDTLS(unittest.TestCase):
     """tests/protocol_fixtures.write_dtls_pcap: one record per connection's
     handshake, named like Suricata's tls records - with what Suricata
@@ -2103,6 +2183,21 @@ class TestMergeRows(unittest.TestCase):
         self.assertEqual(self._kept([_row('s7comm'), _row('nbns'), _row('llmnr'), _row('ssdp'),
                                      _row('dns'), _row('http'), _row('smb'), _row('ftp_data'), _row('mdns')]),
                          [('s7comm', None), ('nbns', None), ('llmnr', None), ('ssdp', None)])
+
+    def test_tls_failures_stay_on_flows_suricata_identified_with_its_certificate(self):
+        """Suricata logs no TLS alerts, so its word on the flow doesn't
+        stand in for them - and its tls record of the connection, the
+        nearest in time, says which certificate."""
+        rows = [_row('tls_failure', cid='1:http'), _row('tls_failure', cid='1:other')]
+        asked = []
+
+        def tls_records(cids):
+            asked.append(cids)
+            return {'1:http': [(1767225000.0, {'sni': 'earlier.example'}), (1767225609.0, {'sni': 'b.example'})]}
+        kept = list(shark_analyzer.merge_rows(rows, self.SURICATA, tls_records=tls_records))
+        self.assertEqual([e['tls_failure'] for e in kept], [{'sni': 'b.example'}, {}])
+        self.assertEqual(asked, [{'1:http', '1:other'}], 'one lookup, for all of them')
+        self.assertEqual(len(list(shark_analyzer.merge_rows(rows, self.SURICATA))), 2)
 
     def test_flows_become_connection_rows_only_for_protocols_with_nothing_else(self):
         self.assertEqual(self._kept([_row('flow', app='openvpn'), _row('flow', app='wol'),

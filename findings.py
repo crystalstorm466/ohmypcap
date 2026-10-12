@@ -56,6 +56,23 @@ def _list(values, limit=3):
 _IEC104_CONTROL = ('Single command', 'Double command', 'Regulating step command', 'Set point (normalized)',
                    'Set point (scaled)', 'Set point (float)', 'Bitstring command', 'Reset process',
                    'Parameter activation')
+# The alerts a TLS endpoint sends when it refuses the other's certificate
+# (tshark's names)
+_TLS_CERT_ALERTS = ('Bad Certificate', 'Unsupported Certificate', 'Certificate Revoked', 'Certificate Expired',
+                    'Certificate Unknown', 'Unknown CA')
+# A certificate outside its validity at the time of the connection - not
+# today, or every old capture's would be expired. Suricata writes the
+# validity dates in UTC, and - the container's clock being UTC - the
+# record's time too (2026-01-01T00:00:00.000000+0000).
+_TLS_OUT_OF_DATE = (f"({_j('tls', 'notafter')} < substr(timestamp, 1, 19) "
+                    f"OR {_j('tls', 'notbefore')} > substr(timestamp, 1, 19))")
+
+
+def _tls_certificate(b):
+    """The certificate a TLS record names, and for which host."""
+    return _join(b.get('subject'), f"(for {b['sni']})" if b.get('sni') else '')
+
+
 _DEFAULT_ROUTE = (f"EXISTS (SELECT 1 FROM json_each(json_data, '$.rip.routes') "
                   f"WHERE value LIKE '0.0.0.0/0 %' OR value LIKE '::/0 %')")
 
@@ -119,6 +136,14 @@ RULES = (
          'A host that registers services from anyone can be made to send large replies to a '
          'forged address (CVE-2023-29552).'),
 
+    Rule('tls_certificate_refused', 'medium', 'tls_failure', 'TLS certificate refused',
+         _has('tls_failure', 'alerts', [f'{side}: {a}' for side in ('client', 'server') for a in _TLS_CERT_ALERTS]),
+         lambda b: _join(next((a for a in b.get('alerts', ()) if a.split(': ', 1)[-1] in _TLS_CERT_ALERTS), ''),
+                         '-' if b.get('subject') else '', _tls_certificate(b)),
+         "One end refused the other's certificate - untrusted (Unknown CA), expired, revoked or otherwise bad. "
+         "Self-signed devices, TLS-inspecting proxies and someone in the middle all look like this. Seen "
+         "where the alert went out readable: always in TLS 1.2 and earlier, and in TLS 1.3 from some clients "
+         "(OpenSSL's) - whose certificate, encrypted, goes unnamed."),
     Rule('s7_write', 'medium', 's7comm', 'S7 PLC memory written',
          _in('s7comm', 'function', ['Write Var']),
          lambda b: _list(i.get('area') for i in b.get('items', ()) if i.get('area'))
@@ -163,6 +188,17 @@ RULES = (
          lambda b: _join(b.get('hostname'), b.get('program'), '-', (b.get('message') or '')[:120]),
          'A device logging an emergency, alert or critical condition.'),
 
+    Rule('tls_certificate_out_of_date', 'low', 'tls', 'TLS certificate expired or not yet valid',
+         _TLS_OUT_OF_DATE,
+         lambda b: _join('valid', (b.get('notbefore') or '?')[:10], 'to', (b.get('notafter') or '?')[:10], '-',
+                         _tls_certificate(b)),
+         'The server offered a certificate outside its validity dates at the time - a forgotten renewal, a '
+         'device with its clock wrong, or a certificate made up on the spot.'),
+    Rule('tls_self_signed', 'low', 'tls', 'TLS self-signed certificate',
+         f"{_j('tls', 'issuerdn')} = {_j('tls', 'subject')} AND {_j('tls', 'subject')} != ''",
+         _tls_certificate,
+         "A certificate that vouches for itself: common on appliances and lab servers, and what malware "
+         "and interception tools generate. No client trusts one unless told to."),
     Rule('rip_whole_table', 'low', 'rip', 'RIP routing table handed out',
          f"{_j('rip', 'whole_table')} = 1 AND {_j('rip', 'responses')} IS NOT NULL",
          lambda b: _join(b.get('route_count'), 'routes'),

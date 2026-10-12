@@ -1628,3 +1628,67 @@ def xdmcp_packets():
 
 def write_xdmcp_pcap(path):
     write_pcap(path, xdmcp_packets())
+
+
+# ---------------------------------------------------------------- TLS failures
+#
+# TLS 1.2 over TCP, where the handshake's alerts are readable: a client
+# refusing the server's self-signed certificate (DTLS_CERTIFICATE, not
+# valid until 2026 - the capture is from 2023) with Unknown CA, a server
+# turning a client away with Handshake Failure, and a completed handshake
+# whose closing alert is encrypted - which no one can read, so it's no
+# record.
+
+TLS_FAILURE_CLIENT = '10.1.0.10'
+TLS_REFUSED_SERVER, TLS_UNWILLING_SERVER, TLS_GOOD_SERVER = '10.1.0.44', '10.1.0.45', '10.1.0.46'
+TLS_REFUSED_SNI = 'vpn.example'
+
+
+def _tls12_record(content_type, payload):
+    return struct.pack('!BHH', content_type, 0x0303, len(payload)) + payload
+
+
+def _tls12_handshake(msg_type, body):
+    return bytes([msg_type]) + struct.pack('!I', len(body))[1:] + body
+
+
+def _tls12_client_hello(sni):
+    name = sni.encode()
+    exts = (_ext(0x0000, struct.pack('!HBH', len(name) + 3, 0, len(name)) + name)
+            + _ext(0x000a, struct.pack('!HH', 2, 0x0017)) + _ext(0x000b, b'\x01\x00')
+            + _ext(0x000d, struct.pack('!HH', 2, 0x0403)))
+    suites = struct.pack('!HH', 0xc02b, 0xc02f)
+    body = (struct.pack('!H', 0x0303) + bytes(range(32)) + b'\x00' + struct.pack('!H', len(suites)) + suites
+            + b'\x01\x00' + struct.pack('!H', len(exts)) + exts)
+    return _tls12_record(22, _tls12_handshake(1, body))
+
+
+def _tls12_server_flight():
+    hello = _tls12_handshake(2, struct.pack('!H', 0x0303) + bytes(range(64, 96)) + b'\x00'
+                             + struct.pack('!HB', 0xc02b, 0) + struct.pack('!H', 0))
+    cert = len(DTLS_CERTIFICATE).to_bytes(3, 'big') + DTLS_CERTIFICATE
+    certificate = _tls12_handshake(11, len(cert).to_bytes(3, 'big') + cert)
+    return _tls12_record(22, hello + certificate + _tls12_handshake(14, b''))
+
+
+def _tls12_alert(description):
+    return _tls12_record(21, bytes([2, description]))       # fatal
+
+
+def tls_failure_packets():
+    refused = tcp_segments(TLS_FAILURE_CLIENT, TLS_REFUSED_SERVER, 41201, 443, [
+        (True, _tls12_client_hello(TLS_REFUSED_SNI)), (False, _tls12_server_flight()),
+        (True, _tls12_alert(48))])                                                    # unknown_ca
+    unwilling = tcp_segments(TLS_FAILURE_CLIENT, TLS_UNWILLING_SERVER, 41202, 443, [
+        (True, _tls12_client_hello('legacy.example')), (False, _tls12_alert(40))])   # handshake_failure
+    ccs, finished = _tls12_record(20, b'\x01'), _tls12_record(22, bytes(40))       # Finished: encrypted
+    completed = tcp_segments(TLS_FAILURE_CLIENT, TLS_GOOD_SERVER, 41203, 443, [
+        (True, _tls12_client_hello('good.example')), (False, _tls12_server_flight()),
+        (True, _tls12_record(22, _tls12_handshake(16, b'\x41' + bytes(65))) + ccs + finished),
+        (False, ccs + finished), (True, _tls12_record(23, bytes(48))),
+        (True, _tls12_record(21, bytes(26)))])                                       # an encrypted alert
+    return refused + unwilling + completed
+
+
+def write_tls_failure_pcap(path):
+    write_pcap(path, tls_failure_packets())

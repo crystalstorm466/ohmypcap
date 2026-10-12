@@ -54,7 +54,7 @@ import sqlite3
 import config
 import pcap_subset
 from db import (create_shark_db, iter_events_json, replace_tshark_events, suricata_identified_flows,
-                tshark_merge_stamp, _iso_epoch)
+                suricata_tls_records, tshark_merge_stamp, _iso_epoch)
 from shark_protocols import PROTOCOLS, RECORDED_APP_PROTOS, STRUCTURED_PROTOCOLS, Packet
 
 SHARK_DB = 'shark.db'
@@ -64,7 +64,7 @@ SHARK_ARTIFACTS = (SHARK_DB, SHARK_DB + '-wal', SHARK_DB + '-shm', SHARK_DB + '.
 # change here or in shark_protocols changes what a run produces: a
 # shark.db stamped with an older version is rebuilt the next time its
 # status is asked for, so existing analyses pick up the change.
-SHARK_FORMAT_VERSION = 33
+SHARK_FORMAT_VERSION = 34
 
 # The fields every packet is read for, one per column of tshark's
 # tab-separated output, in this order - then each of shark_protocols'
@@ -92,12 +92,17 @@ _FIELDS = (
 # reply - requested whether or not any protocol here keeps records of them.
 _ORIENTATION_FIELDS = ('dns.flags.response', 'nbns.flags.response', 'http.response.code', 'http.request.method',
                        'ftp.response.code', 'ftp.request.command', 's7comm.header.rosctr', 'tls.handshake.type')
+# The alerts a TLS connection's ends sent while they could still be read
+# (_TLSFailures) - TLS is most of a capture's connections, too many to
+# read again in the protocol pass for one field.
+_TLS_ALERT_FIELD = 'vals(tls.alert_message.desc)'
 # The first pass reads every packet, for its flow - so it asks for no more
 # than that: tshark's time grows with each field asked for, whether or not
 # a packet has it. shark_protocols' fields are asked for by a second pass
 # (_protocol_pass) over just the packets of the flows they keep records of.
-_FIRST_PASS_FIELDS = _FIELDS + tuple(f for f in _ORIENTATION_FIELDS if f not in _FIELDS)
+_FIRST_PASS_FIELDS = _FIELDS + tuple(f for f in _ORIENTATION_FIELDS if f not in _FIELDS) + (_TLS_ALERT_FIELD,)
 _COLUMN = {field: i for i, field in enumerate(_FIRST_PASS_FIELDS)}
+_TLS_ALERT_COLUMN = _COLUMN[_TLS_ALERT_FIELD]
 # The application protocols shark_protocols keeps records of from fields
 _RECORDED_FIELD_APPS = frozenset(p for proto in PROTOCOLS for p in proto.app_protos)
 
@@ -545,6 +550,45 @@ class _Tunnels:
             yield event
 
 
+# TLS failures: the alerts a TLS connection's ends sent before encryption
+# began. tshark decodes an alert only while it's readable - in TLS 1.2 and
+# earlier, the whole handshake; in TLS 1.3, whose handshake is encrypted
+# after the server's hello, only until the sender has its keys (an
+# OpenSSL client refusing the certificate still sends in the clear) - and
+# Suricata logs a connection's handshake but none of its alerts. So this is the only record of a client refusing the server's
+# certificate (Unknown CA, Certificate Expired...), Zeek's
+# SSL::Invalid_Server_Cert seen from the client's side, or of a server
+# turning a client away (Handshake Failure, Protocol Version). One record
+# per TCP connection that sent any.
+TLS_FAILURE_TYPE = 'tls_failure'
+_TLS_MAX_ALERTS = 10
+# An orderly close - readable only where the capture carries the session's
+# keys - is no failure
+_TLS_NOT_FAILURES = ('Close Notify',)
+
+
+class _TLSFailures:
+    def __init__(self):
+        self.flows = {}     # flow -> (first alert's time, [(sender's address, port, alert)])
+
+    def add(self, flow, src, sport, when, alerts):
+        if all(alert in _TLS_NOT_FAILURES for alert in alerts):
+            return
+        entry = self.flows.setdefault(flow, (when, []))
+        for alert in alerts:
+            if alert and alert not in _TLS_NOT_FAILURES and len(entry[1]) < _TLS_MAX_ALERTS:
+                entry[1].append((src, sport, alert))
+
+    def records(self):
+        for flow, (when, alerts) in sorted(self.flows.items(), key=lambda item: item[1][0]):
+            if not alerts:
+                continue
+            sides = ['client' if (src, sport) == (flow.client, flow.cport) else 'server' for src, sport, _ in alerts]
+            body = {'alert': alerts[0][2], 'sent_by': sides[0],
+                    'alerts': [f'{side}: {alert}' for side, (_, _, alert) in zip(sides, alerts)]}
+            yield flow.record(when, TLS_FAILURE_TYPE, body)
+
+
 _ESCAPE = re.compile(r'\\(x[0-9a-fA-F]{2}|.)')
 _ESCAPES = {'t': '\t', 'n': '\n', 'r': '\r', '\\': '\\'}
 
@@ -623,6 +667,7 @@ def iter_records(lines, pcap_path=None, deadline=None, combined=()):
     (_combined_fields, for a capture _mostly_recorded)."""
     flows = {}
     tunnels = _Tunnels()
+    tls_failures = _TLSFailures()
     last_frame = 0
     feeds = None
     if combined:
@@ -688,6 +733,8 @@ def iter_records(lines, pcap_path=None, deadline=None, combined=()):
             flow.add(src, sport, length, when, '', '', False, from_client=outer_src == flow.client)
             continue
         flow.add(src, sport, length, when, app, f[_F_CID], syn_only)
+        if proto == 'TCP' and _TLS_ALERT_COLUMN < len(cols) and cols[_TLS_ALERT_COLUMN]:
+            tls_failures.add(flow, src, sport, when, cols[_TLS_ALERT_COLUMN].split(_AGGREGATOR))
         frame = _int(f[_F_FRAME])
         flow.first_frame = flow.first_frame or frame
         flow.last_frame = last_frame = frame
@@ -728,6 +775,7 @@ def iter_records(lines, pcap_path=None, deadline=None, combined=()):
         for flow, when, event_type, body in handler.finish():
             yield flow.record(when, event_type, body)
     yield from tunnels.records()
+    yield from tls_failures.records()
 
 
 # The layers every structured-pass packet is read for, to find its flow
@@ -1421,7 +1469,7 @@ def _merge_lock(dir_path):
 
 # Bump it whenever merge_rows changes what a merge adds from the same
 # shark.db: an analysis merged by an older one is merged again.
-_MERGE_VERSION = 4
+_MERGE_VERSION = 5
 
 
 def _merge_stamp(db_path):
@@ -1451,7 +1499,7 @@ def probe_only_protocols(shark_db):
     return frozenset(app for app, kept in rows if not kept and app not in _ONE_WAY_PROTOCOLS)
 
 
-def merge_rows(shark_rows, identified, probed=frozenset()):
+def merge_rows(shark_rows, identified, probed=frozenset(), tls_records=None):
     """The rows of a shark.db (its stored JSON, one at a time) that belong
     in the analysis's events.db: records of protocols Suricata doesn't
     parse, and - as connection rows, CONNECTION_TYPE_PREFIX + protocol -
@@ -1461,11 +1509,18 @@ def merge_rows(shark_rows, identified, probed=frozenset()):
     db.suricata_identified_flows): there Suricata's word stands, as on a
     scanner's HTTP request to an rsh port, which tshark, going by the port,
     calls rsh. The connections of the protocols in probed
-    (probe_only_protocols) share one type, PROBED_CONNECTION_TYPE."""
+    (probe_only_protocols) share one type, PROBED_CONNECTION_TYPE.
+
+    The exception is TLS failures (_TLSFailures): alerts Suricata never
+    logs, kept on the flows it identified too - each with what Suricata's
+    tls record of its connection says (tls_records: Community IDs ->
+    db.suricata_tls_records), the nearest in time, so the record names the
+    certificate refused."""
     from db import CONNECTION_TYPE_PREFIX, PROBED_CONNECTION_TYPE
 
     def suricata_knows(cid, first, last):
         return any(start - 1 <= last and first <= end + 1 for start, end in identified.get(cid, ()))
+    failures = []
     for data in shark_rows:
         event = json.loads(data)
         event_type = event.get('event_type', '')
@@ -1480,12 +1535,25 @@ def merge_rows(shark_rows, identified, probed=frozenset()):
             if first is not None and suricata_knows(cid, first, last if last is not None else first):
                 continue
             event['event_type'] = PROBED_CONNECTION_TYPE if app in probed else CONNECTION_TYPE_PREFIX + app
+        elif event_type == TLS_FAILURE_TYPE:
+            failures.append(event)
+            continue
         else:
             if event_type.replace('_', '-') in SURICATA_RECORDED_APP_PROTOS:
                 continue
             when = _iso_epoch(event.get('timestamp'))
             if when is not None and suricata_knows(cid, when, when):
                 continue
+        yield event
+    known = tls_records({e['community_id'] for e in failures if e.get('community_id')}) \
+        if failures and tls_records else {}
+    for event in failures:
+        candidates = known.get(event.get('community_id'))
+        when = _iso_epoch(event.get('timestamp'))
+        if candidates and when is not None:
+            context = min(candidates, key=lambda c: abs(c[0] - when))[1]
+            body = event[TLS_FAILURE_TYPE]
+            event[TLS_FAILURE_TYPE] = {**context, **body}
         yield event
 
 
@@ -1506,7 +1574,8 @@ def merge(dir_path):
             return None
         added = replace_tshark_events(events_db, merge_rows(iter_events_json(shark_db),
                                                             suricata_identified_flows(events_db),
-                                                            probe_only_protocols(shark_db)), stamp)
+                                                            probe_only_protocols(shark_db),
+                                                            lambda cids: suricata_tls_records(events_db, cids)), stamp)
     from analysis_cache import evict_analysis_cache
     evict_analysis_cache(os.path.basename(os.path.normpath(dir_path)))
     return added

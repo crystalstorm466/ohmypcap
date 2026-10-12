@@ -2166,6 +2166,7 @@
                 dhcpv6: '#9ccc65',
                 syslog: '#ffca28',
                 dtls: '#4dd0e1',
+                tls_failure: '#ef5350',
                 rpc: '#a1887f',
                 socks: '#ab47bc',
                 radius: '#ef5350',
@@ -4139,6 +4140,27 @@
             return html;
         }
 
+        // tshark's TLS failure records (shark_analyzer._TLSFailures): one
+        // per TCP connection that sent an alert while it could still be read,
+        // with the certificate from Suricata's tls record of the connection.
+        function renderTlsFailureDetails(e) {
+            const t = e.tls_failure || {};
+            let html = htmlSection('TLS Failure Details', COLORS.EVENT.tls_failure);
+            html += htmlRowText('Alert', t.alert);
+            html += htmlRowText('Sent By', t.sent_by);
+            html += htmlRowText('Alerts', (t.alerts || []).length > 1 ? t.alerts.join(', ') : '');
+            html += htmlRowText('SNI', t.sni, 'mono');
+            if (t.version) html += htmlRow('Version', `${valueDotSpan(tlsVersionColor(t.version))}${escapeHtml(t.version)}`);
+            html += htmlRowText('Subject', t.subject, 'mono');
+            html += htmlRowText('Issuer', t.issuerdn, 'mono');
+            html += htmlRowText('SANs', (t.subjectaltname || []).join(', '), 'mono');
+            html += htmlRowText('Serial', t.serial, 'mono');
+            html += htmlRowText('Not Before', t.notbefore);
+            html += htmlRowText('Not After', t.notafter);
+            html += htmlRowText('Fingerprint', t.fingerprint, 'mono');
+            return html;
+        }
+
         // tshark's syslog records (shark_protocols.Syslog): one per message.
         function renderSyslogDetails(e) {
             const l = e.syslog || {};
@@ -4753,6 +4775,7 @@
             dhcpv6: renderDhcpv6Details,
             syslog: renderSyslogDetails,
             dtls: renderDtlsDetails,
+            tls_failure: renderTlsFailureDetails,
             socks: renderSocksDetails,
             radius: renderRadiusDetails,
             stun: renderStunDetails,
@@ -7449,6 +7472,7 @@
             dhcpv6: 'DHCPv6',
             syslog: 'Syslog',
             dtls: 'DTLS',
+            tls_failure: 'TLS Failures',
             rpc: 'ONC RPC',
             socks: 'SOCKS',
             radius: 'RADIUS',
@@ -7877,6 +7901,8 @@
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Version', 'Command', 'Destination', 'Destination Port', 'Status', 'User', 'Tunneled'];
                 case 'syslog':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Severity', 'Facility', 'Host', 'Program', 'Message'];
+                case 'tls_failure':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Alert', 'Sent By', 'SNI / Host', 'Subject', 'Issuer'];
                 case 'dhcpv6':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Message', 'Reply', 'Hostname', 'Client MAC', 'Assigned IP', 'Vendor Class', 'Result'];
                 case 'lldp':
@@ -8371,6 +8397,7 @@
                 case 'dhcpv6':
                 case 'syslog':
                 case 'dtls':
+                case 'tls_failure':
                 case 'rpc':
                 case 'socks':
                 case 'radius':
@@ -8384,7 +8411,7 @@
                 case 'xdmcp': {
                     const cols = getColumnsForType(etype).slice(6);
                     colSpan = cols.length + 6;
-                    row = rowPrefixCells(e) + cols.map(col => `<td${['Search Target', 'Location', 'User', 'Password', 'Chassis ID', 'Port ID', 'Device ID', 'Management IP', 'Hostname', 'Client MAC', 'Assigned IP', 'Host', 'Program', 'Message', 'SNI / Host', 'Subject', 'JA4', 'Machine Name', 'Destination', 'Destination Port', 'Calling Station', 'Mapped Address', 'Relayed Address', 'URI', 'Query', 'Service Type', 'Scopes', 'URL', 'Client Host', 'Firmware', 'Server Host', 'Route', 'Inner Host', 'Display Address'].includes(col) ? ' class="mono"' : ''}>${escapeHtml(extractValue(e, col))}</td>`).join('') + '</tr>';
+                    row = rowPrefixCells(e) + cols.map(col => `<td${['Search Target', 'Location', 'User', 'Password', 'Chassis ID', 'Port ID', 'Device ID', 'Management IP', 'Hostname', 'Client MAC', 'Assigned IP', 'Host', 'Program', 'Message', 'SNI / Host', 'Subject', 'JA4', 'Machine Name', 'Destination', 'Destination Port', 'Calling Station', 'Mapped Address', 'Relayed Address', 'URI', 'Query', 'Service Type', 'Scopes', 'URL', 'Client Host', 'Firmware', 'Server Host', 'Route', 'Inner Host', 'Display Address', 'Issuer'].includes(col) ? ' class="mono"' : ''}>${escapeHtml(extractValue(e, col))}</td>`).join('') + '</tr>';
                     break;
                 }
                 case 'nbns': {
@@ -10853,7 +10880,8 @@
                 case 'Source Port': return String(e.src_port || '');
                 case 'Dest IP': return e.dest_ip || '';
                 case 'Dest Port': return String(e.dest_port || '');
-                case 'Alert': return e.alert?.signature || '';
+                case 'Alert': return e.tls_failure ? e.tls_failure.alert || '' : e.alert?.signature || '';
+                case 'Sent By': return e.tls_failure?.sent_by || '';
                 case 'Category': {
                     if (e.event_type === 'modbus') return e.modbus?.request?.category || '';
                     return e.alert?.category || '';
@@ -10957,7 +10985,7 @@
                     return String(e.http?.status || '');
                 }
                 case 'User-Agent': return (e.http?.http_user_agent || '').slice(0, CONFIG.USER_AGENT_MAX_LENGTH);
-                case 'SNI / Host': return e.dtls ? e.dtls.sni || '' : e.tls?.sni || '-';
+                case 'SNI / Host': return e.dtls ? e.dtls.sni || '' : e.tls_failure ? e.tls_failure.sni || '' : e.tls?.sni || '-';
                 // DTLS: how far the handshake got, and the client's fingerprint
                 case 'Handshake': return e.dtls?.handshake || '';
                 case 'JA4': return e.dtls?.ja4 || '';
@@ -11023,7 +11051,10 @@
                     if (e.rip) return e.rip.version || '';
                     return e.tls?.version || '-';
                 }
-                case 'Issuer': return (e.tls?.issuerdn || '-').slice(0, CONFIG.TLS_SUBJECT_MAX_LENGTH);
+                case 'Issuer': {
+                    if (e.tls_failure) return (e.tls_failure.issuerdn || '').slice(0, CONFIG.TLS_SUBJECT_MAX_LENGTH);
+                    return (e.tls?.issuerdn || '-').slice(0, CONFIG.TLS_SUBJECT_MAX_LENGTH);
+                }
                 case 'Pkts →': return String(e.flow?.pkts_toserver || 0);
                 case 'Pkts ←': return String(e.flow?.pkts_toclient || 0);
                 case 'Bytes →': return String(e.flow?.bytes_toserver || 0);
@@ -11043,6 +11074,7 @@
                 case 'Subject': {
                     if (e.event_type === 'email') return e.email?.subject || '';
                     if (e.dtls) return (e.dtls.subject || '').slice(0, CONFIG.TLS_SUBJECT_MAX_LENGTH);
+                    if (e.tls_failure) return (e.tls_failure.subject || '').slice(0, CONFIG.TLS_SUBJECT_MAX_LENGTH);
                     return (e.tls?.subject || '-').slice(0, CONFIG.TLS_SUBJECT_MAX_LENGTH);
                 }
                 case 'SPF': return e.email?.spf || '';

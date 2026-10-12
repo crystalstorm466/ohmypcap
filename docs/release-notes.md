@@ -112,6 +112,14 @@ RIPv2's password, or the X authorization cookie XDMCP hands a session.
   it, which is a scanner testing whether a host unwraps tunnels from
   anyone. A tunneled packet's flows are Suricata's: the inner flow from
   the inner packet on, and the tunnel's outer flow beside it
+- **TLS Failures** (Suricata logs TLS handshakes but none of their
+  alerts) - a record for each TLS connection over TCP that sent an alert
+  while it could still be read: a client refusing the server's
+  certificate (Unknown CA, Certificate Expired, Bad Certificate...) or a
+  server turning a client away (Handshake Failure, Protocol Version),
+  with the certificate, SNI and version from Suricata's TLS record of the
+  same connection. Every TLS 1.2 refusal can be read; in TLS 1.3, which
+  encrypts the certificate, only some clients' (OpenSSL's) can
 
 **Discovery and inventory**
 
@@ -172,12 +180,15 @@ and the record's own details a click away:
   forged or replayed message); an SLP host accepting registrations
   (CVE-2023-29552)
 - **Medium** - S7 writes, IEC 104 commands and set points, OPC UA writes
-  and method calls, open SOCKS proxies, XDMCP login screens offered, RIP
-  default routes and cleartext RIPv2 passwords, tunnel probes addressed
-  back to their sender, NFS exports listed, critical syslog messages
-- **Low** - RIP tables handed out, RPC service lists, BACnet writes, SLP
-  answers, CoAP resource lists, L2TP without tunnel authentication,
-  rejected RADIUS logins
+  and method calls, a TLS certificate refused by the other end, open
+  SOCKS proxies, XDMCP login screens offered, RIP default routes and
+  cleartext RIPv2 passwords, tunnel probes addressed back to their
+  sender, NFS exports listed, critical syslog messages
+- **Low** - TLS certificates expired or not yet valid at the time of the
+  connection, and self-signed ones (from Suricata's TLS records); RIP
+  tables handed out, RPC service lists, BACnet writes, SLP answers, CoAP
+  resource lists, L2TP without tunnel authentication, rejected RADIUS
+  logins
 
 An **About Findings** card says what each rule that matched looks for. A
 search narrows the list like any other tab. No password is shown, even
