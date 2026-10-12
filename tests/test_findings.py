@@ -154,6 +154,20 @@ class TestFindings(unittest.TestCase):
             {'alerts': ['client: Unknown CA'], 'sni': 'vpn.example'})
         self.assertEqual(tls13, 'client: Unknown CA (for vpn.example)', 'TLS 1.3: no certificate to name')
 
+    def test_a_missing_value_leaves_no_label_behind(self):
+        """A detail's 'to', 'via' or '-' goes with its value when that's
+        missing - and a count is pluralized."""
+        detail = lambda rule, body: findings.RULES_BY_ID[rule].detail(body)
+        self.assertEqual(detail('iec104_control', {'action': 'Single command', 'ioa': 5}), 'Single command to IOA 5')
+        self.assertEqual(detail('bacnet_write', {'service': 'writeProperty'}), 'writeProperty')
+        self.assertEqual(detail('radius_reject', {'nas_ip': '10.1.0.2'}), 'via 10.1.0.2')
+        self.assertEqual(detail('ipmi_cipher_zero', {}), '')
+        self.assertEqual(detail('socks_open', {'request_port': 80}), 'to 80')
+        self.assertEqual(detail('rip_whole_table', {'route_count': 1}), '1 route')
+        self.assertEqual(detail('rpc_portmapper', {'mappings': [{}, {}]}), '2 services')
+        self.assertEqual(detail('tls_certificate_refused', {'alerts': ['client: Unknown CA'], 'sni': 'a.example'}),
+                         'client: Unknown CA (for a.example)')
+
     def test_counts_and_order(self):
         events = [_record('bacnet', {'service': 'writeProperty'}, i) for i in range(3)]
         events.append(_record('ipmi', {'weaknesses': ['cipher zero accepted', 'anonymous login']}, 9))

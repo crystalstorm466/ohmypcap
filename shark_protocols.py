@@ -19,6 +19,7 @@ the addresses, ports and Community ID from the flow, oriented client to
 server like its flow records.
 """
 
+import math
 import re
 import socket
 import struct
@@ -34,6 +35,16 @@ def _int(value, default=None):
         return int(value, 16) if str(value).lower().startswith('0x') else int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _finite(text):
+    """A measurement as a number - or, for one that isn't a finite number
+    (a sensor's NaN, or infinity, which JSON can't hold), as tshark wrote it."""
+    try:
+        number = float(text)
+    except ValueError:
+        return text
+    return number if math.isfinite(number) else text
 
 
 def ipv6_exploded(address):
@@ -86,6 +97,7 @@ class LLMNR:
         self.records = []        # (flow, when, event_type, body), in request order
         self.by_frame = {}       # request frame number -> its body
         self.unanswered = {}     # (asker's address, port, id, first query) -> body, until its response
+        self.unanswered_keys = {}    # id(body) -> its key in unanswered
         self.answered = {}       # the same keys, once answered -> body
 
     def feed(self, pkt, v):
@@ -103,6 +115,7 @@ class LLMNR:
             body = self.unanswered.get(key)
             if body is None:
                 body = self.unanswered[key] = {'version': 3, 'type': 'request', 'id': txid, 'queries': queries}
+                self.unanswered_keys[id(body)] = key
                 self.records.append((pkt.flow, pkt.when, kind, body))
             else:
                 body['transmissions'] = body.get('transmissions', 1) + 1
@@ -125,7 +138,9 @@ class LLMNR:
             body = {'version': 3, 'id': txid, 'queries': queries}
             self.records.append((pkt.flow, pkt.when, kind, body))
         else:
-            self.unanswered = {k: b for k, b in self.unanswered.items() if b is not body}
+            # (by its own key - the response's can differ, and rebuilding
+            # the dict for each answer was quadratic in unanswered queries)
+            self.unanswered.pop(self.unanswered_keys.pop(id(body), None), None)
         self.answered[key] = body
         body['type'] = 'response'
         body['rcode'] = _DNS_RCODES.get(_int(_first(v['dns.flags.rcode']), 0), _first(v['dns.flags.rcode']))
@@ -599,7 +614,7 @@ def _x509_name(data, start, end):
     out = []
     for _, rdn, rdn_end in _der_children(data, start, end):
         for _, atv, atv_end in _der_children(data, rdn, rdn_end):
-            (_, oid_start, oid_end), value = _der(data, atv), None
+            _, oid_start, oid_end = _der(data, atv)
             _, value_start, value_end = _der(data, oid_end)
             oid = _oid(data[oid_start:oid_end])
             text = data[value_start:value_end].decode('utf-8', 'replace')
@@ -1045,8 +1060,9 @@ class STUN:
         if kind == _STUN_ERROR and first('stun.att.error.class'):
             code = (_int(first('stun.att.error.class')) or 0) * 100 + (_int(first('stun.att.error')) or 0)
             error = f'{code} {first("stun.att.error.reason")}'.strip()
-            if error not in body.setdefault('error_codes', []):
-                body['error_codes'].append(error)
+            codes = body.setdefault('error_codes', [])
+            if error not in codes and len(codes) < _STUN_MAX_LIST:
+                codes.append(error)
         if _int(first('stun.att.lifetime')) is not None:
             body['lifetime'] = _int(first('stun.att.lifetime'))
         if kind != _STUN_SUCCESS:
@@ -1668,6 +1684,12 @@ def _rip_entries(raw):
     for pos in range(4, len(raw) - 19, 20):
         family, tag = struct.unpack('!HH', raw[pos:pos + 4])
         if family == 0xffff:
+            # The keyed-authentication trailer (type 1, RFC 4822) ends the
+            # message: everything after it is the digest - past one
+            # entry's length for HMAC-SHA-384 and -512, so read on and its
+            # bytes would come out as routes
+            if tag == 1:
+                break
             auth = auth or _RIP_AUTH.get(tag, f'type {tag}')
             continue
         address, mask, hop = (raw[pos + 4 + i:pos + 8 + i] for i in (0, 4, 8))
@@ -2226,10 +2248,7 @@ def _iec104_value(kind, text):
     if kind == 'qoi':
         return _IEC104_INTERROGATIONS.get(_int(text), text)
     if kind in ('norm', 'float'):
-        try:
-            return float(text)
-        except ValueError:
-            return text
+        return _finite(text)
     number = _int(text)
     return number if number is not None else text
 
@@ -2517,10 +2536,7 @@ class BACnet:
         if field.endswith('.enum_index') and obj and obj.split(',')[0] in _BACNET_BINARY_OBJECTS:
             return {'0': 'inactive', '1': 'active'}.get(text, text)
         if field.endswith(('.real', '.double')):
-            try:
-                return float(text)
-            except ValueError:
-                return text
+            return _finite(text)
         if field.endswith('.boolean'):
             return text in ('1', 'True')
         if field.endswith('.char_string'):
@@ -3425,9 +3441,9 @@ def _pdus(layer):
 # Every protocol with records here, from tshark's fields, in the order their
 # fields follow the base fields in tshark's output.
 PROTOCOLS = (LLMNR, NBNS, DHCPv6, Syslog, DTLS, RPC, SOCKS, RADIUS, STUN, CoAP, SLP, IPMI, L2TP, RIP, XDMCP, SSDP, S7comm, Telnet, IEC104, BACnet, GOOSE, Browser, LLDP, CDP)
-# ... and from the structured pass (shark_analyzer._structured_pass): none
-# yet - it's for a protocol whose messages nest, which flat fields can't
-# keep apart (several commands per packet, a token inside a command).
+# ... and from the structured pass (shark_analyzer._structured_pass): for
+# a protocol whose messages nest, which flat fields can't keep apart
+# (several commands per packet, a token inside a command).
 STRUCTURED_PROTOCOLS = (OPCUA,)
 # Flow application protocols with transaction records here - every other
 # one gets a connection tab (db.CONNECTION_TYPE_PREFIX) instead.

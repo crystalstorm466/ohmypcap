@@ -1,8 +1,9 @@
 """In-memory caches of per-analysis query results.
 
 Cache of the unfiltered (no search query) Sankey/aggregation result per
-(md5, event_type) - the events table is written once by create_sqlite_db
-and never mutated afterward except by delete/reanalyze (both evict), so
+(md5, event_type) - what those queries read changes only when tshark's
+rows are merged in, an alert is acknowledged or un-acknowledged, or the
+analysis is deleted or reanalyzed, and each of those evicts it - so
 caching it is safe and turns every repeat tab-view after the first into a
 no-op instead of a multi-hundred-ms SQL recomputation.
 """

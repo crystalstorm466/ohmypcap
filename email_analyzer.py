@@ -420,13 +420,17 @@ def _parse_into(msg, depth, fallback_ts, events, attachments, budget, skipped, h
             links.append((_clean_url(url), '', 'text'))
 
     link_events = []
+    with_text = {u for u, t in seen if t}
     for url, text, source in links:
         if (url, text) in seen:
             continue
         seen.add((url, text))
+        if text:
+            with_text.add(url)
         # A bare URL in text repeats an <a> already seen - keep the one
-        # that has visible text to compare against.
-        if not text and any(u == url for u, t in seen if t):
+        # that has visible text to compare against. (A set, not a scan of
+        # seen: a message of 20,000 distinct URLs took seconds that way.)
+        if not text and url in with_text:
             continue
         if not budget['links']:
             skipped['links'] += 1

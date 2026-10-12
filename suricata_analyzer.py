@@ -893,7 +893,7 @@ def spawn_suricata(dir_path, pcap_path, suricata_config_path=None, data_dir=None
     if shark_analyzer.enabled(data_dir) and shark_analyzer.background_eligible(pcap_path):
         shark_analyzer.enqueue(dir_path, pcap_path)
 
-    def on_suricata_done():
+    def on_suricata_done(returncode=0):
         # Phase 2: Run YARA scan on extracted files
         _set_phase(dir_path, 'files')
         try:
@@ -917,6 +917,11 @@ def spawn_suricata(dir_path, pcap_path, suricata_config_path=None, data_dir=None
                     os.unlink(eve_file)
                 except OSError:
                     pass
+        elif not os.path.exists(db_file):
+            # Nothing to import: without an error, the analysis would read
+            # as still processing forever (a bad config or rule file, a
+            # pcap Suricata rejects, Suricata killed)
+            _set_error(dir_path, f'Suricata wrote no results (exit code {returncode})')
         # Clear phase only after DB (with YARA matches) is ready
         _clear_phase(dir_path)
         # If tshark finished first, its rows join Suricata's now (otherwise
@@ -948,7 +953,7 @@ def spawn_suricata(dir_path, pcap_path, suricata_config_path=None, data_dir=None
                     _set_error(dir_path, f'Suricata timed out after {config.SURICATA_RUN_TIMEOUT}s')
                     _clear_phase(dir_path)
                     return
-                on_suricata_done()
+                on_suricata_done(proc.returncode)
             except Exception as e:
                 # This runs in a daemon thread, where an uncaught exception
                 # is silently swallowed (never surfaced to the user or to

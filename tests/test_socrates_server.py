@@ -877,6 +877,10 @@ class TestAPIEndpoints(unittest.TestCase):
 
         status, _ = self._get('/api/findings?md5=../etc/passwd')
         self.assertEqual(status, 400)
+        # a port that isn't ASCII digits - '²' passes str.isdigit but not int()
+        for port in ('%C2%B2', 'abc', '-1'):
+            status, _ = self._get(f'/api/findings?md5={md5}&rule=tunnel_return&detail=GRE&dest_ip=5.6.7.8&dest_port={port}')
+            self.assertEqual(status, 400, port)
 
     def test_events_all_types_excludes_stats_row(self):
         md5 = '11223344556677889900aabbccddeeff'
@@ -2605,6 +2609,27 @@ bright_magenta = "#D9B9D9"
             events = db.query_events_sqlite(os.path.join(md5dir, 'events.db'))
             self.assertEqual([e['id'] for e in events], [event_id])
         finally:
+            shutil.rmtree(md5dir, ignore_errors=True)
+
+    def test_acknowledging_evicts_the_cached_unfiltered_results(self):
+        """The cached Sankey and aggregation results were computed with the
+        old acknowledged set - so they go, both ways and in bulk too."""
+        import analysis_cache
+        md5 = hashlib.md5(b'ack_evicts_cache').hexdigest()
+        md5dir, event_id, _ = self._make_events_db_with_rows(md5)
+        cached = lambda: any(k[0] == md5 for cache in analysis_cache.ALL_CACHES for k in cache)
+        try:
+            for path, body in (('/api/acknowledge-alert', {'acknowledged': True, 'rowId': event_id}),
+                               ('/api/acknowledge-alert', {'acknowledged': False, 'rowId': event_id}),
+                               ('/api/acknowledge-alerts-bulk', {'rowIds': [event_id]})):
+                status, _ = self._get(f'/api/sankey-data?md5={md5}&type=alert')
+                self.assertEqual(status, 200)
+                self.assertTrue(cached(), 'the Sankey result is cached')
+                status, _ = self._post(path, dict(body, md5=md5, table='events'))
+                self.assertEqual(status, 200)
+                self.assertFalse(cached(), path)
+        finally:
+            analysis_cache.evict_analysis_cache(md5)
             shutil.rmtree(md5dir, ignore_errors=True)
 
     def test_acknowledge_alerts_bulk_invalid_row_ids_type_returns_400(self):
@@ -5149,6 +5174,32 @@ class TestSpawnSuricataErrorHandling(unittest.TestCase):
             self.assertEqual(mock_proc.wait.call_count, 2,
                              'proc.wait() must be called again after kill() to reap the process, not just once before the timeout')
 
+    def test_suricata_writing_no_results_is_an_error_not_processing_forever(self):
+        """REGRESSION: Suricata exiting without an eve.json (a bad config
+        or rule file, a pcap it rejects, killed) left no events.db, no
+        .phase and no .error - an analysis reported as processing forever."""
+        import unittest.mock
+        import time
+        from suricata_analyzer import spawn_suricata
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pcap_path = os.path.join(tmpdir, 'test.pcap')
+            with open(pcap_path, 'wb') as f:
+                f.write(b'\xd4\xc3\xb2\xa1' + b'\x00' * 100)
+            mock_proc = unittest.mock.MagicMock()
+            mock_proc.wait.return_value = None
+            mock_proc.returncode = 1
+            with unittest.mock.patch('subprocess.Popen', return_value=mock_proc), \
+                    unittest.mock.patch('suricata_analyzer.run_yara_pipeline'):
+                self.assertTrue(spawn_suricata(tmpdir, pcap_path))
+                error_file = os.path.join(tmpdir, '.error')
+                for _ in range(50):
+                    if os.path.exists(error_file) and not os.path.exists(os.path.join(tmpdir, '.phase')):
+                        break
+                    time.sleep(0.1)
+            with open(error_file) as f:
+                self.assertEqual(f.read(), 'Suricata wrote no results (exit code 1)')
+            self.assertFalse(os.path.exists(os.path.join(tmpdir, '.phase')))
+
     def test_watchdog_clears_phase_on_unexpected_non_timeout_exception(self):
         """REGRESSION: _suricata_watchdog only caught subprocess.TimeoutExpired
         around proc.wait() - any other exception occurring anywhere in the
@@ -5503,14 +5554,14 @@ class TestSuricataProcessingLock(unittest.TestCase):
     def test_error_set_on_yara_failure(self):
         with open(SURICATA_FILE, 'r') as f:
             content = f.read()
-        on_done = content.split("def on_suricata_done():")[1].split("\n    try:")[0]
+        on_done = content.split("def on_suricata_done(returncode=0):")[1].split("\n    try:")[0]
         self.assertIn("_set_error", on_done,
                       'YARA failure must write error file')
 
     def test_error_set_on_db_failure(self):
         with open(SURICATA_FILE, 'r') as f:
             content = f.read()
-        on_done = content.split("def on_suricata_done():")[1].split("\n    try:")[0]
+        on_done = content.split("def on_suricata_done(returncode=0):")[1].split("\n    try:")[0]
         self.assertIn("create_sqlite_db", on_done,
                       'DB creation must be in callback')
         self.assertIn("_set_error", on_done,

@@ -896,9 +896,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         group = None
         if params.get('rule', [''])[0]:
             port = params.get('dest_port', [''])[0]
+            if port and not (port.isascii() and port.isdigit()):
+                self._send_error(400, 'Invalid dest_port')
+                return
             group = {'rule': params['rule'][0], 'detail': params.get('detail', [''])[0],
                      'dest_ip': params.get('dest_ip', [''])[0],
-                     'dest_port': int(port) if port.isdigit() else None}
+                     'dest_port': int(port) if port else None}
 
         db_file = os.path.join(dir_path, 'events.db')
         if not os.path.exists(db_file):
@@ -1549,7 +1552,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         an alert from view (rather than just flagging it) happens entirely
         as a side effect of set_acknowledged() feeding into every read
         query's own WHERE clause (see db.py's _build_where_conditions/
-        _sigma_alert_where) - nothing else needs updating here.
+        _sigma_alert_where) - but the cached unfiltered Sankey and
+        aggregation results were computed with the old set, so they go.
         """
         data = self._read_json_body(config.MAX_REQUEST_BODY_SIZE)
         if data is None:
@@ -1578,6 +1582,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         except (OSError, sqlite3.Error):
             self._send_error(500, 'Could not update acknowledged state')
             return
+        evict_analysis_cache(md5)
         self._send_json({'success': True, 'acknowledged': acknowledged})
 
     def handle_post_acknowledge_alerts_bulk(self):
@@ -1623,6 +1628,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         except (OSError, sqlite3.Error):
             self._send_error(500, 'Could not update acknowledged state')
             return
+        evict_analysis_cache(md5)
         self._send_json({'success': True, 'count': len(row_ids)})
 
     # Dedupe key -> True for CSP violations already logged this run, so a
@@ -2607,6 +2613,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self._send_json(response)
 
     def _shark_status(self, dir_path, start=False):
+        """_shark_status_raw, with an error's message redacted of server
+        paths as Suricata's .error is (tshark's stderr names the capture's
+        full path, editcap's failures their whole command line)."""
+        status = self._shark_status_raw(dir_path, start)
+        if isinstance(status.get('message'), str):
+            status['message'] = _sanitize_error_text(status['message'])
+        return status
+
+    def _shark_status_raw(self, dir_path, start=False):
         """Where tshark stands for a PCAP analysis (see shark_analyzer.status),
         with 'merged' once it's ready: whether its rows have joined
         Suricata's in events.db (if not, the merge is started).

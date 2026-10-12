@@ -8,6 +8,7 @@ import json
 import os
 import sqlite3
 import shutil
+import socket
 import struct
 import subprocess
 import sys
@@ -2184,6 +2185,72 @@ class TestIsoTimes(unittest.TestCase):
             self.assertEqual(shark_analyzer._iso(epoch),
                              datetime.fromtimestamp(epoch, tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f+0000'),
                              repr(epoch))
+
+
+class TestHostileInput(unittest.TestCase):
+    """What a capture's own contents mustn't be able to do: fail the whole
+    run, or put secret material in a record."""
+
+    def test_a_ripv2_keyed_digest_never_comes_out_as_routes(self):
+        """An HMAC-SHA-512 trailer (RFC 4822) runs past one entry's 20
+        bytes - read on past it, the digest's bytes were routes."""
+        from shark_protocols import _rip_entries
+        digest = bytes(range(0xa0, 0xa0 + 64))
+        message = (bytes([2, 2, 0, 0])
+                   + struct.pack('!HHHBBI', 0xffff, 3, 100, 1, 68, 7) + bytes(8)          # keyed authentication
+                   + struct.pack('!HH', 2, 0) + socket.inet_aton('10.2.0.0') + socket.inet_aton('255.255.0.0')
+                   + bytes(4) + struct.pack('!I', 1)
+                   + struct.pack('!HH', 0xffff, 1) + digest)                               # the trailer
+        command, version, auth, entries = _rip_entries(message)
+        self.assertEqual(auth, 'keyed MD5')
+        self.assertEqual([e[1] for e in entries], ['10.2.0.0/16'], 'the route, and nothing after the trailer')
+
+    def test_a_measurement_that_isnt_a_finite_number_stays_text(self):
+        """A sensor's NaN or infinity - which JSON can't hold - kept as
+        tshark wrote it, not stored as invalid JSON."""
+        from shark_protocols import _finite
+        self.assertEqual([_finite(t) for t in ('21.5', 'nan', 'inf', '-inf', 'x')], [21.5, 'nan', 'inf', '-inf', 'x'])
+        self.assertEqual(json.loads(json.dumps({'v': _finite('nan')})), {'v': 'nan'})
+
+    def test_a_timestamp_past_the_year_9999_is_clamped(self):
+        for epoch, text in ((1e15, '9999-12-31T23:59:59.999999+0000'), (float('inf'), '9999-12-31T23:59:59.999999+0000'),
+                            (-1e15, '0001-01-01T00:00:00.000000+0000'), (float('nan'), '0001-01-01T00:00:00.000000+0000')):
+            self.assertEqual(shark_analyzer._iso(epoch), text)
+
+    @unittest.skipUnless(HAS_TSHARK, 'tshark not installed')
+    def test_a_capture_cut_off_mid_packet_keeps_what_was_read(self):
+        """tshark exits 2 at a capture's cut-off end, having read every
+        packet before it - a partial upload, a capture stopped mid-write."""
+        from tests.protocol_fixtures import write_extra_pcap
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(d, ignore_errors=True))
+        whole, cut = os.path.join(d, 'whole.pcap'), os.path.join(d, 'cut.pcap')
+        write_extra_pcap(whole)
+        with open(whole, 'rb') as f:
+            data = f.read()
+        with open(cut, 'wb') as f:
+            f.write(data[:-10])
+        records = shark_analyzer.run_tshark(cut)
+        self.assertTrue(any(r['event_type'] == 's7comm' for r in records))
+        self.assertTrue(shark_analyzer.build(d, cut))
+        self.assertFalse(shark_analyzer._read_to_damage(1, 'appears to have been cut short in the middle of a packet'))
+        self.assertFalse(shark_analyzer._read_to_damage(2, 'tshark: Some other failure'))
+
+    def test_llmnr_drops_an_answered_query_by_its_own_key(self):
+        """Answered, a query leaves the unanswered ones - looked up by its
+        key, not by rebuilding them all for each answer."""
+        from shark_protocols import LLMNR, Packet
+        llmnr = LLMNR()
+        flow = shark_analyzer._Flow(('k',), 'UDP', 4, '10.0.0.5', '224.0.0.252', 50000, 5355, 1.0, '0')
+        fields = {f: [] for f in LLMNR.fields}
+        query = dict(fields, **{'dns.id': ['0x1'], 'dns.qry.name': ['wpad'], 'dns.qry.type': ['1'],
+                                'dns.flags.response': ['False']})
+        for port in range(50000, 50100):
+            llmnr.feed(Packet(port, 1.0, flow, port, 5355, 'llmnr', '10.0.0.5', '224.0.0.252'), query)
+        answer = dict(query, **{'dns.flags.response': ['True'], 'dns.flags.rcode': ['0']})
+        llmnr.feed(Packet(9999, 1.1, flow, 5355, 50007, 'llmnr', '10.0.0.9', '10.0.0.5'), answer)
+        self.assertEqual(len(llmnr.unanswered), 99)
+        self.assertEqual(len(llmnr.unanswered_keys), 99)
 
 
 class TestMergeRows(unittest.TestCase):

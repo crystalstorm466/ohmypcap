@@ -398,8 +398,8 @@ def create_sqlite_db(db_path, eve_file):
                 print(f'Warning: could not parse file_metadata.json: {e}')
 
         # Built after the bulk insert, not before - incrementally maintaining
-        # 6 extra indexes across a million single-row inserts is much slower
-        # than one bulk build at the end (measured ~9.8s for all 6 on 1M rows).
+        # 7 extra indexes across a million inserts is much slower
+        # than one bulk build at the end (measured ~9.8s for 6 of them on 1M rows).
         _ensure_flow_json_indexes(conn)
         conn.execute('PRAGMA optimize;')
         conn.commit()
@@ -627,7 +627,8 @@ def create_email_analysis_db(db_path, events):
         conn.commit()
 
 
-# shark.db is a staging store: read whole by the merge (in id order) and
+# shark.db is a staging store: read by the merge (in id order - all but the
+# flows it would drop, shark_analyzer._mergeable_rows) and
 # for its flows by type (shark_analyzer.probe_only_protocols) - never
 # searched, sorted or paged. So it has events.db's table but none of its
 # indexes but the event type's, and no full-text index: those cost most of

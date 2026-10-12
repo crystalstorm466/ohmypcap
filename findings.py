@@ -26,11 +26,11 @@ SEVERITIES = ('high', 'medium', 'low')
 # A rule's matches are grouped: the same detail on the same server (one
 # certificate seen 200 times, one PLC written all day) is one finding,
 # with how many records, from how many source hosts, and their first and
-# last time. Groups shown per rule, and records listed for one group - the
-# counts are always exact
+# last time. Groups shown per rule, and records listed for one group
 MAX_PER_RULE = 500
-# Matches read per rule to group them - past this, a rule's groups are
-# those of its first MAX_SCAN records (the counts stay exact)
+# Matches read per rule to group them - past this, a rule's groups (and
+# each group's counts and times) are those of its first MAX_SCAN records;
+# only the rule's own count of records is always exact
 MAX_SCAN = 100_000
 
 
@@ -50,12 +50,27 @@ def _in(event_type, path, values):
     return f'{_j(event_type, path)} IN ({quoted})'
 
 
+_NOTHING = (None, '', [], {})
+
+
 def _join(*parts):
-    return ' '.join(str(p) for p in parts if p not in (None, '', [], {}))
+    """A detail line from its parts, leaving out the empty ones - and a
+    (label, value) pair whole when its value is empty, so a missing value
+    leaves no 'to', 'via' or '-' dangling."""
+    out = []
+    for part in parts:
+        if isinstance(part, tuple):
+            label, value = part
+            if value not in _NOTHING:
+                out.append(f'{label} {value}')
+        elif part not in _NOTHING:
+            out.append(str(part))
+    return ' '.join(out)
 
 
-def _items(count):
-    return f"{count} {'item' if count == 1 else 'items'}" if count else ''
+def _counted(count, noun):
+    """'1 route', '3 routes' - or '' with no count."""
+    return '' if count in _NOTHING else f"{count} {noun}{'' if count == 1 else 's'}"
 
 
 def _list(values, limit=3):
@@ -94,7 +109,7 @@ _SNI = f"lower({_j('tls', 'sni')})"
 _SUBJECT_CN_REST = f"substr({_j('tls', 'subject')}, instr({_j('tls', 'subject')}, 'CN=') + 3)"
 _SUBJECT_CN = (f"lower(CASE WHEN instr({_SUBJECT_CN_REST}, ', ') > 0 "
                f"THEN substr({_SUBJECT_CN_REST}, 1, instr({_SUBJECT_CN_REST}, ', ') - 1) ELSE {_SUBJECT_CN_REST} END)")
-_HAS_SANS = f"json_array_length(json_data, '$.tls.subjectaltname') > 0"
+_HAS_SANS = "json_array_length(json_data, '$.tls.subjectaltname') > 0"
 # A certificate that doesn't name the host the client asked for: its SANs,
 # when it has any - or else its subject's CN (RFC 6125) - cover no match
 # for the SNI. Not an SNI that's an address (some clients send one, which
@@ -114,8 +129,8 @@ def _tls_certificate(b):
     return _join(b.get('subject'), f"(for {b['sni']})" if b.get('sni') else '')
 
 
-_DEFAULT_ROUTE = (f"EXISTS (SELECT 1 FROM json_each(json_data, '$.rip.routes') "
-                  f"WHERE value LIKE '0.0.0.0/0 %' OR value LIKE '::/0 %')")
+_DEFAULT_ROUTE = ("EXISTS (SELECT 1 FROM json_each(json_data, '$.rip.routes') "
+                  "WHERE value LIKE '0.0.0.0/0 %' OR value LIKE '::/0 %')")
 
 
 class Rule:
@@ -131,7 +146,7 @@ class Rule:
 RULES = (
     Rule('ipmi_cipher_zero', 'high', 'ipmi', 'IPMI accepts cipher zero',
          _has('ipmi', 'weaknesses', ['cipher zero accepted']),
-         lambda b: _join('privilege', b.get('requested_privilege')),
+         lambda b: _join(('privilege', b.get('requested_privilege'))),
          "An IPMI 2.0 controller that accepts cipher suite 0 logs anyone in with any password "
          "(CVE-2013-4782)."),
     Rule('ipmi_anonymous', 'high', 'ipmi', 'IPMI allows anonymous logins',
@@ -146,7 +161,7 @@ RULES = (
          'An IPMI 1.5 login with no authentication, or with the password sent as it is.'),
     Rule('opcua_cleartext_password', 'high', 'opcua', 'OPC UA password sent unencrypted',
          f"{_j('opcua', 'password')} IS NOT NULL",
-         lambda b: _join('user', b.get('username'), 'on', b.get('endpoint')),
+         lambda b: _join(('user', b.get('username')), ('on', b.get('endpoint'))),
          'The login password crossed the network readable - anyone on the path has it.'),
     Rule('telnet_login', 'high', 'telnet', 'Telnet login in the clear',
          f"(coalesce({_j('telnet', 'username')}, '') != '' OR coalesce({_j('telnet', 'password')}, '') != '')",
@@ -180,7 +195,7 @@ RULES = (
     Rule('tls_certificate_refused', 'medium', 'tls_failure', 'TLS certificate refused',
          _has('tls_failure', 'alerts', [f'{side}: {a}' for side in ('client', 'server') for a in _TLS_CERT_ALERTS]),
          lambda b: _join(next((a for a in b.get('alerts', ()) if a.split(': ', 1)[-1] in _TLS_CERT_ALERTS), ''),
-                         '-' if b.get('subject') else '', _tls_certificate(b)),
+                         ('-', b.get('subject')), f"(for {b['sni']})" if b.get('sni') else ''),
          "One end refused the other's certificate - untrusted (Unknown CA), expired, revoked or otherwise bad. "
          "Self-signed devices, TLS-inspecting proxies and someone in the middle all look like this. Seen "
          "where the alert went out readable: always in TLS 1.2 and earlier, and in TLS 1.3 from some clients "
@@ -188,23 +203,23 @@ RULES = (
     Rule('s7_write', 'medium', 's7comm', 'S7 PLC memory written',
          _in('s7comm', 'function', ['Write Var']),
          lambda b: _list(i.get('area') for i in b.get('items', ()) if i.get('area'))
-         or _items(b.get('item_count') or (b.get('response') or {}).get('item_count')),
+         or _counted(b.get('item_count') or (b.get('response') or {}).get('item_count'), 'item'),
          "Values written straight into a Siemens PLC's memory."),
     Rule('iec104_control', 'medium', 'iec104', 'IEC 104 control command',
          _in('iec104', 'action', list(_IEC104_CONTROL)),
-         lambda b: _join(b.get('action'), 'to IOA', b.get('ioa'), '-', b.get('result')),
+         lambda b: _join(b.get('action'), ('to IOA', b.get('ioa')), ('-', b.get('result'))),
          'A command or set point sent to a substation - switching or adjusting equipment.'),
     Rule('opcua_change', 'medium', 'opcua_action', 'OPC UA write or method call',
          '1',
-         lambda b: _join(b.get('service'), b.get('node'), '-', b.get('result')),
+         lambda b: _join(b.get('service'), b.get('node'), ('-', b.get('result'))),
          'A client changed a node, called a method, or added or deleted nodes.'),
     Rule('socks_open', 'medium', 'socks', 'SOCKS proxy without authentication',
          f"{_j('socks', 'auth_method')} = 'no authentication' AND {_j('socks', 'status')} = 'succeeded'",
-         lambda b: _join('to', b.get('request_name') or b.get('request_host'), b.get('request_port')),
+         lambda b: _join(('to', _join(b.get('request_name') or b.get('request_host'), b.get('request_port')))),
          'An open proxy relays anyone - often how traffic is laundered through a host.'),
     Rule('xdmcp_offered', 'medium', 'xdmcp', 'XDMCP login screen offered',
          _in('xdmcp', 'result', ['willing', 'accepted', 'managed']),
-         lambda b: _join(b.get('server_host_name'), '-', b.get('result')),
+         lambda b: _join(b.get('server_host_name'), ('-', b.get('result'))),
          "An X login manager answering the network hands out a graphical login, unencrypted."),
     Rule('rip_default_route', 'medium', 'rip', 'RIP default route announced',
          _DEFAULT_ROUTE,
@@ -213,7 +228,7 @@ RULES = (
          'from a router, not from any other host.'),
     Rule('rip_cleartext_password', 'medium', 'rip', 'RIPv2 password in the clear',
          f"{_j('rip', 'authentication')} = 'simple password'",
-         lambda b: _join(b.get('route_count'), 'routes'),
+         lambda b: _counted(b.get('route_count'), 'route'),
          'Simple-password authentication sends the password readable with every update.'),
     Rule('tunnel_return', 'medium', 'tunnel', 'Tunnel packet addressed back to its sender',
          f"{_j('tunnel', 'returns_to_sender')} = 1",
@@ -226,7 +241,7 @@ RULES = (
          "A host listing its NFS shares to whoever asked."),
     Rule('syslog_critical', 'medium', 'syslog', 'Critical syslog message',
          _in('syslog', 'severity', ['emerg', 'alert', 'crit']),
-         lambda b: _join(b.get('hostname'), b.get('program'), '-', (b.get('message') or '')[:120]),
+         lambda b: _join(b.get('hostname'), b.get('program'), ('-', (b.get('message') or '')[:120])),
          'A device logging an emergency, alert or critical condition.'),
 
     Rule('tls_self_signed', 'medium', 'tls', 'TLS self-signed certificate',
@@ -237,32 +252,32 @@ RULES = (
 
     Rule('tls_certificate_out_of_date', 'low', 'tls', 'TLS certificate expired or not yet valid',
          _TLS_OUT_OF_DATE,
-         lambda b: _join('valid', (b.get('notbefore') or '?')[:10], 'to', (b.get('notafter') or '?')[:10], '-',
-                         _tls_certificate(b)),
+         lambda b: _join('valid', (b.get('notbefore') or '?')[:10], 'to', (b.get('notafter') or '?')[:10],
+                         ('-', _tls_certificate(b))),
          'The server offered a certificate outside its validity dates at the time - a forgotten renewal, a '
          'device with its clock wrong, or a certificate made up on the spot.'),
     Rule('tls_name_mismatch', 'low', 'tls', "TLS certificate doesn't name the host",
          _TLS_NAME_MISMATCH,
-         lambda b: _join('asked for', b.get('sni'), '- certificate for',
-                         _list(b.get('subjectaltname')) or b.get('subject')),
+         lambda b: _join(('asked for', b.get('sni')),
+                         ('- certificate for', _list(b.get('subjectaltname')) or b.get('subject'))),
          "The client asked for one host and got a certificate for others - a server's default certificate, "
          "a shared host or CDN that doesn't serve that name, or someone in the middle answering for it."),
     Rule('rip_whole_table', 'low', 'rip', 'RIP routing table handed out',
          f"{_j('rip', 'whole_table')} = 1 AND {_j('rip', 'responses')} IS NOT NULL",
-         lambda b: _join(b.get('route_count'), 'routes'),
+         lambda b: _counted(b.get('route_count'), 'route'),
          'A router answered a request for its whole table - a map of the network for the asking.'),
     Rule('rpc_portmapper', 'low', 'rpc', 'RPC services listed',
          f"{_j('rpc', 'mappings')} IS NOT NULL",
-         lambda b: _join(len(b.get('mappings') or ()), 'services'),
+         lambda b: _counted(len(b.get('mappings') or ()), 'service'),
          "A portmapper listing every RPC service the host runs."),
     Rule('bacnet_write', 'low', 'bacnet', 'BACnet property or file written',
          _in('bacnet', 'service', ['writeProperty', 'writePropertyMultiple', 'atomicWriteFile']),
-         lambda b: _join(b.get('service'), b.get('object'), b.get('property'), '-', b.get('result')),
+         lambda b: _join(b.get('service'), b.get('object'), b.get('property'), ('-', b.get('result'))),
          "Routine in building automation, but how a controller's setpoints and schedules are "
          "changed."),
     Rule('slp_answered', 'low', 'slp', 'SLP service answers',
          f"{_j('slp', 'response')} IS NOT NULL AND {_j('slp', 'function')} != 'Service Registration'",
-         lambda b: _join(b.get('function'), '-', b.get('status')),
+         lambda b: _join(b.get('function'), ('-', b.get('status'))),
          'Exposed to the internet, SLP is how scanners find ESXi hosts and amplifiers.'),
     Rule('coap_discovery', 'low', 'coap', 'CoAP resources listed',
          f"{_j('coap', 'resources')} IS NOT NULL",
@@ -270,11 +285,11 @@ RULES = (
          "A device answering /.well-known/core with what it serves."),
     Rule('l2tp_no_auth', 'low', 'l2tp', 'L2TP tunnel without tunnel authentication',
          f"{_j('l2tp', 'state')} = 'established' AND {_j('l2tp', 'tunnel_authentication')} IS NULL",
-         lambda b: _join(b.get('client_host_name'), 'to', b.get('server_host_name')),
+         lambda b: _join(b.get('client_host_name'), ('to', b.get('server_host_name'))),
          "Common, with IPsec protecting it - seen at all, this control connection is outside IPsec."),
     Rule('radius_reject', 'low', 'radius', 'RADIUS login rejected',
          f"{_j('radius', 'result')} = 'rejected'",
-         lambda b: _join('user', b.get('user'), 'via', b.get('nas_ip')),
+         lambda b: _join(('user', b.get('user')), ('via', b.get('nas_ip'))),
          'Many of them, for many users, is password guessing.'),
 )
 
@@ -312,7 +327,9 @@ def _detail(rule, event):
 
 
 def _group_key(event, detail):
-    return detail, event.get('dest_ip') or '', event.get('dest_port')
+    # (no port and port 0 alike, as events.db stores them - and as a
+    # group's own records are looked up)
+    return detail, event.get('dest_ip') or '', event.get('dest_port') or 0
 
 
 def _matches(conn, rule, terms, has_fts, group=None, limit=MAX_SCAN):

@@ -12165,6 +12165,27 @@ class TestFindingsTab(unittest.TestCase):
         self.assertTrue(result['openedVisible'])
         self.assertIn('CN=lab.example', result['openedText'])
 
+    def test_a_filter_refresh_on_findings_keeps_the_findings_view(self):
+        """REGRESSION: removing a filter chip while on Findings ran the
+        generic events builder for type 'findings' - an empty events table
+        in its place."""
+        from tests.jsdom_helper import js_statements
+        result = js_statements('''
+            await new Promise(function(r) { setTimeout(r, 100); });
+            document.getElementById('inputBoxes').style.display = 'none';
+            currentMd5 = 'abc123';
+            ''' + self._mock_fetch_js(self.FINDINGS) + '''
+            buildSections();
+            await loadTabData('findings');
+            await refreshCurrentView('section-findings', 'findings');
+            var sectionEl = document.getElementById('section-findings');
+            window.__jsdom_result = {
+                rows: sectionEl.querySelectorAll('tbody tr[data-id]').length,
+                about: sectionEl.textContent.indexOf('About Findings') >= 0,
+            };
+        ''')
+        self.assertEqual(result, {'rows': 2, 'about': True})
+
     def test_findings_empty_state(self):
         from tests.jsdom_helper import js_statements
         result = js_statements('''
@@ -12225,6 +12246,34 @@ class TestFindingsTab(unittest.TestCase):
             window.__jsdom_result = ids;
         ''')
         self.assertEqual(result, ['6', '9'])
+
+
+class TestReviewRegressions(unittest.TestCase):
+    """Bugs the 5.0.0 source review found in the page's own logic."""
+
+    def test_html_row_text_shows_a_zero(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements('''
+            var text = function(v) { var d = document.createElement('div'); d.innerHTML = htmlRowText('Write Data', v); return d.textContent; };
+            window.__jsdom_result = [text(0), text('0'), text(''), text(null), text(undefined), text(false), text(7)];
+        ''')
+        self.assertEqual(result, ['Write Data0', 'Write Data0', 'Write Data', 'Write Data', 'Write Data', 'Write Data',
+                                  'Write Data7'])
+
+    def test_escape_on_the_welcome_screen_keeps_dont_show_help_again(self):
+        """REGRESSION: closeAllModals closed Help unconditionally - which
+        saves the welcome screen's 'show again' checkbox, back at its
+        checked default when Help wasn't shown, so an Escape there undid
+        'don't show this again'."""
+        from tests.jsdom_helper import js_statements
+        result = js_statements('''
+            safeStorageSet(localStorage, 'socrates_hideHelp', 'true');
+            document.getElementById('helpModal').classList.remove('active');
+            document.getElementById('helpShowAgain').checked = true;
+            closeAllModals();
+            window.__jsdom_result = safeStorageGet(localStorage, 'socrates_hideHelp');
+        ''')
+        self.assertEqual(result, 'true')
 
 
 class TestDnsHeuristicsTab(unittest.TestCase):
@@ -18337,8 +18386,11 @@ class TestUserConfigurableQueryLimit(unittest.TestCase):
         eval calls in the JSDOM test harness (unlike the var-scoped globals),
         so this is verified via source inspection rather than execution."""
         func = JS_CONTENT.split('async function saveSettings()')[1].split('function showAnalysisUI')[0]
-        self.assertIn('if (currentMd5)', func,
-                      'saveSettings must only refresh the loaded analysis when one is actually loaded')
+        self.assertIn('if (currentMd5 && !isWelcomeScreen())', func,
+                      'saveSettings must only refresh an analysis that is loaded and on screen - from the welcome '
+                      "screen, currentMd5 is still set and the refresh drew the last analysis's cards over it")
+        self.assertIn("getUserQueryLimit() !== previousQueryLimit", func,
+                      'and only when the query limit actually changed')
         self.assertIn('await refreshAnalysisData()', func)
 
     def test_saveSettings_disables_save_button_around_refresh(self):

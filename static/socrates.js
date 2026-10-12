@@ -2632,6 +2632,9 @@
             if (sankeyPanel && !isLogAnalysisMode) sankeyPanel.style.display = '';
             const aggContainer = document.getElementById('aggregations');
             if (aggContainer) aggContainer.innerHTML = AGG_COLLAPSED_HTML;
+            // (and an earlier tab's aggregations still on their way don't
+            // land here when they arrive)
+            bumpAggregationFetchGeneration();
 
             if (eventType === 'acknowledged') {
                 await buildAcknowledgedAlertsSection();
@@ -3599,7 +3602,9 @@
         // collide with something read genuinely doesn't need to worry
         // about it, since only these two call sites ever set it.
         function htmlRowText(label, text, className, style, dynamicField) {
-            const value = String(text || '');
+            // A 0 is a value (Modbus write data, a DNP3 address) - only
+            // nothing, or false, leaves the row blank
+            const value = text === undefined || text === null || text === false ? '' : String(text);
             if (!value) return htmlRow(label, '', className, style);
             const pivotPayload = dynamicField ? [label, value, true] : [label, value];
             const encoded = encodeURIComponent(JSON.stringify(pivotPayload));
@@ -5205,6 +5210,7 @@
         }
 
         async function saveSettings() {
+            const previousQueryLimit = getUserQueryLimit();
             const queryLimitResult = _validateAndMaybeSaveNumberSetting(
                 'maxQueryLimitInput', 'settingsError', 'socrates_maxQueryLimit',
                 1000, 'Please enter a number of at least 1,000.', 500000
@@ -5215,9 +5221,12 @@
             );
 
             // refreshAnalysisData() only matters for the query-limit field --
-            // upload size has no bearing on already-loaded analysis data.
-            if (queryLimitResult === 'saved') {
-                if (currentMd5) {
+            // upload size has no bearing on already-loaded analysis data -
+            // and only for an analysis on screen: from the welcome screen
+            // (currentMd5 still set) it would draw the last analysis's cards
+            // and Sankey over it.
+            if (queryLimitResult === 'saved' && getUserQueryLimit() !== previousQueryLimit) {
+                if (currentMd5 && !isWelcomeScreen()) {
                     const saveBtn = document.getElementById('settingsSaveBtn');
                     saveBtn.disabled = true;
                     try {
@@ -5387,7 +5396,11 @@
         // there's no longer an analysis page under them).
         function closeAllModals() {
             closeMenu();
-            closeHelpModal();
+            // Only if it's open: closing it saves the welcome screen's "show
+            // again" checkbox, which isn't synced until Help is shown - an
+            // Escape on the welcome screen would otherwise undo "don't show
+            // this again" (see closeOtherMenuModals)
+            if (document.getElementById('helpModal')?.classList.contains('active')) closeHelpModal();
             closeThemesModal();
             closeSettingsModal();
             closeErrorModal();
@@ -9473,7 +9486,7 @@
                 <div class="findings-info-body" style="display:${display}; padding: 16px 20px; color: var(--text-muted); font-size: 0.85rem; line-height: 1.7;">
                     <p style="margin:0 0 10px 0;">What the protocol records in this capture show is worth a look - a weakness a host exposes, a control action on industrial equipment, a probe - gathered from every protocol into one list, most severe first. Each one is a lead to check, not a verdict: a PLC write is routine to its engineering workstation and alarming from anywhere else. Suricata's own alerts stay on their own tab.</p>
                     ${items ? `<p style="margin:0 0 6px 0; color: var(--text-bright);">In this capture${total > shown ? ` (${shown.toLocaleString()} of ${total.toLocaleString()} rows shown)` : ''}:</p><ul style="margin:0 0 10px 0; padding-left: 20px;">${items}</ul>` : ''}
-                    <p style="margin:0;">The same finding on the same server is one row, with how many records it covers: click it for the list, and a record for its details. No password is shown here, even where the record keeps one.</p>
+                    <p style="margin:0;">The same finding on the same server is one row, with how many records it covers: click it for the list, and a record for its details. No password is shown in this list, even where the record keeps one - a record's own details show what it keeps.</p>
                 </div>
             </div>`;
         }
@@ -9522,9 +9535,11 @@
 
         async function buildFindingsSection() {
             if (!tabDataCache.findings) {
-                const md5 = currentMd5;
+                // A reply for another analysis or an earlier search is
+                // dropped: the refresh that replaced it fetches its own
+                const md5 = currentMd5, query = buildSearchQuery();
                 const data = await fetchFindings(md5, false);
-                if (currentMd5 !== md5) return;
+                if (currentMd5 !== md5 || buildSearchQuery() !== query) return;
                 findingsRules = data ? data.rules : [];
                 tabDataCache.findings = data ? data.findings : [];
             }
@@ -10062,10 +10077,12 @@
             const sectionId = `section-${eventType}`;
 
             if (canUseServerAggregation(eventType)) {
+                const gen = bumpAggregationFetchGeneration();
                 const [data, totals] = await Promise.all([
                     fetchAggregationData(eventType),
                     fetchAggregationTotals(eventType),
                 ]);
+                if (isStaleAggregationFetch(gen)) return;
                 aggTotalsCache[sectionId] = totals;
                 const countsByColumn = {};
                 for (const [col, entries] of Object.entries(data)) {
@@ -10255,10 +10272,10 @@
                 findingsCountMd5 = currentMd5;
                 return;
             }
-            const md5 = currentMd5;
+            const md5 = currentMd5, query = buildSearchQuery();
             try {
                 const data = await fetchFindings(md5, true);
-                if (currentMd5 !== md5 || !data) {
+                if (currentMd5 !== md5 || buildSearchQuery() !== query || !data) {
                     findingsCountStale = true;
                     return;
                 }
@@ -10887,10 +10904,12 @@
             const sectionId = 'section-all';
 
             if (canUseServerAggregation('all')) {
+                const gen = bumpAggregationFetchGeneration();
                 const [data, totals] = await Promise.all([
                     fetchAggregationData('all'),
                     fetchAggregationTotals('all'),
                 ]);
+                if (isStaleAggregationFetch(gen)) return;
                 aggTotalsCache[sectionId] = totals;
                 const countsByColumn = {};
                 for (const [col, entries] of Object.entries(data)) {
@@ -11494,6 +11513,14 @@
         // place - an isolated counter means only another Sankey render can
         // ever invalidate an in-flight one, so this whole bug class can no
         // longer recur no matter what future code bumps fetchGeneration for.
+        // The aggregation tables' own counter, the same way: bumped by each
+        // render of them and each tab load that resets them, so a slow
+        // fetch for a tab no longer open is dropped rather than drawn under
+        // the new one.
+        let aggregationFetchGeneration = 0;
+        function bumpAggregationFetchGeneration() { return ++aggregationFetchGeneration; }
+        function isStaleAggregationFetch(gen) { return gen !== aggregationFetchGeneration; }
+
         let sankeyFetchGeneration = 0;
         function bumpSankeyFetchGeneration() { return ++sankeyFetchGeneration; }
         function isStaleSankeyFetch(gen) { return gen !== sankeyFetchGeneration; }
@@ -12040,6 +12067,13 @@
             if (eventType === 'all') {
                 if (advancedMode) await buildAggregationsSectionAll();
                 buildAllEvents();
+                return;
+            }
+            // The derived tabs render through their own builders (see
+            // loadTabData) - through the generic one below, a filter chip's
+            // removal there put an empty events table in their place
+            if (eventType === 'findings' || eventType === 'dns_heuristics' || eventType === 'acknowledged') {
+                await loadTabData(eventType);
                 return;
             }
             const events = tabDataCache[eventType] || [];

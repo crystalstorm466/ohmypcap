@@ -5,18 +5,20 @@ Suricata stays the source of truth for every protocol it parses. Alongside
 it, the same capture is queued here for tshark, which decodes far more
 protocols - but packet by packet, the way Wireshark shows them. This
 module turns that packet stream into Suricata-shaped records, written to
-shark.db (the same schema as the analysis's events.db), and once both are
-done merges into events.db what Suricata lacks (merge).
+shark.db (the analysis's events.db's table, without its search indexes),
+and once both are done merges into events.db what Suricata lacks (merge).
 
 It builds one 'flow' record per conversation (tshark's tcp.stream /
 udp.stream numbers, or addresses for anything without a stream), in
 Suricata's own flow-event layout - addresses, ports, packet and byte
 counts per direction, start and end - plus the protocols tshark found in
 it and its Community ID, which matches Suricata's community_id for the
-same flow. shark_protocols adds one record per transaction for the
-protocols it describes (LLMNR, NBNS, SSDP, S7comm).
+same flow. shark_protocols adds records for the protocols it describes
+(see its PROTOCOLS), and this module tunnel and TLS failure records.
 
-tshark runs once per capture with plain field output (-T fields): its
+tshark reads the whole capture once with plain field output (-T fields) -
+then again over just the packets of flows with records here, for their
+protocols' fields (the protocol and structured passes): its
 JSON output is several times slower and many times larger for the same
 packets (measured: 532 MB pcap, 10.6s and 81 MB of fields vs 168s and
 8.5 GB of full JSON). It runs at low CPU and I/O priority, one capture
@@ -212,6 +214,7 @@ def ipv6_exploded(address):
 
 
 _ISO_SECONDS = {}
+_ISO_MAX_EPOCH = 253402300799.0      # 9999-12-31T23:59:59
 
 
 def _iso(epoch):
@@ -219,8 +222,15 @@ def _iso(epoch):
     A capture's millions of timestamps fall in far fewer seconds, so each
     second's text is made once (strftime was a tenth of a big capture's
     Python time); the microseconds are rounded as datetime rounds them."""
-    if epoch < 0:
-        return datetime.fromtimestamp(epoch, tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f+0000')
+    # A time datetime can't hold - a hostile pcapng's 64-bit timestamp, past
+    # the year 9999 - is clamped rather than failing the whole run
+    if not 0 <= epoch < _ISO_MAX_EPOCH:
+        if epoch < 0 and epoch > -_ISO_MAX_EPOCH:
+            try:
+                return datetime.fromtimestamp(epoch, tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f+0000')
+            except (ValueError, OverflowError, OSError):
+                pass
+        return '9999-12-31T23:59:59.999999+0000' if epoch > 0 else '0001-01-01T00:00:00.000000+0000'
     frac, whole = math.modf(epoch)
     micro = round(frac * 1e6)
     if micro >= 1_000_000:
@@ -831,7 +841,6 @@ def iter_records(lines, pcap_path=None, deadline=None, combined=()):
     yield from tls_failures.records()
 
 
-# The layers every structured-pass packet is read for, to find its flow
 # What the structured pass has to decode to reach a protocol: the link
 # layers a capture can start with (Ethernet, BSD and Linux loopback/cooked
 # captures, raw IP, PPP) and tunnels, then IP and the transports - all
@@ -967,8 +976,8 @@ def _structured_pass(pcap_path, flows, handlers, total_frames, deadline=None):
     from a second tshark run that writes their packets as JSON trees. It
     runs only if the first pass found any of their flows, and - unless
     those flows span most of the capture - only over a copy of their
-    packets (editcap, which copies without decoding), since tshark has to
-    read every packet of whatever it's given."""
+    packets (_subset: pcap_subset, or editcap - copied, not decoded),
+    since tshark has to read every packet of whatever it's given."""
     relevant = [fl for fl in flows.values()
                 if fl.proto in ('TCP', 'UDP') and any(p in fl.protocols for h in handlers for p in h.app_protos)]
     active = [h for h in handlers if any(p in fl.protocols for fl in relevant for p in h.app_protos)]
@@ -1007,9 +1016,10 @@ def _structured_pass(pcap_path, flows, handlers, total_frames, deadline=None):
             finally:
                 if killer:
                     killer.cancel()
-            if proc.returncode != 0:
-                stderr_file.seek(0)
-                lines = stderr_file.read(64 * 1024).strip().splitlines()
+            stderr_file.seek(0)
+            stderr = stderr_file.read(64 * 1024)
+            if proc.returncode != 0 and not _read_to_damage(proc.returncode, stderr):
+                lines = stderr.strip().splitlines()
                 raise RuntimeError('tshark (structured pass) ' + (lines[-1] if lines else
                                    ('timed out' if proc.returncode < 0 else f'exit code {proc.returncode}')))
 
@@ -1050,9 +1060,10 @@ def _protocol_pass(pcap_path, flows, ranges, total_frames, deadline=None, skip=(
             finally:
                 if killer:
                     killer.cancel()
-            if proc.returncode != 0:
-                stderr_file.seek(0)
-                lines = stderr_file.read(64 * 1024).strip().splitlines()
+            stderr_file.seek(0)
+            stderr = stderr_file.read(64 * 1024)
+            if proc.returncode != 0 and not _read_to_damage(proc.returncode, stderr):
+                lines = stderr.strip().splitlines()
                 raise RuntimeError('tshark (protocol pass) ' + (lines[-1] if lines else
                                    ('timed out' if proc.returncode < 0 else f'exit code {proc.returncode}')))
     return protocols
@@ -1153,6 +1164,18 @@ def _low_priority():
         pass
 
 
+# tshark's word for a capture it read up to a cut-off or damaged record -
+# a capture stopped mid-write, a partial upload - before exiting 2. Every
+# packet before that was read and fed as usual, as Suricata reads them.
+_DAMAGED_CAPTURE = ('appears to have been cut short in the middle of a packet', 'appears to be damaged or corrupt')
+
+
+def _read_to_damage(returncode, stderr):
+    """Whether a tshark run that failed only stopped at a capture's cut-off
+    or damaged end, having read all it could."""
+    return returncode == 2 and any(phrase in stderr for phrase in _DAMAGED_CAPTURE)
+
+
 def run_tshark(pcap_path, timeout=None, on_start=None, consume=list):
     """Run tshark over pcap_path and return consume(its records) - by
     default, the records as a list; analyze's build streams them into
@@ -1195,7 +1218,7 @@ def run_tshark(pcap_path, timeout=None, on_start=None, consume=list):
         raise RuntimeError(f'tshark timed out after {timeout}s')
     if proc.returncode < 0:
         raise RuntimeError('tshark was stopped')
-    if proc.returncode != 0:
+    if proc.returncode != 0 and not _read_to_damage(proc.returncode, stderr):
         detail = stderr.strip().splitlines()[-1] if stderr.strip() else f'exit code {proc.returncode}'
         raise RuntimeError(f'tshark failed: {detail}')
     return events
