@@ -7,10 +7,12 @@ Loads the URL box's default (DEFAULT_SAMPLE_URL in static/socrates.js - a
 real infection's traffic on malware-traffic-analysis.net, richer than the
 built-in Sample PCAP file) with its Go button, so it
 needs no pre-existing local analysis or hardcoded MD5 - it works on a
-clean checkout with an empty DATA_DIR.
+clean checkout with an empty DATA_DIR. Its last capture loads a second
+capture the same way, TSHARK_SAMPLE_URL, for what that one lacks: tshark's
+protocols and Findings.
 
 Usage:
-    python3 scripts/capture_screenshots.py [--base-url http://127.0.0.1:8000/socrates.html]
+    python3 scripts/capture_screenshots.py [--base-url http://127.0.0.1:8000/socrates.html] [--only findings]
 """
 
 import argparse
@@ -36,6 +38,15 @@ THEMES = [
 
 DEFAULT_VIEWPORT = {'width': 1600, 'height': 1000}
 
+# The default sample is a malware infection's traffic - no protocol tshark
+# adds there but Windows LAN chatter, and no Findings. This one, from the
+# 4SICS ICS lab (Netresec), has S7comm and Telnet records, Findings for
+# Telnet logins, S7 writes and expired and self-signed certificates, and
+# TLS failures. 140 MB; Netresec's own share link.
+TSHARK_SAMPLE_URL = 'https://share.netresec.com/s/camL59aoxbCRyyZ/download/4SICS-GeekLounge-151021.pcap'
+# Suricata, the import and tshark together, on that capture
+TSHARK_SAMPLE_TIMEOUT_MS = 15 * 60 * 1000
+
 
 def find_chromium():
     for name in ('chromium', 'chromium-browser', 'google-chrome'):
@@ -45,7 +56,49 @@ def find_chromium():
     return None
 
 
-async def main(base_url):
+async def capture_findings(page, base_url):
+    """10. The stat cards' three sections with tshark's cards in them, and
+    the Findings tab below, from TSHARK_SAMPLE_URL."""
+    await page.set_viewport_size(DEFAULT_VIEWPORT)
+    await page.goto(base_url, wait_until='networkidle')
+    if await page.locator('#helpModal.active').count():
+        await page.evaluate('closeHelpModal()')
+    # The table, not the About card, is the point - and every section open
+    await page.evaluate("""() => {
+        localStorage.setItem('socrates_findingsInfoCollapsed', 'true');
+        localStorage.removeItem('socrates_statGroupsCollapsed');
+    }""")
+    await page.fill('#pcapUrl', TSHARK_SAMPLE_URL)
+    await page.click("button[data-action='load-from-url']")
+    # tshark's cards don't join while the pointer is over the cards
+    await page.mouse.move(2, DEFAULT_VIEWPORT['height'] - 2)
+    try:
+        await page.wait_for_function(
+            "() => (document.getElementById('tsharkHeadingStatus') || {}).textContent?.includes('tshark parsed')",
+            timeout=TSHARK_SAMPLE_TIMEOUT_MS)
+    except Exception:
+        print('WARNING: tshark never finished on the 4SICS capture - so-crates-findings.png not updated',
+              file=sys.stderr)
+        return
+    # (its card appears once its count has come back)
+    findings_card = page.locator('.stat-card[data-section="section-findings"]')
+    try:
+        await findings_card.wait_for(state='visible', timeout=60000)
+    except Exception:
+        print('WARNING: no Findings card on the 4SICS capture - so-crates-findings.png not updated', file=sys.stderr)
+        return
+    await findings_card.click()
+    await page.wait_for_selector('#section-findings tbody tr[data-id]', timeout=30000)
+    await page.mouse.move(2, DEFAULT_VIEWPORT['height'] - 2)
+    await page.evaluate('window.scrollTo(0, 0)')
+    await page.set_viewport_size({'width': DEFAULT_VIEWPORT['width'], 'height': 1560})
+    await page.wait_for_timeout(800)
+    await page.screenshot(path=os.path.join(IMAGES_DIR, 'so-crates-findings.png'))
+    await page.set_viewport_size(DEFAULT_VIEWPORT)
+    print('captured findings')
+
+
+async def main(base_url, only=None):
     os.makedirs(THEMES_DIR, exist_ok=True)
 
     async with async_playwright() as p:
@@ -55,6 +108,10 @@ async def main(base_url):
             launch_kwargs['executable_path'] = chromium_path
         browser = await p.chromium.launch(**launch_kwargs)
         page = await browser.new_page(viewport=DEFAULT_VIEWPORT)
+        if only == 'findings':
+            await capture_findings(page, base_url)
+            await browser.close()
+            return
 
         # 1. Welcome modal (fresh session -> auto-shows, Midnight/default theme)
         await page.goto(base_url, wait_until='networkidle')
@@ -276,11 +333,15 @@ async def main(base_url):
             print('WARNING: no aggregation toggle found - '
                   'so-crates-aggregation-filtering.png not updated', file=sys.stderr)
 
+        await capture_findings(page, base_url)
+
         await browser.close()
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--base-url', default='http://127.0.0.1:8000/socrates.html')
+    parser.add_argument('--only', choices=['findings'],
+                        help='capture just this one (findings: the 4SICS capture\'s sections and Findings tab)')
     args = parser.parse_args()
-    asyncio.run(main(args.base_url))
+    asyncio.run(main(args.base_url, args.only))

@@ -253,14 +253,18 @@ Before cutting a release:
 4. **Regenerate screenshots.** Run `pip install -r requirements-screenshots.txt
    && python3 scripts/capture_screenshots.py --base-url
    http://127.0.0.1:<port>/socrates.html` against the same container, now
-   that step 3's video is done with it. This refreshes all 8
+   that step 3's video is done with it. This refreshes all 9
    `docs/images/so-crates-*.png` (Home page) and all 35
    `docs/images/themes/*.png` (Themes page) against the URL box's default
    pcap (`DEFAULT_SAMPLE_URL` in `static/socrates.js` - a real infection's
    traffic on malware-traffic-analysis.net, loaded with the Go button; the
    main screen's Sample PCAP file card is a smaller built-in one, see
    `samples.py`) - no local fixture or hardcoded MD5 needed, but it does
-   need internet access. Run this on every release, not just when the UI visibly changes -
+   need internet access. The last, `so-crates-findings.png`, loads a second
+   capture the same way (`TSHARK_SAMPLE_URL`, a 140 MB 4SICS ICS capture
+   from Netresec - the default sample has no protocol tshark adds but
+   Windows LAN chatter, and no Findings) and waits for tshark to finish on
+   it, which takes a few minutes; `--only findings` re-runs just that one. Run this on every release, not just when the UI visibly changes -
    stale screenshots (e.g. showing an old default value in the Welcome
    modal) are easy to miss otherwise. If a new theme was added since the
    last release, make sure it was also added to the separate hardcoded

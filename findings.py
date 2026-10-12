@@ -54,6 +54,10 @@ def _join(*parts):
     return ' '.join(str(p) for p in parts if p not in (None, '', [], {}))
 
 
+def _items(count):
+    return f"{count} {'item' if count == 1 else 'items'}" if count else ''
+
+
 def _list(values, limit=3):
     values = list(values or ())
     more = f' (+{len(values) - limit} more)' if len(values) > limit else ''
@@ -184,7 +188,7 @@ RULES = (
     Rule('s7_write', 'medium', 's7comm', 'S7 PLC memory written',
          _in('s7comm', 'function', ['Write Var']),
          lambda b: _list(i.get('area') for i in b.get('items', ()) if i.get('area'))
-         or _join(b.get('item_count') or (b.get('response') or {}).get('item_count'), 'items'),
+         or _items(b.get('item_count') or (b.get('response') or {}).get('item_count')),
          "Values written straight into a Siemens PLC's memory."),
     Rule('iec104_control', 'medium', 'iec104', 'IEC 104 control command',
          _in('iec104', 'action', list(_IEC104_CONTROL)),

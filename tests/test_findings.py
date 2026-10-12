@@ -142,7 +142,7 @@ class TestFindings(unittest.TestCase):
         self.assertEqual(by_rule['telnet_login'], 'user admin - login failed')
         self.assertEqual(by_rule['opcua_cleartext_password'], 'user user1 on opc.tcp://plc:4840/')
         self.assertEqual(by_rule['rip_default_route'], '0.0.0.0/0 metric 1')
-        self.assertEqual(by_rule['s7_write'], '1 items')
+        self.assertEqual(by_rule['s7_write'], '1 item')
         self.assertEqual(by_rule['tls_certificate_refused'], 'client: Unknown CA - CN=vpn.example (for vpn.example)',
                          'the alert that refused the certificate, not the first one')
         self.assertEqual(by_rule['tls_certificate_out_of_date'],

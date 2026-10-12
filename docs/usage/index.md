@@ -22,6 +22,10 @@ After analysis, you can view network alerts, file alerts, network metadata, and 
 
 ![Analysis screen](../images/so-crates-analysis.png)
 
+The cards come in three sections - Leads, Protocol records and Connections. tshark adds the protocols Suricata doesn't parse (the cards marked with a dot - here S7comm, Telnet and TLS failures from an ICS lab's capture), and Findings gathers what the protocol records show is worth a look, one row per finding on each server:
+
+![Stat-card sections, tshark's protocols, and Findings](../images/so-crates-findings.png)
+
 Clicking a value in the data table opens a pivot menu for Include/Exclude/Only filtering, Hunt, and Correlate - which searches for every other log across the capture sharing that row's community ID (the cross-tool flow-correlation hash, computed by Suricata - force-enabled in 4.1.0):
 
 ![Pivot menu](../images/so-crates-pivot-menu.png)
