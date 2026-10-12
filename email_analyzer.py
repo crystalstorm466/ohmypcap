@@ -17,9 +17,8 @@ message's HTML is only ever read, never rendered, and every value is
 displayed escaped. Phishing mail is hostile input, so parsing degrades
 rather than fails: a header the strict parser chokes on is read raw, a
 structure it can't parse falls back to raw headers or to the headers
-alone, and whatever
-the config.MAX_EMAIL_* limits cut off is reported as a warning rather
-than silently dropped. Messages over config.MAX_EMAIL_SIZE never get
+alone, and whatever the config.MAX_EMAIL_* limits cut off is reported as
+a warning rather than silently dropped. Messages over config.MAX_EMAIL_SIZE never get
 here - they're analyzed as plain files (socrates.py's _detect_file_type).
 """
 

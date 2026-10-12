@@ -2262,6 +2262,12 @@ class TestHostileInput(unittest.TestCase):
                           'commands': ['show run']})
         self.assertNotIn('1234', json.dumps(body))
 
+    def test_bytes_and_escapes_that_arent_what_they_should_be_dont_fail_the_run(self):
+        from shark_protocols import _dict, _hex
+        self.assertEqual((_hex('41:42'), _hex('4142'), _hex(''), _hex('zz'), _hex('4')), (b'AB', b'AB', b'', b'', b''))
+        self.assertEqual((_dict({'a': 1}), _dict('text'), _dict(None)), ({'a': 1}, {}, {}))
+        self.assertEqual(shark_analyzer._unescape('a\\x41b\\xzz\\tc'), 'aAbxzz\tc')
+
     def test_a_measurement_that_isnt_a_finite_number_stays_text(self):
         """A sensor's NaN or infinity - which JSON can't hold - kept as
         tshark wrote it, not stored as invalid JSON."""

@@ -116,7 +116,7 @@ def _protocol_pass_fields(protocols):
     return _FIELDS + tuple(dict.fromkeys(f for proto in protocols for f in proto.fields if f not in _FIELDS))
 
 
-def _combined_fields(protocols=PROTOCOLS):
+def _combined_fields(protocols):
     """One pass's fields, for a capture mostly of protocols with records
     here (_mostly_recorded): the first pass's, then these protocols'."""
     return _FIRST_PASS_FIELDS + tuple(dict.fromkeys(f for proto in protocols for f in proto.fields
@@ -624,8 +624,9 @@ def _unescape(value):
     """Undo tshark's escaping of a field value: \\t, \\n, \\r, \\\\ and \\xNN."""
     if '\\' not in value:
         return value
+    # (a \\x not followed by two hex digits stays the 'x' it is)
     return _ESCAPE.sub(lambda m: _ESCAPES.get(m.group(1)) or (chr(int(m.group(1)[1:], 16))
-                                                            if m.group(1)[0] == 'x' else m.group(1)), value)
+                                                            if len(m.group(1)) == 3 else m.group(1)), value)
 
 
 def _last(value):

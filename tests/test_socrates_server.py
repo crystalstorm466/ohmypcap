@@ -8018,11 +8018,14 @@ class TestCSPEnforced(unittest.TestCase):
 
     def test_report_endpoint_tolerates_garbage(self):
         import urllib.request
-        req = urllib.request.Request(
-            f'http://127.0.0.1:{self.port}/api/csp-report', data=b'not json',
-            headers={'Content-Type': 'application/csp-report'})
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            self.assertEqual(resp.status, 204)
+        for body in (b'not json', b'{"csp-report": ["a list"]}', b'{"csp-report": "a string"}',
+                     b'{"csp-report": {"effective-directive": 5, "document-uri": 7}}'):
+            with self.subTest(body=body):
+                req = urllib.request.Request(
+                    f'http://127.0.0.1:{self.port}/api/csp-report', data=body,
+                    headers={'Content-Type': 'application/csp-report'})
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    self.assertEqual(resp.status, 204)
 
 
 class TestHeadRequests(unittest.TestCase):

@@ -2,8 +2,9 @@
 """YARA scanning integration for SO-CRATES.
 
 YARA is optional. If installed, extracted files are scanned after Suricata
-finishes. Rules are baked into Docker images; non-Docker deployments download
-on first run if internet is available.
+finishes. Rules are baked into Docker images; a deployment without them gets
+them only from the Rules modal - nothing is downloaded unasked (see AGENTS.md's
+Detection Rule Freshness).
 """
 
 import config

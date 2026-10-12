@@ -8,8 +8,9 @@ this source - means no file in the container image contains the
 signature for a scanner to flag or quarantine. It only exists in full in
 an analysis directory once someone loads a sample.
 
-All four use only reserved .example domains and documentation-range IPs
-(RFC 2606, RFC 5737), and tell one story (docs/usage/analyzing-files.md):
+All four use only reserved .example domains, documentation-range public
+IPs (RFC 2606, RFC 5737) and private ones for the victim's network
+(RFC 1918), and tell one story (docs/usage/analyzing-files.md):
 a phishing email delivers a macro document (email); opening it on
 Jordan's workstation starts PowerShell, which downloads a payload that
 persists and harvests saved credentials (log); the download and the

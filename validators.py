@@ -114,7 +114,24 @@ def sanitize_filename(filename):
         raise ValueError(f'Reserved filename not allowed: {safe}')
     if any(ord(c) < 0x20 or ord(c) == 0x7F for c in safe):
         raise ValueError(f'Filename contains control characters: {filename!r}')
-    return safe
+    return _shortened(safe)
+
+
+# Filesystems take 255 bytes a name; this leaves room for the suffixes the
+# app adds to one (a download's temp name)
+_MAX_FILENAME_BYTES = 200
+
+
+def _shortened(name):
+    """A name too long to save, cut to fit - keeping its extension, which
+    its type is detected by."""
+    if len(name.encode('utf-8')) <= _MAX_FILENAME_BYTES:
+        return name
+    stem, ext = os.path.splitext(name)
+    if len(ext.encode('utf-8')) > 20:
+        stem, ext = name, ''
+    budget = _MAX_FILENAME_BYTES - len(ext.encode('utf-8'))
+    return stem.encode('utf-8')[:budget].decode('utf-8', 'ignore') + ext
 
 
 def is_safe_path(base, path):

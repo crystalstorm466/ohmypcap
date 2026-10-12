@@ -621,6 +621,31 @@ class TestZipMemberCap(unittest.TestCase):
             validators.validate_zip_extraction(zf, td)  # must not raise
 
 
+
+class TestLongFilenames(unittest.TestCase):
+    def test_a_name_too_long_to_save_is_cut_keeping_its_extension(self):
+        """REGRESSION: a name past the filesystem's 255 bytes failed at
+        save time with a bare 500."""
+        name = validators.sanitize_filename('a' * 300 + '.pcap')
+        self.assertLessEqual(len(name.encode('utf-8')), 200)
+        self.assertTrue(name.endswith('a.pcap'))
+        multibyte = validators.sanitize_filename('\u00e9' * 150 + '.pcapng')
+        self.assertLessEqual(len(multibyte.encode('utf-8')), 200)
+        self.assertTrue(multibyte.endswith('.pcapng'))
+        self.assertEqual(validators.sanitize_filename('capture.pcap'), 'capture.pcap')
+
+
+class TestModelsFallbacks(unittest.TestCase):
+    def test_a_string_source_is_no_ecs_object(self):
+        """tshark's rows carry source: 'tshark' - reading its src_ip
+        must not try it as {ip: ...}."""
+        import models
+        self.assertEqual(models.get_src_ip({'src_ip': '1.2.3.4', 'source': 'tshark'}), '1.2.3.4')
+        self.assertEqual(models.get_src_ip({'source': 'tshark'}), '')
+        self.assertEqual(models.get_src_port({'source': {'port': 99}}), 99)
+        self.assertEqual(models.get_dest_ip({'destination': {'ip': '5.6.7.8'}}), '5.6.7.8')
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
 

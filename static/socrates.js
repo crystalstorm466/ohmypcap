@@ -3026,12 +3026,31 @@
         // DOM removal needed, and this keeps stat-card counts correct for
         // free instead of hand-updating them separately.
         async function setAlertAcknowledged(table, rowId, acknowledged) {
-            await fetch('/api/acknowledge-alert', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ md5: currentMd5, table, rowId, acknowledged }),
-            });
+            if (!await postJsonOrToast('/api/acknowledge-alert', { md5: currentMd5, table, rowId, acknowledged },
+                acknowledged ? 'Acknowledging the alert' : 'Un-acknowledging the alert')) return;
             await refreshAnalysisData();
+        }
+
+        // A POST whose failure the user should hear about: true when it
+        // worked - otherwise a toast with the server's reason, and false,
+        // rather than carrying on as if it had (the row just staying put)
+        async function postJsonOrToast(url, body, what) {
+            try {
+                const resp = await fetch(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body),
+                });
+                if (resp.ok) return true;
+                let reason = '';
+                try {
+                    reason = (await resp.json()).error || '';
+                } catch (e) { /* no JSON body */ }
+                showToast(`${what} failed${reason ? ': ' + reason : ''}`);
+            } catch (err) {
+                showToast(`${what} failed: SO-CRATES couldn't be reached`);
+            }
+            return false;
         }
 
         // "All instances of this alert" - computed client-side from
@@ -3054,11 +3073,8 @@
             if (truncatedTypes.has(ackInfo.eventType)) {
                 showToast('Only matches within the current query limit were acknowledged - some may remain', { sticky: true });
             }
-            await fetch('/api/acknowledge-alerts-bulk', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ md5: currentMd5, table: ackInfo.table, rowIds: matchIds }),
-            });
+            if (!await postJsonOrToast('/api/acknowledge-alerts-bulk',
+                { md5: currentMd5, table: ackInfo.table, rowIds: matchIds }, 'Acknowledging the alerts')) return;
             await refreshAnalysisData();
         }
 
@@ -3510,7 +3526,13 @@
             try {
                 const resp = await fetch(url);
                 const data = await resp.json();
-                
+
+                // The server's own error - shown, and not marked loaded, so
+                // opening the view again retries (as the ASCII transcript does)
+                if (data.error) {
+                    container.innerHTML = '<div style="color:var(--text-muted);">Error loading hexdump: ' + escapeHtml(String(data.error)) + '</div>';
+                    return;
+                }
                 if (data.packets && data.packets.length > 0) {
                     let html = '<div class="packet-controls"><button class="packet-control-btn" data-action="expand-all-packets">Expand All</button><button class="packet-control-btn" data-action="collapse-all-packets">Collapse All</button></div>';
                     
@@ -3572,8 +3594,10 @@
         }
         
         function htmlRow(label, innerHtml, className, style) {
-            const valueCls = className ? `detail-value ${className}` : 'detail-value';
-            const sty = style ? ` style="${style}"` : '';
+            // (escaped like everything else put in an attribute, though every
+            // caller passes constants today)
+            const valueCls = className ? `detail-value ${escapeHtml(className)}` : 'detail-value';
+            const sty = style ? ` style="${escapeHtml(style)}"` : '';
             return `<span class="detail-label">${escapeHtml(label)}</span><span class="${valueCls}"${sty}>${innerHtml}</span>`;
         }
         
@@ -3753,7 +3777,7 @@
             html += htmlRowText('Query Name', e.dns?.rrname || e.dns?.queries?.[0]?.rrname, 'mono');
             html += htmlRowText('Query Type', e.dns?.rrtype || e.dns?.queries?.[0]?.rrtype);
             if (e.dns?.answers) {
-                html += htmlRowText('Answers', e.dns.answers.map(a => a.rdata).join(', '), 'mono');
+                html += htmlRowText('Answers', e.dns.answers.map(a => a.rdata).filter(Boolean).join(', '), 'mono');
             }
             return html;
         }
@@ -5005,8 +5029,7 @@
         }
 
         // Backing count for the Danger Zone's Delete All button
-        // (openDeleteAllAnalyses(settingsAnalysisCount) in the HTML reads
-        // this by name at click time, not by the value baked in at
+        // (the 'open-delete-all-analyses' action reads this by name at click time, not by the value baked in at
         // render time, since the real count only arrives after an async
         // fetch - see showSettingsModal()'s own fetch below).
         let settingsAnalysisCount = 0;
@@ -6443,7 +6466,7 @@
                 // ever look at code, never label.
                 code: `${theme.label.toLowerCase()} theme`,
                 label: `${theme.label} theme`,
-                action: () => { closeAutocompleteModal(); setTheme(key); showToast(`Switched to ${theme.label} theme.`); },
+                action: () => { closeAutocompleteModal(); setTheme(key); showToast(`Switched to ${theme.label} theme`); },
             })),
         ];
 
@@ -6475,7 +6498,7 @@
             autocompleteNavSelection = null;
         }
 
-        // Only letters/digits - the codes are all-alphanumeric, and this
+        // Only letters/digits - every command starts with one, and this
         // doubles as the trigger-key test (see the keydown handler below):
         // any bare letter/digit typed outside a text field, with nothing
         // else already open, opens the palette pre-seeded with that
@@ -6650,10 +6673,10 @@
                 showHelpModal();
             }
             // '<'/'>' (not the 't' key formerly used here, and not arrow
-            // keys either) - 't' collided with typing several of the
-            // app's own theme cheat codes (e.g. "retro", "digit" both
-            // contain a 't'), toggling the theme on every matching
-            // keystroke while the cheat code was still being typed.
+            // keys either) - 't' collided with typing theme names into the
+            // command palette (e.g. "retro", "digital" both contain a 't'),
+            // toggling the theme on every matching keystroke while the name
+            // was still being typed.
             // Arrow keys are reserved for real in-app navigation (stat
             // tabs, sample buttons, table rows), so this uses '<'/'>'
             // instead - reads naturally as previous/next (same
@@ -6811,7 +6834,7 @@
                 const n = result.additionalMd5s.length;
                 showToast(
                     `${n} additional file${n === 1 ? '' : 's'} found in the ZIP ${n === 1 ? 'is' : 'are'} also being analyzed`,
-                    { sticky: true, actionLabel: 'View Recent Analyses', onAction: () => showWelcome() }
+                    { sticky: true, actionLabel: 'View Previous Analyses', onAction: () => showWelcome() }
                 );
             }
         }
@@ -7022,7 +7045,7 @@
             // that button was removed in favor of this one label reflecting
             // expanded/collapsed state.
             const sourceLink = source
-                ? `<a href="${source.url}" target="_blank" rel="noopener noreferrer" style="color: var(--accent); text-decoration: none; font-size: 0.8rem; margin-left: 6px;">(${source.label})</a>`
+                ? `<a href="${escapeHtml(source.url)}" target="_blank" rel="noopener noreferrer" style="color: var(--accent); text-decoration: none; font-size: 0.8rem; margin-left: 6px;">(${escapeHtml(source.label)})</a>`
                 : `<button data-action="toggle-suricata-sources" style="background: none; color: var(--accent); border: none; padding: 0; cursor: pointer; font-size: 0.8rem; margin-left: 6px;">(${suricataSourcesExpanded ? 'Hide Rulesets' : 'Enable/Disable Rulesets'})</button>`;
             return `
                 <div style="${sectionDivider}">
@@ -7096,7 +7119,7 @@
                             <span class="theme-switch-slider"></span>
                         </span>
                         <span>${escapeHtml(src.label)}</span>
-                        <a href="${src.url}" target="_blank" rel="noopener noreferrer" style="color: var(--text-muted); font-size: 0.75rem; text-decoration: none;" data-action="stop-propagation">(source)</a>
+                        <a href="${escapeHtml(src.url)}" target="_blank" rel="noopener noreferrer" style="color: var(--text-muted); font-size: 0.75rem; text-decoration: none;" data-action="stop-propagation">(source)</a>
                         ${noteHtml}
                     </label>`;
             }).join('');
@@ -7234,9 +7257,8 @@
                 .sort(function(a, b) { return a - b; })[0] ?? null;
             const sigmaText = `${formatRuleCount(sigmaTotalCount)} — updated ${formatDateSpan(sigmaUpdated, t)}`;
             // Ordered shortest-to-longest output (YARA/Sigma are a couple
-            // lines; Suricata's suricata-update log can run to dozens of
-            // lines) so the two quick summaries are visible without
-            // scrolling past the long, variable-length Suricata log first.
+            // lines; Suricata's has a line per rule source) so the two quick
+            // summaries are visible without scrolling past Suricata's first.
             return (
                 renderRuleSection('yara', RULESET_LABELS.yara, yaraText, status.yara, false) +
                 renderRuleSection('sigma', RULESET_LABELS.sigma, sigmaText, status.sigma, false) +
@@ -7374,8 +7396,8 @@
 
         // expandSuricataSources: true opens the modal with the sources
         // picker already expanded (e.g. the welcome help table's "Multiple
-        // Rulesets" link) rather than requiring an extra click on "(Show
-        // Rulesets)" once the modal is already open. Must be set before
+        // Rulesets" link) rather than requiring an extra click on
+        // "(Enable/Disable Rulesets)" once the modal is already open. Must be set before
         // refreshRulesModal()'s first render below, not after.
         async function showRulesModal(expandSuricataSources) {
             closeOtherMenuModals('rulesModal');
@@ -7412,11 +7434,8 @@
                 body.sources = Object.keys(suricataSourceSelection).filter(k => suricataSourceSelection[k]);
                 body.showProtocolDecodeAlerts = showProtocolDecodeAlerts;
             }
-            await fetch('/api/update-rules', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(body),
-            });
+            // (refreshed either way - it shows an update already under way)
+            await postJsonOrToast('/api/update-rules', body, 'Starting the rules update');
             await refreshRulesModal();
             // Only (re)start polling if the modal is still open - closing it
             // (Escape/backdrop/close button) while this fetch/refresh was
@@ -9038,7 +9057,7 @@
         // to cut off.
         const DNS_HEURISTICS_MIN_ENTROPY_PREFIX_LENGTH = 10;
         const DNS_HEURISTICS_ENTROPY_THRESHOLD = 3.5;
-        // Below random-uniform-lowercase's own expected ~19% (5/26) and
+        // Just above random-uniform-lowercase's own expected ~19% (5/26) and
         // comfortably below ordinary English's ~30-40% - see
         // vowelRatio's own comment for why this, not a digit-presence
         // check, is what actually separates "furtheringthemagic" (0.33)
@@ -9395,7 +9414,7 @@
             const attrs = [['rule', item.rule], ['detail', item.detail], ['dest-ip', e.dest_ip || ''],
                            ['dest-port', e.dest_port === undefined || e.dest_port === null ? '' : String(e.dest_port)]]
                 .map(([k, v]) => ` data-${k}="${escapeHtml(v)}"`).join('');
-            const sources = (item.sources || 1) > 1 ? `, from ${item.sources} source hosts` : '';
+            const sources = (item.sources || 1) > 1 ? `, from ${Number(item.sources).toLocaleString()} source hosts` : '';
             return `<div class="finding-members"${attrs}>
                 <div class="finding-members-summary">${item.count.toLocaleString()} records${sources}, ${escapeHtml(findingTimeSpan(item))}</div>
                 <div class="finding-members-list"></div>
@@ -9532,10 +9551,15 @@
             container.innerHTML = html;
         }
 
+        // null when it didn't work (an error reply, a network failure)
         async function fetchFindings(md5, countsOnly) {
-            const resp = await fetch(`/api/findings?md5=${encodeURIComponent(md5)}${countsOnly ? '&counts=1' : ''}${buildSearchQuery()}&t=${Date.now()}`);
-            const data = await resp.json();
-            return data && Array.isArray(data.rules) ? data : null;
+            try {
+                const resp = await fetch(`/api/findings?md5=${encodeURIComponent(md5)}${countsOnly ? '&counts=1' : ''}${buildSearchQuery()}&t=${Date.now()}`);
+                const data = await resp.json();
+                return data && Array.isArray(data.rules) ? data : null;
+            } catch (err) {
+                return null;
+            }
         }
 
         async function buildFindingsSection() {
@@ -9545,8 +9569,14 @@
                 const md5 = currentMd5, query = buildSearchQuery();
                 const data = await fetchFindings(md5, false);
                 if (currentMd5 !== md5 || buildSearchQuery() !== query) return;
-                findingsRules = data ? data.rules : [];
-                tabDataCache.findings = data ? data.findings : [];
+                if (!data) {
+                    // not cached as "no findings" - opening the tab again retries
+                    const container = document.getElementById('section-findings');
+                    if (container) container.innerHTML = '<div class="section-content"><div class="no-matches">Couldn\'t load the findings - open the tab again to retry</div></div>';
+                    return;
+                }
+                findingsRules = data.rules;
+                tabDataCache.findings = data.findings;
             }
             buildFindingsSectionContent('section-findings', tabDataCache.findings);
         }
@@ -10664,7 +10694,7 @@
                 // real final value immediately so assistive tech isn't
                 // stuck reading "0" or a mid-animation number.
                 return heading + `
-                    <div class="stat-card${activeClass}${s.connection ? ' stat-card-connection' : ''}${collapsedClass}" data-action="show-tab" data-section="section-${s.id}"${groupAttr}${s.title ? ` title="${escapeHtml(s.title)}"` : ''}>
+                    <div class="stat-card${activeClass}${s.connection ? ' stat-card-connection' : ''}${collapsedClass}" data-action="show-tab" data-section="section-${escapeHtml(s.id)}"${groupAttr}${s.title ? ` title="${escapeHtml(s.title)}"` : ''}>
                         <div class="stat-number" style="color: ${s.color}" aria-label="${countDisplay}">0</div>
                         <div class="stat-label">${escapeHtml(s.label)}</div>${s.notInSuricata ? '<span class="stat-badge" title="From tshark: Suricata doesn\'t parse this protocol"><span class="sr-only">from tshark</span></span>' : ''}
                     </div>
@@ -13848,7 +13878,7 @@
         // so tying a specific joke to a specific phase added authoring
         // effort without adding anything the user would notice.
         // getPhaseMessages() below draws independently for each of the
-        // 4 phase slots (so a single load can show a couple of different
+        // phase slots (so a single load can show a couple of different
         // lines as it moves through phases), each draw fixed for that
         // phase's whole duration (not re-rolled every second) so the
         // message never flickers mid-phase.
@@ -13960,7 +13990,7 @@
             
             // Local timer updates elapsed time every 1s without hitting the server
             elapsedInterval = setInterval(() => {
-                const elapsedSec = Math.floor((Date.now() - startTime) / CONFIG.POLLING_INTERVAL_MS);
+                const elapsedSec = Math.floor((Date.now() - startTime) / 1000);
                 const msg = phaseMessages[currentPhase] || 'Analyzing file...';
                 showLoading(`${msg} (${elapsedSec}s)`);
             }, CONFIG.POLLING_INTERVAL_MS);
@@ -13988,7 +14018,7 @@
                         hideLoading();
                         // No fetch-generation guard here: if the user has
                         // since navigated to a different analysis (e.g. via
-                        // notifyIfAdditionalAnalyses' "View Recent Analyses"
+                        // notifyIfAdditionalAnalyses' "View Previous Analyses"
                         // link), this still unconditionally yanks them back
                         // to `md5` once it finishes. Pre-existing gap, not
                         // introduced by multi-pcap-zip support - just more

@@ -37,6 +37,15 @@ def _int(value, default=None):
         return default
 
 
+def _hex(text):
+    """tshark's bytes of a field (aa:bb:... or aabb...) - b'' for none, or
+    for anything that isn't hex, instead of failing the run."""
+    try:
+        return bytes.fromhex(text.replace(':', '')) if text else b''
+    except ValueError:
+        return b''
+
+
 def _finite(text):
     """A measurement as a number - or, for one that isn't a finite number
     (a sensor's NaN, or infinity, which JSON can't hold), as tshark wrote it."""
@@ -1025,7 +1034,7 @@ _STUN_METHODS = {0x001: 'Binding', 0x002: 'Shared Secret', 0x003: 'Allocate', 0x
 _STUN_REQUEST, _STUN_INDICATION, _STUN_SUCCESS, _STUN_ERROR = 0x00, 0x01, 0x10, 0x11
 # Attributes holding an address, each with its family and port: what it's called in a record
 _STUN_ADDRESSES = {0x0001: 'mapped', 0x0020: 'mapped', 0x8020: 'mapped', 0x0016: 'relayed', 0x0012: 'peer',
-                   0x802b: 'response_origin', 0x802c: 'other', 0x0004: 'response', 0x0005: 'changed',
+                   0x802b: 'response_origin', 0x802c: 'other', 0x0004: 'source', 0x0005: 'changed',
                    0x000b: 'reflected_from'}
 _STUN_MAX_LIST = 20
 
@@ -1193,7 +1202,7 @@ class CoAP:
         body['response_time'] = round(pkt.when - self.started[id(body)], 6)
         self._payload(body, 'response', v, first)
         if body.get('uri') == '/.well-known/core' and number // 32 == 2:
-            raw = bytes.fromhex(first('@coap').replace(':', '')) if first('@coap') else b''
+            raw = _hex(first('@coap'))
             links = _COAP_LINK.findall(_coap_payload(raw).decode('utf-8', 'replace'))
             if links:
                 body['resources'] = list(dict.fromkeys(links))[:_COAP_MAX_RESOURCES]
@@ -1254,7 +1263,7 @@ _SLP_ATTRIBUTES = ('srvloc.attrrply.attrlist', 'srvloc.daadvert.attrlist', 'srvl
 _SLP_ADVERT_SCOPES = ('srvloc.daadvert.scopelist', 'srvloc.saadvert.scopelist')
 
 
-def _slp_group_address(address):
+def _to_group_address(address):
     from shark_analyzer import _is_group_address   # shark_analyzer imports this module
     return _is_group_address(address)
 
@@ -1305,7 +1314,7 @@ class SLP:
             self.records.append((pkt.flow, pkt.when, self.event_type, body))
             self.started[id(body)] = (pkt.when, pkt.flow)
             self.open[key] = body
-            if _slp_group_address(pkt.dst):
+            if _to_group_address(pkt.dst):
                 self.open[('group', pkt.src, pkt.sport, xid)] = body
             return
         body = self.open.get((pkt.flow.key, xid)) or self.open.get(('group', pkt.dst, pkt.dport, xid))
@@ -1458,7 +1467,7 @@ class IPMI:
     def feed(self, pkt, v):
         def first(name):
             return (v[name] or [''])[0]
-        raw = lambda name: bytes.fromhex(first(name).replace(':', '')) if first(name) else b''
+        raw = lambda name: _hex(first(name))
         kind = _int(first('rmcp.class'))
         if kind == _RMCP_ASF:
             asf = _int(first('asf.type'))
@@ -1742,7 +1751,7 @@ class RIP:
         def first(name):
             return (v[name] or [''])[0]
         name = '@ripng' if pkt.app == 'ripng' else '@rip'
-        raw = bytes.fromhex(first(name).replace(':', '')) if first(name) else b''
+        raw = _hex(first(name))
         parsed = (_ripng_entries if pkt.app == 'ripng' else _rip_entries)(raw)
         if parsed is None:
             return
@@ -1839,7 +1848,7 @@ _XDMCP_MAX_LIST = 20
 
 def _xdmcp_array8(hexbytes):
     """An ARRAY8's text from tshark's bytes of it, its length first."""
-    raw = bytes.fromhex(hexbytes.replace(':', ''))[2:] if hexbytes else b''
+    raw = _hex(hexbytes)[2:]
     return raw.decode('utf-8', 'replace')
 
 
@@ -1886,7 +1895,7 @@ class XDMCP:
             version = _int(first('xdmcp.version'), None)
             body = self.flows[pkt.flow.key] = {'version': version} if version is not None else {}
             self.records.append((pkt.flow, pkt.when, self.event_type, body))
-            if opcode == 1 or _slp_group_address(pkt.dst):
+            if opcode == 1 or _to_group_address(pkt.dst):
                 self.flows[('broadcast', pkt.src, pkt.sport)] = body
         self._add(body, 'messages', [message])
         self._add(body, 'authentication_names', v['xdmcp.authentication_name'])
@@ -3201,6 +3210,12 @@ def _opcua_status(text):
     return f'0x{code:08x}'
 
 
+def _dict(value):
+    """A subtree that should be an object, or {} - a node tshark wrote as
+    something else reads as empty instead of failing the run."""
+    return value if isinstance(value, dict) else {}
+
+
 def _child(tree, name):
     """A JSON subtree's child by its label's name - tshark keys a
     structure 'Name: Type'."""
@@ -3340,8 +3355,8 @@ class OPCUA:
             if mode in _OPCUA_SECURITY_MODES:
                 body['security_mode'] = _OPCUA_SECURITY_MODES[mode]
         elif name == 'CreateSessionRequest':
-            client = _child(tree, 'ClientDescription') or {}
-            app_name = (_child(client, 'ApplicationName') or {}).get('opcua.loctext.Text') if isinstance(client, dict) else None
+            client = _dict(_child(tree, 'ClientDescription'))
+            app_name = _dict(_child(client, 'ApplicationName')).get('opcua.loctext.Text')
             for key, value in (('client_application', app_name), ('client_uri', client.get('opcua.ApplicationUri')),
                                ('client_product', client.get('opcua.ProductUri')),
                                ('session_name', tree.get('opcua.SessionName')),
@@ -3349,9 +3364,9 @@ class OPCUA:
                 if value:
                     body[key] = value if key != 'endpoint' else body.get('endpoint', value)
         elif name == 'ActivateSessionRequest':
-            token_tree = _child(tree, 'UserIdentityToken') or {}
-            type_id = _int((_child(token_tree, 'TypeId') or {}).get('opcua.nodeid.numeric'), None)
-            token = next((v for k, v in token_tree.items() if k.endswith('IdentityToken') or 'IdentityToken:' in k), {})                 if isinstance(token_tree, dict) else {}
+            token_tree = _dict(_child(tree, 'UserIdentityToken'))
+            type_id = _int(_dict(_child(token_tree, 'TypeId')).get('opcua.nodeid.numeric'), None)
+            token = next((v for k, v in token_tree.items() if k.endswith('IdentityToken') or 'IdentityToken:' in k), {})
             if type_id in _OPCUA_TOKENS:
                 body['user_token'] = _OPCUA_TOKENS[type_id]
             if isinstance(token, dict):

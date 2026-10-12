@@ -26,7 +26,7 @@ SEVERITIES = ('high', 'medium', 'low')
 # A rule's matches are grouped: the same detail on the same server (one
 # certificate seen 200 times, one PLC written all day) is one finding,
 # with how many records, from how many source hosts, and their first and
-# last time. Groups shown per rule, and records listed for one group
+# last time. Groups shown per rule, and records listed for one group.
 MAX_PER_RULE = 500
 # Matches read per rule to group them - past this, a rule's groups (and
 # each group's counts and times) are those of its first MAX_SCAN records;

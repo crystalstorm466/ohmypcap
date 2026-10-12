@@ -258,8 +258,9 @@ def _enable_community_id(config_content):
     Unlike the arp eve-log entry (a real volume/signal tradeoff, kept
     opt-in - see _enable_eve_log_arp), community-id adds a single
     deterministic `community_id` field to flow/alert records rather than
-    new events, so it's forced on unconditionally like the other five
-    file-store tweaks below rather than gated behind a parameter. It lets
+    new events, so it's forced on unconditionally like the file-store
+    tweaks setup_suricata_config() makes, rather than gated behind a
+    parameter. It lets
     so-crates' output correlate against Zeek/other community-id-aware
     tools without a user ever discovering the setting exists.
 

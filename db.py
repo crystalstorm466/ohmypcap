@@ -208,9 +208,7 @@ def _insert_event(conn, event_dict, has_fts):
     """
     row = _event_row(event_dict)
     line = row[-1]
-    cur = conn.execute(
-        '''INSERT INTO events (event_type, timestamp, src_ip, src_port, dest_ip, dest_port, protocol, app_proto, json_data)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''', row)
+    cur = conn.execute(_INSERT_EVENT, row)
     if has_fts:
         conn.execute(
             'INSERT INTO events_fts (rowid, json_data) VALUES (?, ?)',
@@ -636,8 +634,6 @@ def create_email_analysis_db(db_path, events):
 # the rows it copies into events.db anyway.
 _SHARK_SCHEMA = (SQLITE_SCHEMA[:SQLITE_SCHEMA.index('CREATE INDEX')]
                  + 'CREATE INDEX IF NOT EXISTS idx_event_type ON events(event_type);\n')
-_SHARK_BATCH = 5000
-
 
 def _event_row(event_dict):
     """An event dict as an events row (see _insert_event)."""
@@ -655,21 +651,19 @@ def create_shark_db(db_path, events):
         conn.execute('PRAGMA journal_mode = WAL;')
         conn.execute('PRAGMA synchronous = NORMAL;')
         conn.executescript(_SHARK_SCHEMA)
-        insert = ('INSERT INTO events (event_type, timestamp, src_ip, src_port, dest_ip, dest_port, protocol, '
-                  'app_proto, json_data) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
         # In batches, committed every so often, so a capture's million
         # records don't pile up in one transaction's journal (events can be
         # a generator - shark_analyzer streams them in as it builds them)
         batch = []
         for i, event in enumerate(events, 1):
             batch.append(_event_row(event))
-            if len(batch) >= _SHARK_BATCH:
-                conn.executemany(insert, batch)
+            if len(batch) >= _BULK_BATCH:
+                conn.executemany(_INSERT_EVENT, batch)
                 batch = []
             if i % 50000 == 0:
                 conn.commit()
         if batch:
-            conn.executemany(insert, batch)
+            conn.executemany(_INSERT_EVENT, batch)
         conn.commit()
 
 

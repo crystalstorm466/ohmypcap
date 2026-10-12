@@ -1668,8 +1668,8 @@ class TestThemeAndMenu(unittest.TestCase):
             var link = document.querySelector('.socrates-toast a');
             window.__jsdom_result = { text: toast ? toast.textContent : null, linkText: link ? link.textContent : null };
         ''')
-        self.assertEqual(result['text'], '2 additional files found in the ZIP are also being analyzedView Recent Analyses')
-        self.assertEqual(result['linkText'], 'View Recent Analyses')
+        self.assertEqual(result['text'], '2 additional files found in the ZIP are also being analyzedView Previous Analyses')
+        self.assertEqual(result['linkText'], 'View Previous Analyses')
 
     def test_notifyIfAdditionalAnalyses_singular_wording(self):
         from tests.jsdom_helper import js_statements
@@ -12310,6 +12310,58 @@ class TestReviewRegressions(unittest.TestCase):
         self.assertEqual(result, {'shown': {'hidden': False, 'bold': False,
                                             'text': 'The YARA scan failed - File Alerts may be missing: <b>x</b>'},
                                   'clearedHidden': True, 'clearedText': ''})
+
+    def test_a_failed_post_says_so_instead_of_carrying_on(self):
+        """An acknowledge or rule update the server refused showed nothing
+        - the row just stayed put. Now a toast says why, and the caller
+        stops."""
+        from tests.jsdom_helper import js_statements
+        result = js_statements('''
+            window.fetch = function() {
+                return Promise.resolve({ ok: false, status: 409,
+                    json: function() { return Promise.resolve({ error: 'An update is already running' }); } });
+            };
+            var ok = await postJsonOrToast('/api/update-rules', {ruleset: 'all'}, 'Starting the rules update');
+            var toast = document.querySelector('.socrates-toast');
+            window.fetch = function() { return Promise.reject(new TypeError('Failed to fetch')); };
+            var offline = await postJsonOrToast('/api/acknowledge-alert', {}, 'Acknowledging the alert');
+            var toasts = Array.from(document.querySelectorAll('.socrates-toast')).map(function(t) { return t.textContent; });
+            window.__jsdom_result = {ok: ok, offline: offline, first: toast ? toast.textContent : null, all: toasts};
+        ''')
+        self.assertFalse(result['ok'])
+        self.assertFalse(result['offline'])
+        self.assertIn('Starting the rules update failed: An update is already running', result['first'])
+        self.assertTrue(any("Acknowledging the alert failed: SO-CRATES couldn't be reached" in t for t in result['all']))
+
+    def test_findings_that_fail_to_load_say_so_and_arent_cached_as_none(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements('''
+            await new Promise(function(r) { setTimeout(r, 100); });
+            document.getElementById('inputBoxes').style.display = 'none';
+            currentMd5 = 'abc123';
+            window.fetch = function(url) {
+                if (String(url).indexOf('/api/findings') >= 0) return Promise.reject(new TypeError('Failed to fetch'));
+                return Promise.resolve({ ok: true, json: function() { return Promise.resolve([]); } });
+            };
+            buildSections();
+            await loadTabData('findings');
+            var failed = document.getElementById('section-findings').textContent;
+            window.fetch = function(url) {
+                return Promise.resolve({ ok: true, json: function() { return Promise.resolve(
+                    String(url).indexOf('/api/findings') >= 0
+                        ? {rules: [{id: 'x', title: 'T', severity: 'low', event_type: 'tls', why: 'w', count: 1, groups: 1}],
+                           findings: [{rule: 'x', severity: 'low', title: 'T', detail: 'd', count: 1,
+                                       event: {id: 3, event_type: 'tls', timestamp: '2026-01-01T00:00:00'}}]}
+                        : []); } });
+            };
+            await loadTabData('findings');
+            window.__jsdom_result = {
+                failed: failed,
+                retried: document.querySelectorAll('#section-findings tbody tr[data-id]').length,
+            };
+        ''')
+        self.assertIn("Couldn't load the findings - open the tab again to retry", result['failed'])
+        self.assertEqual(result['retried'], 1, 'opening the tab again fetched them - nothing was cached')
 
     def test_escape_on_the_welcome_screen_keeps_dont_show_help_again(self):
         """REGRESSION: closeAllModals closed Help unconditionally - which

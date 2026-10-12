@@ -1656,6 +1656,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             report = json.loads(body).get('csp-report', {})
         except (json.JSONDecodeError, AttributeError):
             report = {}
+        if not isinstance(report, dict):
+            report = {}      # garbage posted here gets the same 204, not a 500
         if report and not cyberchef.is_expected_csp_violation(report):
             key = (report.get('violated-directive'),
                    report.get('blocked-uri'),
