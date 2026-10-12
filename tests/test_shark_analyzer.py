@@ -2174,6 +2174,18 @@ def _row(event_type, cid='1:a', when='2026-01-01T00:00:10.000000+0000', app=None
     return json.dumps(e)
 
 
+class TestIsoTimes(unittest.TestCase):
+    def test_iso_matches_datetimes_rounding(self):
+        """_iso makes each second's text once - and rounds the
+        microseconds as datetime does, half to even."""
+        from datetime import datetime, timezone
+        for epoch in (0.0, 1700000000.0, 1445494156.123456, 1445494156.9999995, 1445494156.0000005,
+                      1445494156.0000015, 1445494156.9999999, 2 ** 31 + 0.5e-6, 1767225599.999999, -1.5):
+            self.assertEqual(shark_analyzer._iso(epoch),
+                             datetime.fromtimestamp(epoch, tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f+0000'),
+                             repr(epoch))
+
+
 class TestMergeRows(unittest.TestCase):
     """Which of a shark.db's rows join Suricata's in events.db."""
     SURICATA = {'1:http': [(1767225600.0, 1767225620.0)]}     # a flow Suricata called HTTP, 00:00:00-00:00:20
@@ -2264,6 +2276,34 @@ class TestMerge(unittest.TestCase):
         self.assertEqual(self._added(), {'s7comm': 4, 'ssdp': 3, 'nbns': 2, 'llmnr': 1}, 'replaced, not added twice')
         self.assertEqual(db.get_event_types_sqlite(self.events_db, 'FILESERVER').get('nbns'), 1,
                          'search finds them (the full-text index was updated both times)')
+
+    def test_shark_db_is_a_staging_store_without_search_indexes(self):
+        """Only the merge and probe_only_protocols read shark.db - so none
+        of events.db's search indexes, which cost most of the time writing
+        a big capture's records took. The merge only reads the rows it can
+        keep, and finds the same ones as reading them all."""
+        self.assertTrue(shark_analyzer.build(self.dir, self.pcap))
+        shark_db = shark_analyzer.shark_db_path(self.dir)
+        with closing(sqlite3.connect(shark_db)) as conn:
+            names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type IN ('table', 'index') "
+                                                "AND name NOT LIKE 'sqlite_%'")}
+        self.assertEqual(names, {'events', 'idx_event_type', 'shark_run'}, 'no full-text index, no address indexes')
+        identified = db.suricata_identified_flows(self.events_db)
+        everything = list(shark_analyzer.merge_rows(db.iter_events_json(shark_db), identified))
+        prefiltered = list(shark_analyzer.merge_rows(shark_analyzer._mergeable_rows(shark_db), identified))
+        self.assertEqual(prefiltered, everything)
+        self.assertLess(sum(1 for _ in shark_analyzer._mergeable_rows(shark_db)),
+                        sum(1 for _ in db.iter_events_json(shark_db)), 'the flows Suricata has are left unread')
+
+    def test_a_later_pass_that_fails_fails_the_run(self):
+        """The protocol pass runs alongside the writing of the flows - its
+        error still reaches the caller, after the flows."""
+        with mock.patch.object(shark_analyzer, '_protocol_pass', side_effect=RuntimeError('tshark (protocol pass) boom')):
+            with self.assertRaisesRegex(RuntimeError, 'boom'):
+                shark_analyzer.run_tshark(self.pcap)
+            self.assertFalse(shark_analyzer.build(self.dir, self.pcap))
+        with open(os.path.join(self.dir, shark_analyzer.SHARK_ERROR)) as f:
+            self.assertIn('boom', f.read())
 
     def test_the_queue_merges_when_its_run_finishes(self):
         shark_analyzer.enqueue(self.dir, self.pcap)

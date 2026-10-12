@@ -206,22 +206,11 @@ def _insert_event(conn, event_dict, has_fts):
 
     Returns the rowid of the inserted event.
     """
-    line = json.dumps(event_dict, separators=(',', ':'))
+    row = _event_row(event_dict)
+    line = row[-1]
     cur = conn.execute(
         '''INSERT INTO events (event_type, timestamp, src_ip, src_port, dest_ip, dest_port, protocol, app_proto, json_data)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-        (
-            event_dict.get('event_type', ''),
-            event_dict.get('timestamp', ''),
-            event_dict.get('src_ip', ''),
-            event_dict.get('src_port', 0),
-            event_dict.get('dest_ip', ''),
-            event_dict.get('dest_port', 0),
-            event_dict.get('proto') or event_dict.get('protocol', ''),
-            event_dict.get('app_proto', ''),
-            line,
-        )
-    )
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''', row)
     if has_fts:
         conn.execute(
             'INSERT INTO events_fts (rowid, json_data) VALUES (?, ?)',
@@ -581,20 +570,48 @@ def create_email_analysis_db(db_path, events):
         conn.commit()
 
 
+# shark.db is a staging store: read whole by the merge (in id order) and
+# for its flows by type (shark_analyzer.probe_only_protocols) - never
+# searched, sorted or paged. So it has events.db's table but none of its
+# indexes but the event type's, and no full-text index: those cost most of
+# the time writing a capture's million records took, and the merge indexes
+# the rows it copies into events.db anyway.
+_SHARK_SCHEMA = (SQLITE_SCHEMA[:SQLITE_SCHEMA.index('CREATE INDEX')]
+                 + 'CREATE INDEX IF NOT EXISTS idx_event_type ON events(event_type);\n')
+_SHARK_BATCH = 5000
+
+
+def _event_row(event_dict):
+    """An event dict as an events row (see _insert_event)."""
+    return (event_dict.get('event_type', ''), event_dict.get('timestamp', ''), event_dict.get('src_ip', ''),
+            event_dict.get('src_port', 0), event_dict.get('dest_ip', ''), event_dict.get('dest_port', 0),
+            event_dict.get('proto') or event_dict.get('protocol', ''), event_dict.get('app_proto', ''),
+            json.dumps(event_dict, separators=(',', ':')))
+
+
 def create_shark_db(db_path, events):
-    """Create shark.db for tshark's records of a PCAP from the
-    events shark_analyzer built - the same schema as events.db, so every
-    query function here reads either one."""
+    """Create shark.db for tshark's records of a PCAP from the events
+    shark_analyzer built - events.db's events table (so its query
+    functions read it), without its search indexes (_SHARK_SCHEMA)."""
     with _db_connection(db_path) as conn:
-        has_fts = _init_db(conn)
-        # Committed every so often, so a capture's million records don't
-        # pile up in one transaction's journal (events can be a generator -
-        # shark_analyzer streams them in as it builds them)
+        conn.execute('PRAGMA journal_mode = WAL;')
+        conn.execute('PRAGMA synchronous = NORMAL;')
+        conn.executescript(_SHARK_SCHEMA)
+        insert = ('INSERT INTO events (event_type, timestamp, src_ip, src_port, dest_ip, dest_port, protocol, '
+                  'app_proto, json_data) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        # In batches, committed every so often, so a capture's million
+        # records don't pile up in one transaction's journal (events can be
+        # a generator - shark_analyzer streams them in as it builds them)
+        batch = []
         for i, event in enumerate(events, 1):
-            _insert_event(conn, event, has_fts)
+            batch.append(_event_row(event))
+            if len(batch) >= _SHARK_BATCH:
+                conn.executemany(insert, batch)
+                batch = []
             if i % 50000 == 0:
                 conn.commit()
-        conn.execute('PRAGMA optimize;')
+        if batch:
+            conn.executemany(insert, batch)
         conn.commit()
 
 

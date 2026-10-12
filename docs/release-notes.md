@@ -162,7 +162,8 @@ RIPv2's password, or the X authorization cookie XDMCP hands a session.
   ready, and tshark's protocols join them when it finishes (usually first);
   a line under the header counts the seconds while it works
 
-tshark runs at low priority with a 4 GB memory limit; captures of more
+tshark runs at low priority with a 4 GB memory limit (a 210 MB, 2.3
+million-packet capture takes about 80 seconds); captures of more
 than 3 million packets wait until you click **Add tshark protocols**, and
 Settings can turn tshark off.
 

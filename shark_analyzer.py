@@ -34,6 +34,7 @@ Files in the analysis directory:
 
 import ipaddress
 import json
+import math
 import os
 import re
 import shutil
@@ -53,7 +54,7 @@ import sqlite3
 
 import config
 import pcap_subset
-from db import (create_shark_db, iter_events_json, replace_tshark_events, suricata_identified_flows,
+from db import (create_shark_db, replace_tshark_events, suricata_identified_flows,
                 suricata_tls_records, tshark_merge_stamp, _iso_epoch)
 from shark_protocols import PROTOCOLS, RECORDED_APP_PROTOS, STRUCTURED_PROTOCOLS, Packet
 
@@ -210,10 +211,26 @@ def ipv6_exploded(address):
     return _EXPLODED[address]
 
 
+_ISO_SECONDS = {}
+
+
 def _iso(epoch):
-    """Suricata's timestamp format, so both views sort and compare alike."""
-    when = datetime.fromtimestamp(epoch, tz=timezone.utc)
-    return when.strftime('%Y-%m-%dT%H:%M:%S.%f+0000')
+    """Suricata's timestamp format, so both views sort and compare alike.
+    A capture's millions of timestamps fall in far fewer seconds, so each
+    second's text is made once (strftime was a tenth of a big capture's
+    Python time); the microseconds are rounded as datetime rounds them."""
+    if epoch < 0:
+        return datetime.fromtimestamp(epoch, tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f+0000')
+    frac, whole = math.modf(epoch)
+    micro = round(frac * 1e6)
+    if micro >= 1_000_000:
+        whole, micro = whole + 1, micro - 1_000_000
+    seconds = _ISO_SECONDS.get(whole)
+    if seconds is None:
+        if len(_ISO_SECONDS) > 1_000_000:
+            _ISO_SECONDS.clear()
+        seconds = _ISO_SECONDS[whole] = datetime.fromtimestamp(whole, tz=timezone.utc).strftime('%Y-%m-%dT%H:%M:%S')
+    return f'{seconds}.{micro:06d}+0000'
 
 
 def _int(value):
@@ -656,6 +673,35 @@ def _add_outer(flows, f, app, when, length):
     flow.add(src, sport, length, when, app, cid, False)
 
 
+class _LaterPasses:
+    """iter_records' protocol and structured passes, run in a thread of
+    their own once the first pass is done. wait() returns the protocol
+    pass's protocols, or raises what a pass raised."""
+
+    def __init__(self, pcap_path, flows, ranges, last_frame, deadline, combined, structured):
+        self.protocols, self.error = [], None
+
+        def run():
+            try:
+                if pcap_path and ranges:
+                    self.protocols = _protocol_pass(pcap_path, flows, ranges, last_frame, deadline,
+                                                    skip=combined or ())
+                if structured:
+                    _structured_pass(pcap_path, flows, structured, last_frame, deadline)
+            except BaseException as e:       # re-raised in wait()
+                self.error = e
+            finally:
+                flows.clear()
+        self.thread = threading.Thread(target=run, name='shark-later-passes', daemon=True)
+        self.thread.start()
+
+    def wait(self):
+        self.thread.join()
+        if self.error is not None:
+            raise self.error
+        return self.protocols
+
+
 def iter_records(lines, pcap_path=None, deadline=None, combined=()):
     """build_records' records, one at a time: a flow's is built as it's
     handed out and the flow then let go, so a capture's flows - most of
@@ -689,7 +735,10 @@ def iter_records(lines, pcap_path=None, deadline=None, combined=()):
         split = _split_tunnel(cols) if cols[_F_PROTOS].count(':ip') > 1 else None    # (ipmi, ipp...: it says)
         if split is not None:
             raw_cols, cols = cols, split[1]
-        f = [_last(c) for c in cols[:len(_FIELDS)]]
+        # (a field occurs more than once - joined by _AGGREGATOR - in few
+        # packets but tunneled ones, so most lines need no splitting)
+        f = cols[:len(_FIELDS)] if split is None and _AGGREGATOR not in line else \
+            [_last(c) for c in cols[:len(_FIELDS)]]
         try:
             when = float(f[_F_TIME])
         except ValueError:
@@ -758,19 +807,23 @@ def iter_records(lines, pcap_path=None, deadline=None, combined=()):
                 flow.recorded = True
                 spans.append((flow.first_frame, frame))
     protocols = [handler for handler, _ in feeds or ()]
-    if pcap_path and (spans or runs):
-        protocols += _protocol_pass(pcap_path, flows, spans + [tuple(r) for r in runs], last_frame, deadline,
-                                    skip=combined or ())
-    del spans, runs
     structured = [proto() for proto in STRUCTURED_PROTOCOLS] if pcap_path else []
-    if structured:
-        _structured_pass(pcap_path, flows, structured, last_frame, deadline)
+    # The flows are final now - the passes below only read them - so their
+    # records go out while the passes run: each pass's tshark (most of its
+    # time) works alongside the writing of a capture's flows, rather than
+    # before it. Their records follow the flows', as before.
+    passes = _LaterPasses(pcap_path, dict(flows), spans + [tuple(r) for r in runs], last_frame, deadline,
+                          combined, structured)
+    del spans, runs
     ordered = sorted(flows.values(), key=lambda fl: fl.first)
     flows.clear()
-    for i, flow in enumerate(ordered):
-        ordered[i] = None    # the transaction records below hold the flows they need
-        yield flow.event()
-    del ordered
+    try:
+        for i, flow in enumerate(ordered):
+            ordered[i] = None    # the transaction records below hold the flows they need
+            yield flow.event()
+        del ordered
+    finally:
+        protocols += passes.wait()
     for handler in protocols + structured:
         for flow, when, event_type, body in handler.finish():
             yield flow.record(when, event_type, body)
@@ -1557,6 +1610,19 @@ def merge_rows(shark_rows, identified, probed=frozenset(), tls_records=None):
         yield event
 
 
+def _mergeable_rows(shark_db):
+    """shark.db's rows, as stored, less the flows merge_rows always drops -
+    no protocol, or one Suricata parses or with records here - so the
+    merge doesn't parse the JSON of a capture's every flow to drop most of
+    them. merge_rows still judges every row it's given."""
+    dropped = sorted(SURICATA_APP_PROTOS | RECORDED_APP_PROTOS)
+    placeholders = ','.join('?' * len(dropped))
+    with closing(sqlite3.connect(f'file:{shark_db}?mode=ro', uri=True)) as conn:
+        yield from (row[0] for row in conn.execute(
+            "SELECT json_data FROM events WHERE event_type != 'flow' OR "
+            f"(coalesce(app_proto, '') != '' AND app_proto NOT IN ({placeholders})) ORDER BY id", dropped))
+
+
 def merge(dir_path):
     """Add tshark's rows (merge_rows) to the analysis's events.db - once
     both Suricata (its events.db imported, no .phase left) and tshark
@@ -1572,7 +1638,7 @@ def merge(dir_path):
         stamp = _merge_stamp(shark_db)
         if tshark_merge_stamp(events_db) == stamp:
             return None
-        added = replace_tshark_events(events_db, merge_rows(iter_events_json(shark_db),
+        added = replace_tshark_events(events_db, merge_rows(_mergeable_rows(shark_db),
                                                             suricata_identified_flows(events_db),
                                                             probe_only_protocols(shark_db),
                                                             lambda cids: suricata_tls_records(events_db, cids)), stamp)
