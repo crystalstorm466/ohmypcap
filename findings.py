@@ -75,6 +75,36 @@ _TLS_OUT_OF_DATE = (f"({_j('tls', 'notafter')} < substr(timestamp, 1, 19) "
                     f"OR {_j('tls', 'notbefore')} > substr(timestamp, 1, 19))")
 
 
+def _name_matches(name, pattern):
+    """SQL: whether a host name matches a certificate's name - the same,
+    ignoring case, or under its wildcard, which stands for exactly one
+    label (*.example.com covers www.example.com, not example.com or
+    a.b.example.com). Both are lowercased SQL expressions."""
+    suffix = f'substr({pattern}, 2)'
+    return (f"({name} = {pattern} OR (substr({pattern}, 1, 2) = '*.' AND length({name}) > length({suffix}) "
+            f"AND substr({name}, length({name}) - length({suffix}) + 1) = {suffix} "
+            f"AND instr(substr({name}, 1, length({name}) - length({suffix})), '.') = 0))")
+
+
+_SNI = f"lower({_j('tls', 'sni')})"
+_SUBJECT_CN_REST = f"substr({_j('tls', 'subject')}, instr({_j('tls', 'subject')}, 'CN=') + 3)"
+_SUBJECT_CN = (f"lower(CASE WHEN instr({_SUBJECT_CN_REST}, ', ') > 0 "
+               f"THEN substr({_SUBJECT_CN_REST}, 1, instr({_SUBJECT_CN_REST}, ', ') - 1) ELSE {_SUBJECT_CN_REST} END)")
+_HAS_SANS = f"json_array_length(json_data, '$.tls.subjectaltname') > 0"
+# A certificate that doesn't name the host the client asked for: its SANs,
+# when it has any - or else its subject's CN (RFC 6125) - cover no match
+# for the SNI. Not an SNI that's an address (some clients send one, which
+# only an IP SAN could match), nor a record with no certificate (TLS 1.3
+# encrypts it).
+_TLS_NAME_MISMATCH = (
+    f"coalesce({_j('tls', 'sni')}, '') != '' AND coalesce({_j('tls', 'subject')}, '') != '' "
+    f"AND instr({_j('tls', 'sni')}, ':') = 0 AND {_j('tls', 'sni')} GLOB '*[^0-9.]*' "
+    f"AND CASE WHEN {_HAS_SANS} "
+    f"THEN NOT EXISTS (SELECT 1 FROM json_each(json_data, '$.tls.subjectaltname') "
+    f"WHERE {_name_matches(_SNI, 'lower(value)')}) "
+    f"ELSE instr({_j('tls', 'subject')}, 'CN=') = 0 OR NOT {_name_matches(_SNI, _SUBJECT_CN)} END")
+
+
 def _tls_certificate(b):
     """The certificate a TLS record names, and for which host."""
     return _join(b.get('subject'), f"(for {b['sni']})" if b.get('sni') else '')
@@ -195,17 +225,24 @@ RULES = (
          lambda b: _join(b.get('hostname'), b.get('program'), '-', (b.get('message') or '')[:120]),
          'A device logging an emergency, alert or critical condition.'),
 
+    Rule('tls_self_signed', 'medium', 'tls', 'TLS self-signed certificate',
+         f"{_j('tls', 'issuerdn')} = {_j('tls', 'subject')} AND {_j('tls', 'subject')} != ''",
+         _tls_certificate,
+         "A certificate that vouches for itself: what malware command-and-control servers and interception "
+         "tools generate, and common on appliances and lab servers. No client trusts one unless told to."),
+
     Rule('tls_certificate_out_of_date', 'low', 'tls', 'TLS certificate expired or not yet valid',
          _TLS_OUT_OF_DATE,
          lambda b: _join('valid', (b.get('notbefore') or '?')[:10], 'to', (b.get('notafter') or '?')[:10], '-',
                          _tls_certificate(b)),
          'The server offered a certificate outside its validity dates at the time - a forgotten renewal, a '
          'device with its clock wrong, or a certificate made up on the spot.'),
-    Rule('tls_self_signed', 'low', 'tls', 'TLS self-signed certificate',
-         f"{_j('tls', 'issuerdn')} = {_j('tls', 'subject')} AND {_j('tls', 'subject')} != ''",
-         _tls_certificate,
-         "A certificate that vouches for itself: common on appliances and lab servers, and what malware "
-         "and interception tools generate. No client trusts one unless told to."),
+    Rule('tls_name_mismatch', 'low', 'tls', "TLS certificate doesn't name the host",
+         _TLS_NAME_MISMATCH,
+         lambda b: _join('asked for', b.get('sni'), '- certificate for',
+                         _list(b.get('subjectaltname')) or b.get('subject')),
+         "The client asked for one host and got a certificate for others - a server's default certificate, "
+         "a shared host or CDN that doesn't serve that name, or someone in the middle answering for it."),
     Rule('rip_whole_table', 'low', 'rip', 'RIP routing table handed out',
          f"{_j('rip', 'whole_table')} = 1 AND {_j('rip', 'responses')} IS NOT NULL",
          lambda b: _join(b.get('route_count'), 'routes'),

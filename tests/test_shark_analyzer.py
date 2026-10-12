@@ -1523,8 +1523,10 @@ class TestTLSFailures(unittest.TestCase):
         self.assertNotIn('sni', merged[TLS_UNWILLING_SERVER])
         found = findings.query_findings(events_db)
         self.assertEqual(sorted((r['id'], r['count']) for r in found['rules']),
-                         [('tls_certificate_out_of_date', 2), ('tls_certificate_refused', 1), ('tls_self_signed', 2)],
-                         'the certificate starts in 2026; the capture is from 2023')
+                         [('tls_certificate_out_of_date', 2), ('tls_certificate_refused', 1), ('tls_name_mismatch', 1),
+                          ('tls_self_signed', 2)],
+                         'the certificate starts in 2026, and the capture is from 2023; it names vpn.example, '
+                         'not good.example')
 
 
 @unittest.skipUnless(HAS_TSHARK, 'tshark not installed')

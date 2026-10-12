@@ -62,6 +62,8 @@ MATCHES = {
                                             'notbefore': '2024-01-01T00:00:00', 'notafter': '2025-06-01T00:00:00'}),
     'tls_self_signed': ('tls', {'sni': 'lab.example', 'subject': 'CN=lab.example', 'issuerdn': 'CN=lab.example',
                                 'notbefore': '2025-01-01T00:00:00', 'notafter': '2027-01-01T00:00:00'}),
+    'tls_name_mismatch': ('tls', {'sni': 'login.bank.example', 'subject': 'CN=*.cdn.example', 'issuerdn': 'CN=Some CA',
+                                  'subjectaltname': ['*.cdn.example', 'cdn.example']}),
 }
 
 # Records like those the rules look for that no rule should match
@@ -90,6 +92,9 @@ NON_MATCHES = [
     ('tls', {'sni': 'www.example', 'subject': 'CN=www.example', 'issuerdn': 'CN=Some CA',
              'notbefore': '2025-01-01T00:00:00', 'notafter': '2026-01-02T00:00:00'}),
     ('tls', {'sni': 'www.example', 'version': 'TLS 1.3'}),
+    ('tls', {'sni': 'WWW.Shop.example', 'subject': 'CN=shop.example', 'issuerdn': 'CN=Some CA',
+             'subjectaltname': ['shop.example', '*.shop.example']}),
+    ('tls', {'sni': '192.0.2.7', 'subject': 'CN=device', 'issuerdn': 'CN=Some CA'}),
 ]
 
 
@@ -143,6 +148,8 @@ class TestFindings(unittest.TestCase):
         self.assertEqual(by_rule['tls_certificate_out_of_date'],
                          'valid 2024-01-01 to 2025-06-01 - CN=old.example (for old.example)')
         self.assertEqual(by_rule['tls_self_signed'], 'CN=lab.example (for lab.example)')
+        self.assertEqual(by_rule['tls_name_mismatch'],
+                         'asked for login.bank.example - certificate for *.cdn.example, cdn.example')
         tls13 = findings.RULES_BY_ID['tls_certificate_refused'].detail(
             {'alerts': ['client: Unknown CA'], 'sni': 'vpn.example'})
         self.assertEqual(tls13, 'client: Unknown CA (for vpn.example)', 'TLS 1.3: no certificate to name')
@@ -225,6 +232,37 @@ class TestFindings(unittest.TestCase):
         self.assertEqual(found, [40002, 40003], 'before it starts and after it ends, not during')
         searched = findings.query_findings(path, q=['CN=CA'])
         self.assertEqual([r['count'] for r in searched['rules']], [2])
+
+    def test_which_names_a_certificate_covers(self):
+        """Its SANs when it has any (its CN then doesn't count), or else
+        its CN; a wildcard covers exactly one label; case doesn't matter."""
+        cases = [  # (SNI, SANs, subject, mismatched?)
+            ('www.example.com', ['www.example.com'], 'CN=other', False),
+            ('WWW.Example.COM', ['www.example.com'], '', False),
+            ('a.example.com', ['*.example.com'], 'CN=x', False),
+            ('example.com', ['*.example.com'], 'CN=x', True),
+            ('a.b.example.com', ['*.example.com'], 'CN=x', True),
+            ('xexample.com', ['*.example.com'], 'CN=x', True),
+            ('www.example.com', ['other.example'], 'CN=www.example.com', True),
+            ('www.example.com', None, 'C=US, O=Example, CN=www.example.com', False),
+            ('www.example.com', None, 'CN=www.example.com, O=Example', False),
+            ('mail.example.com', None, 'CN=*.example.com', False),
+            ('www.example.com', None, 'CN=www.example.org', True),
+            ('www.example.com', None, 'O=No Common Name', True),
+            ('10.1.2.3', ['device.local'], 'CN=device.local', False),
+            ('2001:db8::1', None, 'CN=device.local', False),
+            ('', None, 'CN=device.local', False),
+            ('www.example.com', None, '', False),
+        ]
+        events = []
+        for i, (sni, sans, subject, _) in enumerate(cases):
+            body = {'sni': sni, 'subject': subject, 'issuerdn': 'CN=Some CA'}
+            if sans is not None:
+                body['subjectaltname'] = sans
+            events.append(_record('tls', body, i, dest_port=i))
+        found = {f['event']['dest_port'] for f in findings.query_findings(self._db(events))['findings']
+                 if f['rule'] == 'tls_name_mismatch'}
+        self.assertEqual([(c[0], c[1], c[2]) for i, c in enumerate(cases) if (i in found) != c[3]], [])
 
     def test_findings_carry_their_row_notes(self):
         path = self._db([_record('tunnel', {'type': 'GRE', 'returns_to_sender': True}, 1)])

@@ -180,12 +180,14 @@ and the record's own details a click away:
   forged or replayed message); an SLP host accepting registrations
   (CVE-2023-29552)
 - **Medium** - S7 writes, IEC 104 commands and set points, OPC UA writes
-  and method calls, a TLS certificate refused by the other end, open
-  SOCKS proxies, XDMCP login screens offered, RIP default routes and
+  and method calls, a TLS certificate refused by the other end,
+  self-signed TLS certificates (in malware captures, mostly
+  command-and-control servers'), open SOCKS proxies, XDMCP login screens offered, RIP default routes and
   cleartext RIPv2 passwords, tunnel probes addressed back to their
   sender, NFS exports listed, critical syslog messages
 - **Low** - TLS certificates expired or not yet valid at the time of the
-  connection, and self-signed ones (from Suricata's TLS records); RIP
+  connection, and ones that don't name the host the client asked for
+  (from Suricata's TLS records); RIP
   tables handed out, RPC service lists, BACnet writes, SLP answers, CoAP
   resource lists, L2TP without tunnel authentication, rejected RADIUS
   logins
