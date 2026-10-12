@@ -1570,6 +1570,38 @@ def write_tunnel_pcap(path):
     write_pcap(path, tunnel_packets())
 
 
+# An ICMP port unreachable about each of a VXLAN, a Teredo and a GRE packet,
+# quoting the whole of it as Linux does (up to 576 bytes) - the tunnel and
+# the packet inside both. Each is about the outer packet: Suricata counts
+# the first two on the tunnel's outer flow, and GRE's (no outer flow) on
+# none (tests/data/icmp_tunnel_fixture.eve.json, Suricata 8.0.7).
+
+def _icmp_unreachable_quoting(src, dst, about, quote=548):
+    inner = about[14:14 + quote]
+    icmp = struct.pack('!BBHI', 3, 3, 0, 0) + inner
+    icmp = icmp[:2] + struct.pack('!H', _checksum(icmp)) + icmp[4:]
+    s, d = socket.inet_aton(src), socket.inet_aton(dst)
+    ip = struct.pack('!BBHHHBBH4s4s', 0x45, 0, 20 + len(icmp), 1, 0, 64, 1, 0, s, d)
+    ip = ip[:10] + struct.pack('!H', _checksum(ip)) + ip[12:]
+    return b'\x00' * 6 + b'\x11' * 6 + struct.pack('!H', 0x0800) + ip + icmp
+
+
+def icmp_tunnel_packets():
+    vxlan_frame = _udp_packet('172.16.5.1', '172.16.5.2', 40000, 53, b'\x00\x01\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00')
+    vxlan = _udp_packet(VXLAN_A, VXLAN_B, 50000, 4789, b'\x08\x00\x00\x00\x00\x13\x88\x00' + vxlan_frame)
+    teredo = _udp_packet(TEREDO_CLIENT, TEREDO_RELAY, 50444, 3544,
+                         _udp6_packet('2001:0:c633:641e::1', '2001:db8::1', 40001, 7, b'ping')[14:])
+    syn = _tcp_packet('10.10.0.5', '10.20.0.7', 51000, 443, 1, 0, 0x02)
+    gre = _ipv4_wrap(TUNNEL_SITE_A, TUNNEL_SITE_B, 47, b'\x00\x00\x08\x00' + syn[14:])
+    return [vxlan, _icmp_unreachable_quoting(VXLAN_B, VXLAN_A, vxlan),
+            teredo, _icmp_unreachable_quoting(TEREDO_RELAY, TEREDO_CLIENT, teredo),
+            gre, _icmp_unreachable_quoting(TUNNEL_SITE_B, TUNNEL_SITE_A, gre)]
+
+
+def write_icmp_tunnel_pcap(path):
+    write_pcap(path, icmp_tunnel_packets())
+
+
 # ---------------------------------------------------------------- XDMCP
 
 # A client (XDMCP_CLIENT) asking a login manager (XDMCP_SERVER, port

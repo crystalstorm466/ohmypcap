@@ -67,7 +67,7 @@ SHARK_ARTIFACTS = (SHARK_DB, SHARK_DB + '-wal', SHARK_DB + '-shm', SHARK_DB + '.
 # change here or in shark_protocols changes what a run produces: a
 # shark.db stamped with an older version is rebuilt the next time its
 # status is asked for, so existing analyses pick up the change.
-SHARK_FORMAT_VERSION = 37
+SHARK_FORMAT_VERSION = 38
 
 # The fields every packet is read for, one per column of tshark's
 # tab-separated output, in this order - then each of shark_protocols'
@@ -528,6 +528,37 @@ def _split_tunnel(cols):
     return kind, inner_cols, outer_f, app
 
 
+def _icmp_quoted_tunnel(cols):
+    """For an ICMP error whose copy of the packet it's about is itself
+    tunneled - Linux quotes up to 576 bytes, enough for a tunnel and the
+    packet inside - (the tunnel's type, the quoted outer packet's base
+    fields): the error is about that outer packet, not the one inside it,
+    whose addresses (and ports) the last-occurrence fields would read.
+    None for any other packet."""
+    layers = cols[_F_PROTOS].split(':')
+    at = next((i for i, layer in enumerate(layers) if layer in ('icmp', 'icmpv6')), None)
+    if at is None:
+        return None
+    found = _tunnel_type(layers[at + 1:])
+    if found is None:
+        return None
+    kind, outer, _ = found
+    q = at + 1 + outer                       # the quoted outer network layer
+    transport = layers[q + 1] if q + 1 < len(layers) and layers[q + 1] in ('tcp', 'udp') else ''
+    f = [_last(c) for c in cols[:len(_FIELDS)]]
+    for column, layer in _FIELD_LAYERS.items():
+        values = cols[column].split(_AGGREGATOR) if cols[column] else []
+        if layer == layers[q]:
+            n = layers[:q].count(layer)      # (the error's own IP header comes first)
+        elif layer == transport:
+            n = layers[:q + 1].count(layer)
+        else:
+            f[column] = ''
+            continue
+        f[column] = values[n] if n < len(values) else ''
+    return kind, f
+
+
 class _Tunnels:
     """One record per tunnel - its type and outer endpoints - with the
     inner hosts and flows it carried."""
@@ -824,6 +855,13 @@ def iter_records(lines, pcap_path=None, deadline=None, combined=()):
             app = ''
             outer_src = cols[_F_IP_SRC].split(_AGGREGATOR)[0] if f[_F_IP_SRC] else \
                 ipv6_exploded(cols[_F_IP6_SRC].split(_AGGREGATOR)[0])
+            # About a tunneled packet: the tunnel's outer flow's - or, for
+            # GRE, whose outer flow Suricata doesn't log, no flow's, as there
+            quoted = _icmp_quoted_tunnel(cols) if split is None else None
+            if quoted is not None:
+                if quoted[0] in _NO_OUTER_FLOW:
+                    continue
+                f = quoted[1]
         ip_v, src, dst, proto, stream, sport, dport, key = _packet_key(f, app)
         syn_only = f[_F_SYN] in ('1', 'True') and f[_F_ACK] not in ('1', 'True')
         flow = flows.get(key)

@@ -949,6 +949,24 @@ class TestTunnels(unittest.TestCase):
         self.assertTrue(self.tunnels['IP-in-IP']['tunnel']['returns_to_sender'])
         self.assertNotIn('returns_to_sender', self.tunnels['GRE']['tunnel'])
 
+    def test_an_icmp_error_about_a_tunneled_packet_is_its_outer_flows(self):
+        """REGRESSION: an ICMP error quoting a whole tunneled packet (Linux
+        quotes up to 576 bytes) landed on the flow of the packet inside -
+        and for Teredo on a made-up flow, the quoted outer packet's IPv4
+        addresses with the inner packet's ports. Suricata counts it on the
+        tunnel's outer flow, and GRE's on none (it logs no outer flow)."""
+        from scripts.compare_shark_suricata import compare
+        from tests.protocol_fixtures import write_icmp_tunnel_pcap
+        pcap = os.path.join(self.tmpdir, 'icmp_tunnel.pcap')
+        write_icmp_tunnel_pcap(pcap)
+        records = shark_analyzer.run_tshark(pcap)
+        report = compare(_load_eve('icmp_tunnel_fixture.eve.json'), records)['flow']
+        self.assertEqual((report['suricata'], report['shark'], report['matched'], report['differences']), (5, 5, 5, []))
+        flows = {(r['src_ip'], r.get('dest_port')): r for r in records if r['event_type'] == 'flow'}
+        self.assertEqual(flows[('10.1.0.70', 4789)]['shark']['answered'], 'ICMP error only')
+        self.assertEqual(flows[('172.16.5.1', 53)]['flow']['pkts_toclient'], 0, 'not the VXLAN packet inside')
+        self.assertEqual(flows[('10.10.0.5', 443)]['flow']['pkts_toclient'], 0, "GRE's: no flow's")
+
     def test_flows_match_suricatas_inner_and_outer(self):
         from scripts.compare_shark_suricata import compare
         report = compare(_load_eve('tunnel_fixture.eve.json'), self.records)['flow']

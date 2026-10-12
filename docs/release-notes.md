@@ -243,7 +243,10 @@ reanalyzing still works, since it runs Suricata again.
 - tshark's connections: a host whose address ends in .255 (a public one,
   or one in a /23 or larger) is no longer taken for a broadcast address -
   one that answers is a host - and a broadcast is known by its frames'
-  Ethernet broadcast destination, whatever its last octet
+  Ethernet broadcast destination, whatever its last octet; and an ICMP
+  error about a tunneled packet (quoting it whole, tunnel and all) is
+  counted on the tunnel's outer flow, as Suricata counts it, not on the
+  packet inside's - or, for Teredo, on a flow made up of both
 - tshark's records: a TLS failure takes the certificate only from
   Suricata's record of the same connection, not one of a reused port
   long after; S7comm PDUs sharing a packet each get their own error and
