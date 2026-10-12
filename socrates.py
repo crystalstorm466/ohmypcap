@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import functools
 import http.server
 import socketserver
 import concurrent.futures
@@ -40,6 +41,7 @@ from storage import (
     PCAP_EXTENSIONS, PCAP_ANALYSIS_ARTIFACTS, FILE_ANALYSIS_ARTIFACTS,
     upload_tmp_dir, cleanup_upload_tmp_dir, remove_imported_eve_files, resolve_upload_size_limit, extract_zip_contents,
     hash_file, hash_file_with_prefix, is_pcap_path, write_meta, read_meta, find_pcap_file,
+    add_analysis_warning, read_analysis_warnings,
 )
 from analysis_cache import (
     SANKEY_CACHE, AGGREGATION_CACHE, AGGREGATION_TOTALS_CACHE, ALL_CACHES, CACHE_LOCK,
@@ -2230,8 +2232,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
                 if rules_file and check_yara_executable():
                     try:
-                        matches, sha256, md5, sha1, metadata = scan_single_file(file_path, rules_file)
+                        failures = []
+                        matches, sha256, md5, sha1, metadata = scan_single_file(file_path, rules_file, failures)
                         create_file_analysis_db(db_file, file_path, matches, md5, sha1, sha256, metadata=metadata)
+                        for reason in failures:
+                            add_analysis_warning(dir_path, f'The YARA scan failed - File Alerts may be missing: {reason}')
                     except Exception as e:
                         _set_error(dir_path, f'YARA scan failed: {e}')
                         create_file_analysis_db(db_file, file_path, [], '', '', '')
@@ -2268,12 +2273,17 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 db_file = os.path.join(dir_path, 'events.db')
                 # network_allowed=False - see _analyze_standalone_file.
                 rules_file = setup_yara_rules(DATA_DIR, network_allowed=False)
-                scan = scan_single_file if (rules_file and check_yara_executable()) else None
+                failures = []
+                scan = functools.partial(scan_single_file, failures=failures) \
+                    if (rules_file and check_yara_executable()) else None
                 try:
                     events = analyze_message(dir_path, file_path, rules_file, scan)
                 except Exception as e:
                     _set_error(dir_path, f'Email analysis failed: {e}')
                     events = []
+                for reason in dict.fromkeys(failures):
+                    add_analysis_warning(dir_path, f'The YARA scan of the message or its attachments failed - '
+                                                   f'File Alerts may be missing: {reason}')
                 create_email_analysis_db(db_file, events)
                 with open(os.path.join(dir_path, 'name.txt'), 'w') as f:
                     f.write(safe_filename)
@@ -2587,6 +2597,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         response = {'status': 'ready' if is_ready else 'processing'}
         if not is_ready:
             response['phase'] = phase
+        else:
+            # What went wrong without failing it (storage.add_analysis_warning)
+            warnings = [_sanitize_error_text(w) for w in read_analysis_warnings(dir_path)]
+            if warnings:
+                response['warnings'] = warnings
         if meta:
             response['meta'] = meta
         return response

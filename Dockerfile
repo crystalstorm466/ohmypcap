@@ -186,13 +186,40 @@ for detection_type, filename in (
     print(f'Baked {len(index)} {detection_type} AI summary entries -> {out_path}')
 PY
 
+# YARA Forge rules, for baking into the image for air-gapped deployments
+# (copied in by the final stage). Baked in gzip-compressed (measured:
+# ~19MB -> 3MB) - see yara_analyzer.py's BAKED_IN_YARA_FILE/
+# setup_yara_rules() for the matching decompress-on-read.
+RUN mkdir -p /tmp/yara-rules-out && \
+    curl -fsSL -o /tmp/yara-forge-full.zip \
+    "https://github.com/YARAHQ/yara-forge/releases/latest/download/yara-forge-rules-full.zip" && \
+    python3 -c "import zipfile; zipfile.ZipFile('/tmp/yara-forge-full.zip').extract('packages/full/yara-rules-full.yar', '/tmp/yara-forge-extract')" && \
+    gzip -9 -c /tmp/yara-forge-extract/packages/full/yara-rules-full.yar > /tmp/yara-rules-out/yara-rules-full.yar.gz && \
+    rm -rf /tmp/yara-forge-full.zip /tmp/yara-forge-extract
+
+# Sigma rules (Zircolite JSON format), for baking into the image for
+# air-gapped deployments (copied in by the final stage). Destination filenames must be windows.json.gz/linux.json.gz
+# (not the upstream rules_*.json names) - sigma_analyzer.py's
+# setup_sigma_rules() looks for '<ruleset>.json.gz' under BAKED_IN_SIGMA_DIR,
+# keyed by the ZIRCOLITE_RULES_URLS dict keys ('windows'/'linux'), not by
+# the source URL's own filename. Baked in gzip-compressed (measured:
+# windows.json ~7.4MB -> 0.9MB) - see setup_sigma_rules() for the matching
+# decompress-on-read.
+RUN mkdir -p /tmp/sigma-rules-out && \
+    curl -fsSL -o /tmp/windows.json \
+    "https://raw.githubusercontent.com/wagga40/Zircolite-Rules-v2/main/rules_windows_merged.json" && \
+    curl -fsSL -o /tmp/linux.json \
+    "https://raw.githubusercontent.com/wagga40/Zircolite-Rules-v2/main/rules_linux.json" && \
+    gzip -9 -c /tmp/windows.json > /tmp/sigma-rules-out/windows.json.gz && \
+    gzip -9 -c /tmp/linux.json > /tmp/sigma-rules-out/linux.json.gz && \
+    rm -f /tmp/windows.json /tmp/linux.json
+
 # Downloads the pinned, checksum-verified CyberChef release - see
 # scripts/fetch-cyberchef.sh for the pins and what it strips. Last in this
 # stage so a CyberChef upgrade doesn't re-run the slow YAML conversions
 # above.
 COPY scripts/fetch-cyberchef.sh /tmp/fetch-cyberchef.sh
 RUN sh /tmp/fetch-cyberchef.sh /tmp/cyberchef-out
-
 
 FROM debian:13-slim
 
@@ -216,7 +243,6 @@ RUN echo "deb http://deb.debian.org/debian trixie-backports main" > /etc/apt/sou
     tcpdump \
     tshark \
     yara \
-    curl \
     file \
     libimage-exiftool-perl \
     libxml2 \
@@ -225,7 +251,9 @@ RUN echo "deb http://deb.debian.org/debian trixie-backports main" > /etc/apt/sou
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=zircolite-builder /usr/local/lib/zircolite /usr/local/lib/zircolite
-COPY --from=zircolite-builder --chown=1000:1000 /usr/local/lib/zircolite-venv /usr/local/lib/zircolite-venv
+# Root-owned, like the rest of the image: the runtime user runs it, never
+# writes to it
+COPY --from=zircolite-builder /usr/local/lib/zircolite-venv /usr/local/lib/zircolite-venv
 RUN ln -s /usr/local/lib/zircolite/zircolite.py /usr/local/bin/zircolite.py
 
 ENV DATA_DIR=/data
@@ -337,32 +365,13 @@ for slug in BAKED_IN_SURICATA_SOURCES:
         shutil.rmtree(scratch_out, ignore_errors=True)
 PY
 
-# Bake YARA Forge rules into image for air-gapped deployments. Baked in
-# gzip-compressed (measured: ~19MB -> 3MB) - see yara_analyzer.py's
-# BAKED_IN_YARA_FILE/setup_yara_rules() for the matching decompress-on-read.
-RUN mkdir -p /usr/share/yara-rules && \
-    curl -fsSL -o /tmp/yara-forge-full.zip \
-    "https://github.com/YARAHQ/yara-forge/releases/latest/download/yara-forge-rules-full.zip" && \
-    python3 -c "import zipfile; zipfile.ZipFile('/tmp/yara-forge-full.zip').extract('packages/full/yara-rules-full.yar', '/tmp/yara-forge-extract')" && \
-    gzip -9 -c /tmp/yara-forge-extract/packages/full/yara-rules-full.yar > /usr/share/yara-rules/yara-rules-full.yar.gz && \
-    rm -rf /tmp/yara-forge-full.zip /tmp/yara-forge-extract
-
-# Bake Sigma rules (Zircolite JSON format) into image for air-gapped
-# deployments. Destination filenames must be windows.json.gz/linux.json.gz
-# (not the upstream rules_*.json names) - sigma_analyzer.py's
-# setup_sigma_rules() looks for '<ruleset>.json.gz' under BAKED_IN_SIGMA_DIR,
-# keyed by the ZIRCOLITE_RULES_URLS dict keys ('windows'/'linux'), not by
-# the source URL's own filename. Baked in gzip-compressed (measured:
-# windows.json ~7.4MB -> 0.9MB) - see setup_sigma_rules() for the matching
-# decompress-on-read.
-RUN mkdir -p /usr/share/sigma-rules && \
-    curl -fsSL -o /tmp/windows.json \
-    "https://raw.githubusercontent.com/wagga40/Zircolite-Rules-v2/main/rules_windows_merged.json" && \
-    curl -fsSL -o /tmp/linux.json \
-    "https://raw.githubusercontent.com/wagga40/Zircolite-Rules-v2/main/rules_linux.json" && \
-    gzip -9 -c /tmp/windows.json > /usr/share/sigma-rules/windows.json.gz && \
-    gzip -9 -c /tmp/linux.json > /usr/share/sigma-rules/linux.json.gz && \
-    rm -f /tmp/windows.json /tmp/linux.json
+# YARA Forge and Sigma rules, baked in for air-gapped deployments - fetched
+# and gzip-compressed in the resources-builder stage, so curl stays out of
+# the runtime image. See yara_analyzer.py's BAKED_IN_YARA_FILE and
+# sigma_analyzer.py's setup_sigma_rules() for the decompress-on-read.
+COPY --from=resources-builder /tmp/yara-rules-out/yara-rules-full.yar.gz /usr/share/yara-rules/yara-rules-full.yar.gz
+COPY --from=resources-builder /tmp/sigma-rules-out/windows.json.gz /usr/share/sigma-rules/windows.json.gz
+COPY --from=resources-builder /tmp/sigma-rules-out/linux.json.gz /usr/share/sigma-rules/linux.json.gz
 
 # Bake Security Onion Playbooks (investigation guidance) into image for
 # air-gapped deployments - see the resources-builder stage above for how

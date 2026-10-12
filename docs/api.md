@@ -426,6 +426,8 @@ or, if analysis (Suricata/YARA/Zircolite/email parsing) failed:
 
 `meta` is present whenever `.meta` exists for the analysis (written after the file type is detected) and is omitted otherwise; it's absent entirely from the `error` response.
 
+A `ready` analysis can also have `warnings`, a list of what went wrong without failing it - for now, a YARA scan that failed or timed out, so its File Alerts may be missing (`"The YARA scan of extracted files failed - File Alerts may be missing: <reason>"`). Omitted when there are none.
+
 `hasRowNotes` is `true` if the analysis has at least one row-level note, and always `false` while it isn't ready (see `POST /api/row-note`) - used by the reanalyze confirmation dialog to conditionally warn that reanalyzing deletes them. This field is added only on this GET route, not on the identically-shaped `POST /api/check-status` response below - that endpoint is polled every 2 seconds during active processing, and the extra lookup has no reason to run that often.
 
 **Errors:** `400` for invalid or malformed MD5. There is no `404` for a well-formed MD5 that doesn't correspond to an existing analysis directory - the directory's absence just reads the same as "not ready yet" (`{"status": "processing", "phase": ""}`), since this endpoint never separately checks for the directory's existence.

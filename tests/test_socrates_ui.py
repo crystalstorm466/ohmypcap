@@ -12186,6 +12186,31 @@ class TestFindingsTab(unittest.TestCase):
         ''')
         self.assertEqual(result, {'rows': 2, 'about': True})
 
+    def test_a_pivot_from_a_findings_record_opens_its_own_tab_filtered(self):
+        """Findings shows other types' records: Include on one's Source IP
+        filters that record's own type - so its tab opens, filtered,
+        instead of the filter landing on a tab out of sight."""
+        from tests.jsdom_helper import js_statements
+        result = js_statements('''
+            await new Promise(function(r) { setTimeout(r, 100); });
+            document.getElementById('inputBoxes').style.display = 'none';
+            currentMd5 = 'abc123';
+            ''' + self._mock_fetch_js(self.FINDINGS) + '''
+            eventTypes = ['ipmi', 'bacnet'];
+            buildSections();
+            await loadTabData('findings');
+            document.querySelectorAll('.section').forEach(function(s) { s.classList.add('section-hidden'); });
+            document.getElementById('section-findings').classList.remove('section-hidden');
+            await includeFilterValue('section-ipmi', 'Source IP', '10.1.0.38');
+            await new Promise(function(r) { setTimeout(r, 50); });
+            window.__jsdom_result = {
+                ipmiShown: !document.getElementById('section-ipmi').classList.contains('section-hidden'),
+                findingsShown: !document.getElementById('section-findings').classList.contains('section-hidden'),
+                filters: Object.keys(currentFilters),
+            };
+        ''')
+        self.assertEqual(result, {'ipmiShown': True, 'findingsShown': False, 'filters': ['Source IP']})
+
     def test_findings_empty_state(self):
         from tests.jsdom_helper import js_statements
         result = js_statements('''
@@ -12259,6 +12284,32 @@ class TestReviewRegressions(unittest.TestCase):
         ''')
         self.assertEqual(result, ['Write Data0', 'Write Data0', 'Write Data', 'Write Data', 'Write Data', 'Write Data',
                                   'Write Data7'])
+
+    def test_a_planted_custom_lookup_url_is_never_used(self):
+        """Custom lookup sites are re-checked when read: localStorage is
+        shared with the same origin's CyberChef, so a javascript: entry
+        could be there without ever passing the save-time check."""
+        from tests.jsdom_helper import js_statements
+        result = js_statements('''
+            safeStorageSet(localStorage, 'socrates_customLookupSites', JSON.stringify([
+                {label: 'Good', urlTemplate: 'https://lookup.example/?q={value}'},
+                {label: 'Planted', urlTemplate: 'javascript:alert(1)//{value}'}]));
+            window.__jsdom_result = getCustomLookupSites().map(function(s) { return s.label; });
+        ''')
+        self.assertEqual(result, ['Good'])
+
+    def test_analysis_warnings_show_above_the_results_escaped(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements('''
+            var el = document.getElementById('analysisWarnings');
+            showAnalysisWarnings(['The YARA scan failed - File Alerts may be missing: <b>x</b>']);
+            var shown = {hidden: el.hidden, text: el.textContent, bold: !!el.querySelector('b')};
+            showAnalysisWarnings(undefined);
+            window.__jsdom_result = {shown: shown, clearedHidden: el.hidden, clearedText: el.textContent};
+        ''')
+        self.assertEqual(result, {'shown': {'hidden': False, 'bold': False,
+                                            'text': 'The YARA scan failed - File Alerts may be missing: <b>x</b>'},
+                                  'clearedHidden': True, 'clearedText': ''})
 
     def test_escape_on_the_welcome_screen_keeps_dont_show_help_again(self):
         """REGRESSION: closeAllModals closed Help unconditionally - which
@@ -21709,6 +21760,7 @@ class TestTsharkUI(unittest.TestCase):
             window.__jsdom_result = {
                 added: shown({status: 'ready', merged: true, seconds: 24}, ['s7comm', 'conn_rsh']),
                 one: shown({status: 'ready', merged: true}, ['nbns']),
+                damaged: shown({status: 'ready', merged: true, seconds: 9, damaged: true}, ['nbns']),
                 none: shown({status: 'ready', merged: true, seconds: 3}),
                 merging: shown({status: 'ready', merged: false}),
                 running: shown({status: 'running', elapsed: 5}),
@@ -21721,6 +21773,8 @@ class TestTsharkUI(unittest.TestCase):
         self.assertEqual(result['added']['text'], 'tshark parsed 2 additional protocols in 24s')
         self.assertEqual(result['added']['dot'], True, "it starts with the dot that marks tshark's cards - the key to them")
         self.assertEqual(result['one']['text'], 'tshark parsed 1 additional protocol')
+        self.assertEqual(result['damaged']['text'],
+                         'tshark parsed 1 additional protocol in 9s \u00b7 the capture is cut off, so its last packet wasn\u2019t read')
         self.assertEqual((result['none']['text'], result['none']['dot']), ('tshark found no additional protocols in 3s', False))
         self.assertEqual(result['merging']['text'], 'tshark is parsing additional protocols\u2026')
         self.assertEqual((result['running']['text'], result['running']['dot']), ('tshark is parsing additional protocols\u2026 5s', False))

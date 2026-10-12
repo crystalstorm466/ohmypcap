@@ -1324,6 +1324,34 @@ class TestRADIUS(unittest.TestCase):
     def tearDownClass(cls):
         shutil.rmtree(cls.tmpdir, ignore_errors=True)
 
+    def test_logins_from_one_nas_port_stay_apart(self):
+        """A NAS sends every user's requests from one port: rounds are
+        chained by the State a challenge carries and the next request
+        echoes, not by flow - by flow, two logins at once merged, and a
+        request nobody answered took in every later login."""
+        from tests.pcap_fixtures import write_pcap
+        from tests.protocol_fixtures import RADIUS_NAS, RADIUS_SERVER, _eap, _radius, _udp_packet
+        ask = lambda ident, attrs: _udp_packet(RADIUS_NAS, RADIUS_SERVER, 50100, 1812, _radius(1, ident, attrs))
+        answer = lambda code, ident, attrs=(): _udp_packet(RADIUS_SERVER, RADIUS_NAS, 1812, 50100, _radius(code, ident, attrs))
+        packets = [
+            ask(1, ((1, 'nobody'),)),                                                   # never answered
+            ask(2, ((1, 'dave'), (79, _eap(2, 1, 1, b'dave')))),
+            ask(3, ((1, 'erin'), (79, _eap(2, 1, 1, b'erin')))),
+            answer(11, 2, ((79, _eap(1, 2, 25, b'\x20')), (24, 'state-dave'))),
+            answer(11, 3, ((79, _eap(1, 2, 25, b'\x20')), (24, 'state-erin'))),
+            ask(4, ((1, 'erin'), (79, _eap(2, 2, 25, b'\x00')), (24, 'state-erin'))),
+            ask(5, ((1, 'dave'), (79, _eap(2, 2, 25, b'\x00')), (24, 'state-dave'))),
+            answer(3, 4),
+            answer(2, 5),
+        ]
+        pcap = os.path.join(self.tmpdir, 'one_port.pcap')
+        write_pcap(pcap, packets)
+        logins = {r['radius'].get('user'): r['radius'] for r in shark_analyzer.run_tshark(pcap)
+                  if r['event_type'] == 'radius'}
+        self.assertEqual({u: (b['requests'], b.get('challenges'), b.get('result')) for u, b in logins.items()},
+                         {'nobody': (1, None, None), 'dave': (2, 1, 'accepted'), 'erin': (2, 1, 'rejected')})
+        self.assertNotIn('state-', json.dumps(list(logins.values())), 'State links the rounds, and is never kept')
+
     def test_a_wifi_login_challenged_then_accepted_is_one_record(self):
         login = self.by_user[('alice', 'Access-Request')]
         self.assertEqual({k: login[k] for k in ('requests', 'challenges', 'result', 'eap_methods', 'reply_message',
@@ -2205,6 +2233,35 @@ class TestHostileInput(unittest.TestCase):
         self.assertEqual(auth, 'keyed MD5')
         self.assertEqual([e[1] for e in entries], ['10.2.0.0/16'], 'the route, and nothing after the trailer')
 
+    def test_an_opcua_user_management_calls_arguments_are_not_kept(self):
+        """AddUser, ModifyUser, ChangePassword (OPC UA Part 18) take a
+        password as an argument: the call is recorded, its arguments' values
+        aren't - nor a vendor method's that's named for passwords or users."""
+        from shark_protocols import _opcua_secret_method
+        self.assertTrue(_opcua_secret_method('i=24301', ''))
+        self.assertTrue(_opcua_secret_method('ns=2;s=Admin.ChangePassword', ''))
+        self.assertTrue(_opcua_secret_method('ns=1;i=7', 'ns=3;s=UserManager'))
+        self.assertFalse(_opcua_secret_method('ns=1;s=Pump.Start', 'ns=1;s=Pump'))
+        self.assertFalse(_opcua_secret_method('ns=1;i=24301', 'i=85'), "another namespace's 24301 is no user management")
+
+    def test_telnet_records_the_last_login_attempt_and_any_secret_prompt(self):
+        """A failed login and then one the server took is that one's record,
+        the failure counted; a secret typed at a later prompt (a PIN, an
+        enable secret) is kept nowhere - nor as one of the lines typed."""
+        from shark_protocols import Telnet, Packet
+        telnet = Telnet()
+        flow = shark_analyzer._Flow(('k',), 'TCP', 4, '10.0.0.5', '10.0.0.9', 40000, 23, 1.0, '0')
+        server = lambda text: telnet.feed(Packet(1, 1.0, flow, 23, 40000), {'telnet.data': [text]})
+        client = lambda text: telnet.feed(Packet(1, 1.0, flow, 40000, 23), {'telnet.data': [text]})
+        server('Router\r\nlogin: '), client('admin\r'), server('Password: '), client('wrong\r')
+        server('Login incorrect\r\nlogin: '), client('root\r'), server('Password: '), client('right\r')
+        server('Enter PIN: '), client('1234\r'), server('# '), client('show run\r')
+        body = telnet.finish()[0][3]
+        self.assertEqual({k: body.get(k) for k in ('username', 'password', 'login', 'earlier_failures', 'commands')},
+                         {'username': 'root', 'password': 'right', 'login': None, 'earlier_failures': 1,
+                          'commands': ['show run']})
+        self.assertNotIn('1234', json.dumps(body))
+
     def test_a_measurement_that_isnt_a_finite_number_stays_text(self):
         """A sensor's NaN or infinity - which JSON can't hold - kept as
         tshark wrote it, not stored as invalid JSON."""
@@ -2233,6 +2290,11 @@ class TestHostileInput(unittest.TestCase):
         records = shark_analyzer.run_tshark(cut)
         self.assertTrue(any(r['event_type'] == 's7comm' for r in records))
         self.assertTrue(shark_analyzer.build(d, cut))
+        self.assertTrue(shark_analyzer.status(d)['damaged'], 'and the page is told the capture was cut off')
+        whole_dir = os.path.join(d, 'whole')
+        os.makedirs(whole_dir)
+        self.assertTrue(shark_analyzer.build(whole_dir, whole))
+        self.assertNotIn('damaged', shark_analyzer.status(whole_dir))
         self.assertFalse(shark_analyzer._read_to_damage(1, 'appears to have been cut short in the middle of a packet'))
         self.assertFalse(shark_analyzer._read_to_damage(2, 'tshark: Some other failure'))
 
@@ -2371,6 +2433,26 @@ class TestMerge(unittest.TestCase):
             self.assertFalse(shark_analyzer.build(self.dir, self.pcap))
         with open(os.path.join(self.dir, shark_analyzer.SHARK_ERROR)) as f:
             self.assertIn('boom', f.read())
+
+    def test_a_consumer_that_fails_stops_the_later_passes(self):
+        """REGRESSION: a shark.db write that failed mid-flows (a full
+        disk) waited out the protocol pass - up to the run's whole
+        timeout - with the queue held up behind it. The passes are killed,
+        and the consumer's own error is the one raised."""
+        def slow_pass(*args, on_start=None, **kwargs):
+            proc = subprocess.Popen(['sleep', '30'])
+            on_start(proc)
+            proc.wait()
+            raise RuntimeError('tshark (protocol pass) exit code -9')
+
+        def failing_consumer(records):
+            for _ in records:
+                raise OSError('disk full')
+        started = time.monotonic()
+        with mock.patch.object(shark_analyzer, '_protocol_pass', side_effect=slow_pass):
+            with self.assertRaisesRegex(OSError, 'disk full'):
+                shark_analyzer.run_tshark(self.pcap, consume=failing_consumer)
+        self.assertLess(time.monotonic() - started, 15)
 
     def test_the_queue_merges_when_its_run_finishes(self):
         shark_analyzer.enqueue(self.dir, self.pcap)
@@ -2526,6 +2608,28 @@ class TestQueue(unittest.TestCase):
         self.assertFalse(os.path.exists(f'/proc/{grandchild}'), "the build's own child (tshark) was killed too")
         self.assertFalse(os.path.exists(os.path.join(self.dirs[0], shark_analyzer.SHARK_ERROR)))
         self.assertFalse(os.path.exists(shark_analyzer.shark_db_path(self.dirs[0])))
+
+    def test_a_run_queued_right_after_a_cancel_still_runs(self):
+        """REGRESSION: reanalyze cancels the running build and queues the
+        new run at once - while the killed one was still being stopped
+        (still 'running'), the new run was refused, and only a later
+        status poll ever started it."""
+        marker = os.path.join(self.dirs[0], 'started')
+        with mock.patch.object(shark_analyzer, '_child_command',
+                               return_value=['sh', '-c', f'echo x >> {marker}; sleep 30']):
+            shark_analyzer.enqueue(self.dirs[0], self.pcaps[0])
+            deadline = time.monotonic() + 5
+            while not os.path.exists(marker) and time.monotonic() < deadline:
+                time.sleep(0.02)
+            shark_analyzer.cancel(self.dirs[0])
+            self.assertTrue(shark_analyzer.enqueue(self.dirs[0], self.pcaps[0]), 'queued behind the cancelled run')
+            self.assertFalse(shark_analyzer.enqueue(self.dirs[0], self.pcaps[0]), 'but only once')
+            deadline = time.monotonic() + 10
+            while open(marker).read().count('x') < 2 and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertEqual(open(marker).read().count('x'), 2, 'the new run started')
+            shark_analyzer.cancel(self.dirs[0])
+            self.assertTrue(shark_analyzer.wait_idle(10))
 
     def test_a_build_that_passes_the_memory_limit_is_stopped(self):
         """The limit covers the build and everything in its process group

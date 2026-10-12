@@ -441,6 +441,47 @@ class TestFetchUrlSafely(unittest.TestCase):
             self.assertEqual(f.read(), b'final-payload')
         os.unlink(path)
 
+    def test_network_failures_are_value_errors_with_a_reason(self):
+        """A refused connection, a malformed reply, a slow server: reported
+        as the ValueError Load from URL turns into a 400 with its reason,
+        not whatever http.client raised (a bare 500)."""
+        import socket as socket_mod
+        closed = socket_mod.socket()
+        closed.bind(('127.0.0.1', 0))
+        port = closed.getsockname()[1]
+        closed.close()                       # nothing listens there now
+        with unittest.mock.patch('url_fetch.validate_url_safety', return_value=None), \
+             unittest.mock.patch('url_fetch.resolve_safe_ips', return_value=['127.0.0.1']):
+            with self.assertRaisesRegex(ValueError, 'Could not download the URL: Connection refused'):
+                url_fetch.fetch_url_safely(f'http://localhost:{port}/x', timeout=5, max_size=100,
+                                           tmp_dir=storage.upload_tmp_dir(server.DATA_DIR))
+            with self.assertRaisesRegex(ValueError, 'took too long'):
+                url_fetch.fetch_url_safely(f'http://localhost:{self.port}/big', timeout=5, max_size=10_000,
+                                           tmp_dir=storage.upload_tmp_dir(server.DATA_DIR), chunk_size=10,
+                                           max_seconds=-1)
+        self.assertEqual(self._upload_tmp_contents(), [], 'nothing left behind')
+
+
+class TestZipExtractionErrors(unittest.TestCase):
+    def test_a_damaged_zip_is_a_value_error_saying_so(self):
+        """REGRESSION: only RuntimeError/NotImplementedError were caught, so
+        a corrupt 'PK' file - or a wrong ZipCrypto password slipping past its
+        one-byte check - came back as a bare 500."""
+        import zipfile
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(d, ignore_errors=True))
+        garbage = os.path.join(d, 'garbage.zip')
+        with open(garbage, 'wb') as f:
+            f.write(b'PK\x03\x04' + bytes(100))
+        with self.assertRaisesRegex(ValueError, 'damaged'):
+            storage.extract_zip_contents(garbage, os.path.join(d, 'out'))
+        good = os.path.join(d, 'good.zip')
+        with zipfile.ZipFile(good, 'w') as z:
+            z.writestr('a.txt', 'hello')
+        with unittest.mock.patch('zipfile.ZipFile.extractall', side_effect=zipfile.BadZipFile('Bad CRC-32')):
+            with self.assertRaisesRegex(ValueError, 'could not be extracted'):
+                storage.extract_zip_contents(good, os.path.join(d, 'out2'), [b'infected'])
+
 
 class TestDetectFileType(unittest.TestCase):
     """_detect_file_type - shared by every upload path and reanalyze."""
@@ -5722,7 +5763,7 @@ class TestReanalyzeEndpoint(unittest.TestCase):
         with open(STORAGE_FILE, 'r') as f:
             storage_content = f.read()
         # Artifact lists are centralized in storage.py's module-level constants
-        self.assertIn("PCAP_ANALYSIS_ARTIFACTS = ('eve.json', 'events.db', '.phase', '.error', 'yara_matches.json', 'sigma_matches.json', '.meta', 'file_metadata.json', 'fast.log', 'stats.log', 'suricata.log',", storage_content,
+        self.assertIn("PCAP_ANALYSIS_ARTIFACTS = ('eve.json', 'events.db', '.phase', '.error', '.warnings', 'yara_matches.json', 'sigma_matches.json', '.meta', 'file_metadata.json', 'fast.log', 'stats.log', 'suricata.log',", storage_content,
                       'PCAP artifact list must be centralized in PCAP_ANALYSIS_ARTIFACTS')
         reanalyze_section = content.split("def handle_post_reanalyze(self):")[1]
         # The actual per-artifact loop lives in the shared _remove_artifacts
@@ -6573,6 +6614,53 @@ class TestSuricataFileStoreConfig(unittest.TestCase):
                       'spawn_suricata must set log directory to per-PCAP dir')
 
 
+class TestAnalysisWarnings(unittest.TestCase):
+    """What went wrong without failing an analysis: kept in .warnings, and
+    handed to the page with the analysis's ready status."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(self.dir, ignore_errors=True))
+
+    def test_a_yara_scan_that_fails_is_a_warning_not_a_clean_scan(self):
+        """REGRESSION: a YARA failure or timeout returned no matches, like a
+        clean scan - File Alerts silently empty."""
+        import subprocess as subprocess_mod
+        import yara_analyzer
+        filestore = os.path.join(self.dir, 'filestore', 'ab')
+        os.makedirs(filestore)
+        with open(os.path.join(filestore, 'ab' + 'c' * 62), 'wb') as f:
+            f.write(b'MZ' + bytes(62))
+        rules_dir = os.path.join(self.dir, 'data', yara_analyzer.YARA_RULES_SUBDIR)
+        os.makedirs(rules_dir)
+        with open(os.path.join(rules_dir, yara_analyzer.YARA_FORGE_FILENAME), 'w') as f:
+            f.write('rule x { condition: true }')
+        failed = subprocess_mod.CompletedProcess([], 1, stdout='', stderr='error: could not compile rules\n')
+        with unittest.mock.patch('yara_analyzer.check_yara_executable', return_value=True), \
+                unittest.mock.patch('yara_analyzer.subprocess.run', return_value=failed):
+            self.assertTrue(yara_analyzer.run_yara_pipeline(self.dir, data_dir=os.path.join(self.dir, 'data')))
+        self.assertEqual(storage.read_analysis_warnings(self.dir),
+                         ['The YARA scan of extracted files failed - File Alerts may be missing: '
+                          'error: could not compile rules'])
+        with unittest.mock.patch('yara_analyzer.subprocess.run', side_effect=subprocess_mod.TimeoutExpired('yara', 1)):
+            failures = []
+            yara_analyzer._run_yara_with_index(os.path.join(rules_dir, yara_analyzer.YARA_FORGE_FILENAME),
+                                               os.devnull, failures=failures)
+        self.assertEqual(len(failures), 1)
+        self.assertIn('timed out', failures[0])
+
+    def test_warnings_come_with_the_ready_status_and_go_on_reanalyze(self):
+        storage.add_analysis_warning(self.dir, 'The YARA scan failed - File Alerts may be missing: x')
+        storage.add_analysis_warning(self.dir, 'The YARA scan failed - File Alerts may be missing: x')
+        self.assertEqual(len(storage.read_analysis_warnings(self.dir)), 1, 'each once')
+        open(os.path.join(self.dir, 'events.db'), 'w').close()
+        handler = server.Handler.__new__(server.Handler)
+        self.assertEqual(handler._build_status_response(self.dir),
+                         {'status': 'ready', 'warnings': ['The YARA scan failed - File Alerts may be missing: x']})
+        self.assertIn('.warnings', storage.PCAP_ANALYSIS_ARTIFACTS)
+        self.assertIn('.warnings', storage.FILE_ANALYSIS_ARTIFACTS)
+
+
 class TestYaraScannerModule(unittest.TestCase):
     def test_yara_analyzer_exists(self):
         yara_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'yara_analyzer.py')
@@ -7309,16 +7397,23 @@ class TestDockerfile(unittest.TestCase):
         self.assertIn('libxml2', final_stage, 'Final stage must install the libxml2 runtime library')
         self.assertIn('libxslt1.1', final_stage, 'Final stage must install the libxslt1.1 runtime library')
 
-    def test_dockerfile_venv_owned_by_app_user(self):
-        """Dockerfile must copy the Zircolite venv with --chown so the non-root
-        user can use it, without a separate chown -R RUN step (which would
-        force a full copy-up of the venv's contents into a new overlayfs
-        layer, doubling its footprint in the image)."""
+    def test_dockerfile_venv_is_not_writable_by_the_app_user(self):
+        """The Zircolite venv stays root-owned, like the rest of the image:
+        the non-root user runs it (its files are world-readable) but never
+        writes to it - so it can't rewrite the interpreter it runs. And no
+        separate chown -R RUN either, which would also double its layer."""
         final_stage = self._dockerfile_final_stage()
-        self.assertIn('COPY --from=zircolite-builder --chown=1000:1000 /usr/local/lib/zircolite-venv', final_stage,
-                      'Dockerfile must set venv ownership via COPY --chown, not a separate chown -R RUN')
-        self.assertNotIn('chown -R 1000:1000 /usr/local/lib/zircolite-venv', final_stage,
-                          'A separate chown -R on the venv would double its layer footprint')
+        self.assertIn('COPY --from=zircolite-builder /usr/local/lib/zircolite-venv /usr/local/lib/zircolite-venv',
+                      final_stage)
+        self.assertNotIn('--chown=1000:1000 /usr/local/lib/zircolite-venv', final_stage)
+        self.assertNotIn('chown -R 1000:1000 /usr/local/lib/zircolite-venv', final_stage)
+
+    def test_dockerfile_runtime_image_has_no_curl(self):
+        """curl is only for fetching rules at build time - done in the
+        resources-builder stage, so the runtime image doesn't carry it."""
+        final_stage = self._dockerfile_final_stage()
+        self.assertNotRegex(final_stage, r'(?m)^\s+curl \\$', 'not installed in the runtime stage')
+        self.assertNotIn('curl -', final_stage, 'nor used there')
 
     def test_dockerfile_exposes_port_8000(self):
         """Dockerfile must expose port 8000."""

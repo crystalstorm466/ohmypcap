@@ -76,7 +76,7 @@ def validate_port(port_str):
 
 
 RESERVED_FILENAMES = {
-    'events.db', 'eve.json', 'name.txt', 'notes.txt', '.meta', '.phase', '.error',
+    'events.db', 'eve.json', 'name.txt', 'notes.txt', '.meta', '.phase', '.error', '.warnings',
     # Analyzer output artifacts: an upload with one of these names would be
     # overwritten mid-scan (result spoofing) or deleted by reanalyze's
     # artifact sweep. Keep in sync with PCAP_ANALYSIS_ARTIFACTS /

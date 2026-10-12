@@ -904,11 +904,17 @@ class RADIUS:
               'radius.Called_Station_Id', 'radius.Calling_Station_Id', 'radius.Framed-IP-Address',
               'radius.Framed_IP_Address', 'radius.Reply_Message', 'vals(eap.type)', 'radius.Acct_Status_Type',
               'radius.Acct_Session_Id', 'radius.Acct_Session_Time', 'radius.Acct_Input_Octets',
-              'radius.Acct_Output_Octets', 'radius.Acct_Terminate_Cause')
+              'radius.Acct_Output_Octets', 'radius.Acct_Terminate_Cause', 'radius.State')
 
     def __init__(self):
         self.records = []
-        self.logins = {}         # flow key -> the login under way on it
+        # A login's rounds are chained by the State attribute a challenge
+        # carries and the next request echoes (RFC 2865) - not by flow: a
+        # NAS sends every user's requests from one port, so by flow, logins
+        # going on at once merged, and one never answered took in every
+        # later one. Keyed by (flow, State), State itself never kept.
+        self.challenged = {}     # (flow key, State) -> the login a challenge's State continues
+        self.states = {}         # id(record) -> the (flow key, State) keys it holds in challenged
         self.open = {}           # (flow key, id) -> the record its request is in
         self.started = {}        # id(record) -> its first request's time
 
@@ -923,13 +929,12 @@ class RADIUS:
             if key in self.open and first('radius.dup'):
                 self.open[key]['retransmissions'] = self.open[key].get('retransmissions', 0) + 1
                 return
-            body = self.logins.get(pkt.flow.key) if code == 'Access-Request' else None
+            state = first('radius.State')
+            body = self.challenged.get((pkt.flow.key, state)) if code == 'Access-Request' and state else None
             if body is None:
                 body = {'message': 'Accounting-Request' if code == 'Accounting-Request' else code}
                 self.records.append((pkt.flow, pkt.when, self.event_type, body))
                 self.started[id(body)] = pkt.when
-                if code == 'Access-Request':
-                    self.logins[pkt.flow.key] = body
             body['requests'] = body.get('requests', 0) + 1
             self.open[key] = body
             self._request(body, v, first)
@@ -940,10 +945,14 @@ class RADIUS:
         body['reply'] = code
         if code == 'Access-Challenge':
             body['challenges'] = body.get('challenges', 0) + 1
+            if first('radius.State'):
+                held = (pkt.flow.key, first('radius.State'))
+                self.challenged[held] = body
+                self.states.setdefault(id(body), []).append(held)
         else:
             body['result'] = _RADIUS_RESULTS.get(code, code)
-            if body.get('message') == 'Access-Request':
-                self.logins.pop(pkt.flow.key, None)
+            for held in self.states.pop(id(body), ()):
+                self.challenged.pop(held, None)
             # from the first request - a login's every round, like Zeek's ttl
             body['response_time'] = round(pkt.when - self.started[id(body)], 6)
         if first('radius.Reply_Message'):
@@ -2074,13 +2083,16 @@ class S7comm:
 #
 # Suricata recognizes Telnet but logs nothing about it. One record per
 # session: the server's banner, the name and password typed at its login
-# prompts, whether it said the login failed, and the lines typed after -
-# rebuilt from the keystrokes (a client sends each as it's typed; the
-# server echoes them, and its echo is ignored here).
+# prompts - the last attempt's, with how many failed before it
+# (earlier_failures) - whether it said that one failed, and the lines typed
+# after - rebuilt from the keystrokes (a client sends each as it's typed;
+# the server echoes them, and its echo is ignored here). A secret typed at
+# a prompt after the login's (a PIN, an enable secret) is kept nowhere -
+# not as the password, nor as one of the lines typed.
 
 _TELNET_ESCAPES = re.compile(r'\x1b\[[0-9;?]*[A-Za-z~]|\x1b[()][A-Za-z0-9]|\x1b.?')
 _TELNET_USER_PROMPT = re.compile(r'(login|user ?name|user|account)\s*:\s*$', re.I)
-_TELNET_PASSWORD_PROMPT = re.compile(r'pass(word|code)?\s*:\s*$', re.I)
+_TELNET_PASSWORD_PROMPT = re.compile(r'(pass(word|code|phrase)?|pin|secret)\s*:\s*$', re.I)
 _TELNET_FAILED = re.compile(r'login incorrect|access denied|authentication fail|invalid (password|login|user)|'
                             r'login fail|incorrect password|bad password', re.I)
 _TELNET_MAX_SERVER_TEXT = 4096     # of the session's start, enough for its banner and login
@@ -2089,7 +2101,7 @@ _TELNET_MAX_LINE = 200
 
 
 class _TelnetSession:
-    __slots__ = ('first', 'flow', 'server_text', 'tail', 'state', 'line', 'body', 'commands')
+    __slots__ = ('first', 'flow', 'server_text', 'tail', 'state', 'line', 'body', 'commands', 'attempt')
 
     def __init__(self, flow, when):
         self.flow, self.first = flow, when
@@ -2099,6 +2111,10 @@ class _TelnetSession:
         self.line = ''
         self.body = {}
         self.commands = []
+        # whether the next secret typed is a login attempt's password: at the
+        # start, after a user name or a failed login - not a later PIN or
+        # enable secret, which is kept nowhere
+        self.attempt = True
 
 
 class Telnet:
@@ -2137,17 +2153,27 @@ class Telnet:
             session.state = 'user'
         if _TELNET_FAILED.search(clean):
             session.body['login'] = 'failed'
+            session.attempt = True
 
     @staticmethod
     def _from_client(session, text):
         for ch in _TELNET_ESCAPES.sub('', text):
             if ch in '\r\n':
                 line, session.line = session.line, ''
+                # (each attempt's replaces the last's: a failed login and
+                # then one the server took is that one's record)
                 if session.state == 'user':
-                    session.body.setdefault('username', line)
+                    session.body['username'] = line
+                    session.attempt = True
                     session.state = None
                 elif session.state == 'password':
-                    session.body.setdefault('password', line)
+                    if session.attempt:
+                        if session.body.pop('login', None) == 'failed':
+                            # a new attempt after a failed one - failed only
+                            # if the server says so again
+                            session.body['earlier_failures'] = session.body.get('earlier_failures', 0) + 1
+                        session.body['password'] = line
+                        session.attempt = False
                     session.state = None
                 elif line.strip() and len(session.commands) < _TELNET_MAX_COMMANDS:
                     session.commands.append(line[:_TELNET_MAX_LINE])
@@ -3205,6 +3231,25 @@ def _opcua_node(tree):
     return ''
 
 
+# Methods whose arguments can carry a password - OPC UA Part 18's user
+# management (AddUser, ModifyUser, RemoveUser, ChangePassword: namespace
+# 0's block of ids from 24264), or a vendor's method or object whose name
+# says so. Their calls are recorded, but not their arguments' values.
+_OPCUA_USER_MANAGEMENT_IDS = range(24264, 24331)
+_OPCUA_SECRET_NAMES = re.compile(r'pass(word|wd|phrase)|credential|secret|user', re.I)
+
+
+def _opcua_secret_method(*nodes):
+    for node in nodes:
+        if node.startswith('i='):
+            number = _int(node[2:])
+            if number is not None and number in _OPCUA_USER_MANAGEMENT_IDS:
+                return True
+        elif _OPCUA_SECRET_NAMES.search(node):
+            return True
+    return False
+
+
 def _opcua_variant(tree):
     """A Variant subtree's value: a scalar, or the first few of an array."""
     if not isinstance(tree, dict):
@@ -3341,7 +3386,9 @@ class OPCUA:
                 action['node'] = _opcua_node(_child(item, 'MethodId'))
                 action['object'] = _opcua_node(_child(item, 'ObjectId'))
                 arguments = [_opcua_variant(arg) for arg in _items(_child(item, 'InputArguments'))]
-                if arguments:
+                if arguments and _opcua_secret_method(action['node'], action['object']):
+                    action['arguments_redacted'] = len(arguments)
+                elif arguments:
                     action['arguments'] = [a for a in arguments[:10] if a is not None]
             elif name == 'AddNodesRequest':
                 action['node'] = _opcua_node(_child(item, 'RequestedNewNodeId'))

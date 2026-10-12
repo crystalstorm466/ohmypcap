@@ -4307,6 +4307,8 @@
             html += htmlRowText('Attribute', a.attribute);
             html += htmlRowText('Value', a.value !== undefined ? String(a.value) : '', 'mono');
             if (a.arguments) html += htmlRowText('Arguments', a.arguments.join(', '), 'mono');
+            // a user-management method's (a password among them) - never kept
+            if (a.arguments_redacted) html += htmlRowText('Arguments', `${a.arguments_redacted} - not kept (user management)`);
             html += htmlRowText('Result', a.result);
             return html;
         }
@@ -4396,6 +4398,7 @@
             html += htmlRowText('User', t.username, 'mono');
             html += htmlRowText('Password', t.password, 'mono');
             html += htmlRowText('Login', t.login);
+            html += htmlRowText('Earlier Failed Logins', t.earlier_failures ? String(t.earlier_failures) : '');
             // the lines typed after logging in, one per line
             if ((t.commands || []).length) html += htmlRow('Commands', escapeHtml(t.commands.join('\n')), 'mono', 'white-space: pre-wrap');
             return html;
@@ -4893,6 +4896,7 @@
             document.getElementById('filterBarContainer').innerHTML = '';
             document.getElementById('filterBarContainer').style.display = 'none';
             document.getElementById('tsharkLineContainer').innerHTML = '';
+            showAnalysisWarnings([]);
             document.querySelectorAll('.file-info-card').forEach(c => c.remove());
             const fileInfoContainer = document.getElementById('fileInfoContainer');
             if (fileInfoContainer) {
@@ -9447,8 +9451,9 @@
             const etype = e.event_type || '';
             // data-event-type and data-community-id as on every event row,
             // for the detail panel's pivots (see the data-detail-pivot
-            // click handler); no data-pivot, so a click anywhere in the row
-            // just expands it.
+            // click handler) - Include/Exclude/Only there open the record's
+            // own tab, filtered (applyFilters); no data-pivot, so a click
+            // anywhere in the row just expands it.
             const communityIdAttr = e.community_id ? ` data-community-id="${escapeHtml(e.community_id)}"` : '';
             return `<tr data-id="${escapeHtml(String(e.id))}" data-event-type="${escapeHtml(etype)}"${communityIdAttr} data-action="toggle-row">` +
                 `<td>${valueDotSpan(FINDING_SEVERITY_COLORS[item.severity])}${escapeHtml(item.severity)}</td>` +
@@ -12104,7 +12109,15 @@
             const eventType = sectionId.replace('section-', '');
             bumpFetchGeneration();
             await ensureCappedBatch(eventType);
-            await refreshCurrentView(sectionId, eventType);
+            const target = document.getElementById(sectionId);
+            if (target && target.classList.contains('section-hidden')) {
+                // A pivot from a record shown on another tab - a Findings
+                // row's own details, whose filter is its record's type's: open
+                // that tab, filtered, rather than filter one out of sight
+                showTab(sectionId, document.querySelector(`.stat-card[data-section="${sectionId}"]`));
+            } else {
+                await refreshCurrentView(sectionId, eventType);
+            }
             updateFilterBarVisibility();
             buildStats(await computeFilteredStats());
             await updateSankeyDiagram();
@@ -12590,7 +12603,11 @@
             try {
                 const parsed = JSON.parse(raw);
                 if (!Array.isArray(parsed)) return [];
-                return parsed.filter(s => s && typeof s.label === 'string' && typeof s.urlTemplate === 'string');
+                // Checked again here, not only on save: localStorage is
+                // shared with this origin's CyberChef, so an entry could be
+                // planted (a javascript: URL) that was never saved here
+                return parsed.filter(s => s && typeof s.label === 'string' && typeof s.urlTemplate === 'string'
+                    && isSafeLookupUrlTemplate(s.urlTemplate));
             } catch (e) {
                 return [];
             }
@@ -13147,7 +13164,10 @@
             }
             if (st === 'ready' && tsharkRowsPending) return 'tshark is parsing additional protocols\u2026';
             if (sharkFinished(status)) {
-                const took = Number.isFinite(status.seconds) ? ` in ${status.seconds.toLocaleString()}s` : '';
+                // (and when the capture was cut off - a partial upload, a
+                // capture stopped mid-write - that tshark read it up to there)
+                const took = (Number.isFinite(status.seconds) ? ` in ${status.seconds.toLocaleString()}s` : '')
+                    + (status.damaged ? ' \u00b7 the capture is cut off, so its last packet wasn\u2019t read' : '');
                 return tsharkTypes.size
                     ? `${dot}tshark parsed ${tsharkTypes.size} additional protocol${tsharkTypes.size === 1 ? '' : 's'}${took}`
                     : `tshark found no additional protocols${took}`;
@@ -13512,6 +13532,7 @@
                     // the mode flags or render over it.
                     if (isStaleFetch(gen)) return;
                     const detectedType = analysisStatus.meta?.detected_type || detectFileType(currentFileName);
+                    showAnalysisWarnings(analysisStatus.warnings);
 
                     const isPcap = detectedType === 'pcap';
                     const isLogFile = detectedType === 'log';
@@ -14118,6 +14139,17 @@
             }
         }
         
+        // What went wrong without failing the analysis (the server's
+        // storage.add_analysis_warning) - a YARA scan that failed, so its file
+        // alerts may be missing - on a line of its own above the results
+        function showAnalysisWarnings(warnings) {
+            const el = document.getElementById('analysisWarnings');
+            if (!el) return;
+            const list = Array.isArray(warnings) ? warnings.filter(w => typeof w === 'string') : [];
+            el.innerHTML = list.map(w => `<div class="analysis-warning">${escapeHtml(w)}</div>`).join('');
+            el.hidden = list.length === 0;
+        }
+
         async function openReanalyzeModal(md5, name) {
             let phase = 'files';
             let hasRowNotes = false;

@@ -67,7 +67,7 @@ SHARK_ARTIFACTS = (SHARK_DB, SHARK_DB + '-wal', SHARK_DB + '-shm', SHARK_DB + '.
 # change here or in shark_protocols changes what a run produces: a
 # shark.db stamped with an older version is rebuilt the next time its
 # status is asked for, so existing analyses pick up the change.
-SHARK_FORMAT_VERSION = 34
+SHARK_FORMAT_VERSION = 35
 
 # The fields every packet is read for, one per column of tshark's
 # tab-separated output, in this order - then each of shark_protocols'
@@ -686,18 +686,29 @@ def _add_outer(flows, f, app, when, length):
 class _LaterPasses:
     """iter_records' protocol and structured passes, run in a thread of
     their own once the first pass is done. wait() returns the protocol
-    pass's protocols, or raises what a pass raised."""
+    pass's protocols, or raises what a pass raised; cancel() stops them -
+    for a consumer that stopped taking records (a shark.db write that
+    failed), which would otherwise wait out the passes, up to the run's
+    whole timeout."""
 
     def __init__(self, pcap_path, flows, ranges, last_frame, deadline, combined, structured):
         self.protocols, self.error = [], None
+        self.cancelled = threading.Event()
+        self._procs, self._procs_lock = [], threading.Lock()
+
+        def started(proc):
+            with self._procs_lock:
+                self._procs.append(proc)
+            if self.cancelled.is_set():
+                proc.kill()
 
         def run():
             try:
                 if pcap_path and ranges:
                     self.protocols = _protocol_pass(pcap_path, flows, ranges, last_frame, deadline,
-                                                    skip=combined or ())
-                if structured:
-                    _structured_pass(pcap_path, flows, structured, last_frame, deadline)
+                                                    skip=combined or (), on_start=started)
+                if structured and not self.cancelled.is_set():
+                    _structured_pass(pcap_path, flows, structured, last_frame, deadline, on_start=started)
             except BaseException as e:       # re-raised in wait()
                 self.error = e
             finally:
@@ -705,9 +716,18 @@ class _LaterPasses:
         self.thread = threading.Thread(target=run, name='shark-later-passes', daemon=True)
         self.thread.start()
 
+    def cancel(self):
+        self.cancelled.set()
+        with self._procs_lock:
+            for proc in self._procs:
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+
     def wait(self):
         self.thread.join()
-        if self.error is not None:
+        if self.error is not None and not self.cancelled.is_set():
             raise self.error
         return self.protocols
 
@@ -832,6 +852,9 @@ def iter_records(lines, pcap_path=None, deadline=None, combined=()):
             ordered[i] = None    # the transaction records below hold the flows they need
             yield flow.event()
         del ordered
+    except BaseException:
+        passes.cancel()          # the consumer stopped - the passes' records have nowhere to go
+        raise
     finally:
         protocols += passes.wait()
     for handler in protocols + structured:
@@ -971,7 +994,7 @@ def _subset(pcap_path, ranges, total_frames, tmp, timeout):
     return source
 
 
-def _structured_pass(pcap_path, flows, handlers, total_frames, deadline=None):
+def _structured_pass(pcap_path, flows, handlers, total_frames, deadline=None, on_start=None):
     """Feed the structured protocols (shark_protocols.STRUCTURED_PROTOCOLS)
     from a second tshark run that writes their packets as JSON trees. It
     runs only if the first pass found any of their flows, and - unless
@@ -995,6 +1018,8 @@ def _structured_pass(pcap_path, flows, handlers, total_frames, deadline=None):
                 subprocess.Popen(_structured_command(source, active), stdout=subprocess.PIPE, stderr=stderr_file,
                                  text=True, errors='replace', env=dict(os.environ, TZ='UTC'),
                                  preexec_fn=_low_priority) as proc:
+            if on_start:
+                on_start(proc)
             killer = threading.Timer(remaining, proc.kill) if remaining else None
             if killer:
                 killer.start()
@@ -1024,7 +1049,7 @@ def _structured_pass(pcap_path, flows, handlers, total_frames, deadline=None):
                                    ('timed out' if proc.returncode < 0 else f'exit code {proc.returncode}')))
 
 
-def _protocol_pass(pcap_path, flows, ranges, total_frames, deadline=None, skip=()):
+def _protocol_pass(pcap_path, flows, ranges, total_frames, deadline=None, skip=(), on_start=None):
     """shark_protocols' records, from a second tshark run asking for their
     fields - over a copy of just the frames the first pass marked (each
     flow carrying one of their protocols, from its start), and asking only
@@ -1050,6 +1075,8 @@ def _protocol_pass(pcap_path, flows, ranges, total_frames, deadline=None, skip=(
         with tempfile.TemporaryFile(mode='w+', errors='replace') as stderr_file, \
                 subprocess.Popen(tshark_command(source, fields), stdout=subprocess.PIPE, stderr=stderr_file,
                                  text=True, errors='replace', preexec_fn=_low_priority) as proc:
+            if on_start:
+                on_start(proc)
             killer = threading.Timer(remaining, proc.kill) if remaining else None
             if killer:
                 killer.start()
@@ -1176,7 +1203,7 @@ def _read_to_damage(returncode, stderr):
     return returncode == 2 and any(phrase in stderr for phrase in _DAMAGED_CAPTURE)
 
 
-def run_tshark(pcap_path, timeout=None, on_start=None, consume=list):
+def run_tshark(pcap_path, timeout=None, on_start=None, consume=list, notes=None):
     """Run tshark over pcap_path and return consume(its records) - by
     default, the records as a list; analyze's build streams them into
     shark.db instead. Raises RuntimeError if tshark is missing, fails, is
@@ -1221,6 +1248,8 @@ def run_tshark(pcap_path, timeout=None, on_start=None, consume=list):
     if proc.returncode != 0 and not _read_to_damage(proc.returncode, stderr):
         detail = stderr.strip().splitlines()[-1] if stderr.strip() else f'exit code {proc.returncode}'
         raise RuntimeError(f'tshark failed: {detail}')
+    if notes is not None and proc.returncode != 0:
+        notes['damaged'] = True      # read up to a cut-off or damaged end
     return events
 
 
@@ -1286,7 +1315,7 @@ def analyze(dir_path, pcap_path, on_start=None):
                                 preexec_fn=_low_priority, start_new_session=True)
         if on_start:
             on_start(proc)
-        too_big = threading.Event()
+        too_big, hung = threading.Event(), False
         watchdog = threading.Thread(target=_watch_memory, args=(proc, too_big), daemon=True)
         watchdog.start()
         try:
@@ -1294,6 +1323,7 @@ def analyze(dir_path, pcap_path, on_start=None):
             # build that hangs after it
             proc.wait(timeout=config.SHARK_RUN_TIMEOUT + 600)
         except subprocess.TimeoutExpired:
+            hung = True
             _kill_group(proc)
             proc.wait()
         watchdog.join()
@@ -1305,6 +1335,8 @@ def analyze(dir_path, pcap_path, on_start=None):
     if too_big.is_set():
         detail = (f'it needed more than {config.SHARK_MAX_MEMORY_BYTES / 1024 ** 3:g} GB of memory '
                   '(tshark needs about 1 KB per packet)')
+    elif hung:
+        detail = f'it ran past {(config.SHARK_RUN_TIMEOUT + 600) // 60} minutes'
     else:
         # It died without saying why: killed (out of memory, most often) or crashed
         detail = lines[-1] if lines else ('killed - out of memory?' if proc.returncode == -signal.SIGKILL
@@ -1327,14 +1359,16 @@ def build(dir_path, pcap_path):
     try:
         for name in (tmp_path, tmp_path + '-wal', tmp_path + '-shm'):
             _remove(name)
-        run_tshark(pcap_path, consume=lambda records: create_shark_db(tmp_path, records))
+        notes = {}
+        run_tshark(pcap_path, consume=lambda records: create_shark_db(tmp_path, records), notes=notes)
         conn = sqlite3.connect(tmp_path)
         try:
             conn.execute(f'PRAGMA user_version = {SHARK_FORMAT_VERSION}')
-            # How long the run took, tshark and building the records both
-            # (status() reports it once the run is ready)
-            conn.execute('CREATE TABLE shark_run (seconds REAL)')
-            conn.execute('INSERT INTO shark_run VALUES (?)', (time.monotonic() - started,))
+            # How long the run took, tshark and building the records both,
+            # and whether the capture's end was cut off or damaged
+            # (status() reports both once the run is ready)
+            conn.execute('CREATE TABLE shark_run (seconds REAL, damaged INTEGER)')
+            conn.execute('INSERT INTO shark_run VALUES (?, ?)', (time.monotonic() - started, int(bool(notes))))
             conn.commit()
         finally:
             conn.close()
@@ -1405,10 +1439,12 @@ def _work():
 
 def enqueue(dir_path, pcap_path):
     """Queue a tshark run for this analysis, unless one is already
-    queued or running for it. Returns True if it was queued."""
+    queued or running for it - one that was cancelled and is still being
+    stopped doesn't count (reanalyze cancels, then queues the new run at
+    once). Returns True if it was queued."""
     global _worker
     with _lock:
-        if dir_path in _pending or dir_path == _running:
+        if dir_path in _pending or (dir_path == _running and dir_path not in _cancelled):
             return False
         _queue.append(dir_path)
         _pending[dir_path] = pcap_path
@@ -1495,15 +1531,21 @@ def set_enabled(data_dir, on):
 def run_seconds(db_path):
     """How long the run that built a shark.db took, or None if it didn't
     record that."""
+    return _run_info(db_path)[0]
+
+
+def _run_info(db_path):
+    """(seconds, damaged) of the run that built a shark.db - (None, False)
+    for what it didn't record."""
     try:
         conn = sqlite3.connect(f'file:{db_path}?mode=ro', uri=True)
         try:
-            row = conn.execute('SELECT seconds FROM shark_run').fetchone()
+            row = conn.execute('SELECT seconds, damaged FROM shark_run').fetchone()
         finally:
             conn.close()
     except sqlite3.Error:
-        return None
-    return row[0] if row else None
+        return None, False
+    return (row[0], bool(row[1])) if row else (None, False)
 
 
 def format_version(db_path):
@@ -1715,8 +1757,11 @@ def status(dir_path, pcap_path=None):
             busy = dir_path == _running or dir_path in _pending
         if busy or format_version(db_path) == SHARK_FORMAT_VERSION:
             if not busy:
-                seconds = run_seconds(db_path)
-                return {'status': 'ready'} if seconds is None else {'status': 'ready', 'seconds': round(seconds)}
+                seconds, damaged = _run_info(db_path)
+                ready = {'status': 'ready'} if seconds is None else {'status': 'ready', 'seconds': round(seconds)}
+                if damaged:
+                    ready['damaged'] = True
+                return ready
         else:
             for name in (SHARK_DB, SHARK_DB + '-wal', SHARK_DB + '-shm'):
                 _remove(os.path.join(dir_path, name))

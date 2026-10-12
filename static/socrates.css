@@ -1306,6 +1306,9 @@
         /* The tshark line (PCAP analyses), between the header and the search box: what tshark is adding - its dot is the key to the cards' */
         .tshark-line { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; border-bottom: 1px solid var(--border-color); margin-bottom: 15px; }
         .tshark-line[hidden] { display: none; }
+        .analysis-warnings { border-bottom: 1px solid var(--border-color); margin-bottom: 15px; padding: 8px 0; }
+        .analysis-warnings[hidden] { display: none; }
+        .analysis-warning { color: var(--badge-warning-text); font-size: 0.8rem; }
         .tshark-line-status { color: var(--text-muted); font-size: 0.8rem; padding: 8px 0; }
         .tshark-line-status a { color: var(--accent); font-weight: 600; }
         .tshark-line-status .stat-badge-dot { margin-right: 6px; vertical-align: 1px; }

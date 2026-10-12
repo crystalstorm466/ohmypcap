@@ -74,7 +74,10 @@ they're what an investigator is after: Telnet's login, OPC UA's
 unencrypted login and BACnet's device password. No other secret is ever
 read - not a RADIUS or SOCKS password, the password hash an IPMI 2.0
 controller sends, L2TP's CHAP exchange or the PPP login inside it,
-RIPv2's password, or the X authorization cookie XDMCP hands a session.
+RIPv2's password or keyed digest, the arguments of an OPC UA
+user-management call (ChangePassword, AddUser), a PIN or enable password
+typed in a Telnet session after its login, or the X authorization cookie
+XDMCP hands a session.
 
 **Network services and routing**
 
@@ -158,6 +161,9 @@ RIPv2's password, or the X authorization cookie XDMCP hands a session.
   protocol metadata with Zeek; SO-CRATES shows Suricata's protocol records
   plus tshark's, so its fields and record counts won't match Security
   Onion's Zeek logs for the same capture
+- **A cut-off capture still counts** - one that ends mid-packet (a partial
+  upload, a capture stopped mid-write) is read up to there, as Suricata
+  reads it, and the heading says so
 - **Nothing waits on tshark** - Suricata's results show as soon as they're
   ready, and tshark's protocols join them when it finishes (usually first);
   a line under the header counts the seconds while it works
@@ -234,6 +240,12 @@ reanalyzing still works, since it runs Suricata again.
 
 ### Fixes
 
+- A YARA scan that fails or times out no longer looks like a clean one:
+  the analysis opens as usual, with a line above its results saying File
+  Alerts may be missing, and why
+- The container image no longer includes curl (used only to fetch rules
+  while building it), and its Zircolite environment is read-only to the
+  user SO-CRATES runs as
 - When a refresh's data no longer has the open tab's type of event (a
   search that matched none of them), the first tab now opens instead of
   every section staying hidden

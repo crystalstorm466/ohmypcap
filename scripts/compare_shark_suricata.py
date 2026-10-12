@@ -16,7 +16,7 @@ shark_analyzer or understood.
 
 Usage:
     python3 scripts/compare_shark_suricata.py <pcap> <eve.json>
-    python3 scripts/compare_shark_suricata.py <analysis dir>   # its pcap, eve.json and shark.db
+    python3 scripts/compare_shark_suricata.py <analysis dir>   # its pcap, Suricata's events and shark.db
 
 Also importable: compare(suricata_events, shark_events) -> report dict.
 """
@@ -93,6 +93,17 @@ def _load_eve(path):
         return [json.loads(line) for line in f if line.strip()]
 
 
+def _load_suricata_events(path):
+    """Suricata's events from an analysis's events.db - its eve.json is
+    removed once imported - leaving out the rows tshark's merge added."""
+    conn = sqlite3.connect(f'file:{path}?mode=ro', uri=True)
+    try:
+        return [json.loads(row[0]) for row in conn.execute(
+            "SELECT json_data FROM events WHERE json_extract(json_data, '$.source') IS NOT 'tshark'")]
+    finally:
+        conn.close()
+
+
 def _load_shark_db(path):
     conn = sqlite3.connect(path)
     try:
@@ -105,19 +116,24 @@ def main(argv):
     if len(argv) == 2 and os.path.isdir(argv[1]):
         from storage import find_pcap_file
         eve = os.path.join(argv[1], 'eve.json')
+        suricata = _load_eve(eve) if os.path.exists(eve) else _load_suricata_events(os.path.join(argv[1], 'events.db'))
         shark_db = os.path.join(argv[1], 'shark.db')
         if os.path.exists(shark_db):
             shark = _load_shark_db(shark_db)
         else:
+            pcap = find_pcap_file(argv[1])
+            if not pcap:
+                print(f'{argv[1]}: no capture and no shark.db', file=sys.stderr)
+                return 2
             from shark_analyzer import run_tshark
-            shark = run_tshark(os.path.join(argv[1], find_pcap_file(argv[1])))
+            shark = run_tshark(os.path.join(argv[1], pcap))
     elif len(argv) == 3:
         from shark_analyzer import run_tshark
-        eve, shark = argv[2], run_tshark(argv[1])
+        suricata, shark = _load_eve(argv[2]), run_tshark(argv[1])
     else:
         print(__doc__)
         return 2
-    r = compare(_load_eve(eve), shark)['flow']
+    r = compare(suricata, shark)['flow']
     print(f"flow  suricata {r['suricata']}  shark {r['shark']}  matched {r['matched']}  "
           f"differences {len(r['differences'])}  reoriented {r['reoriented']}  named by tshark {r['named_by_tshark']}")
     for d in r['differences']:
