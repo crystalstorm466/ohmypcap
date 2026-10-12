@@ -219,12 +219,68 @@ def _insert_event(conn, event_dict, has_fts):
     return cur.lastrowid
 
 
+_INSERT_EVENT = ('INSERT INTO events (event_type, timestamp, src_ip, src_port, dest_ip, dest_port, protocol, '
+                 'app_proto, json_data) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+_BULK_BATCH = 5000
+
+
+class _BulkLoad:
+    """Loading a new database's events fast: its events indexes dropped
+    while the rows go in, in batches, and built once at the end - with the
+    full-text index, rebuilt from the table in one pass ('rebuild'). Kept
+    up row by row, they were most of a big import's time. A database that
+    already has events gets them row by row, as _insert_event does."""
+
+    def __init__(self, conn, has_fts):
+        self.conn, self.has_fts, self.batch = conn, has_fts, []
+        self.bulk = conn.execute('SELECT 1 FROM events LIMIT 1').fetchone() is None
+        self.indexes = []
+        if self.bulk:
+            self.indexes = conn.execute("SELECT name, sql FROM sqlite_master WHERE type = 'index' "
+                                        "AND tbl_name = 'events' AND sql IS NOT NULL").fetchall()
+            # In the load's own transaction, so an import that fails - never
+            # committed - leaves them in place, as it always did
+            if not conn.in_transaction:
+                conn.execute('BEGIN')
+            for name, _ in self.indexes:
+                conn.execute(f'DROP INDEX "{name}"')
+
+    def add(self, event, rowid_needed=False):
+        """Queue an event; inserted at once (and its rowid returned) when
+        the caller needs its rowid."""
+        if not self.bulk:
+            return _insert_event(self.conn, event, self.has_fts)
+        self.batch.append(_event_row(event))
+        if rowid_needed:
+            row = self.batch.pop()
+            self.flush()
+            return self.conn.execute(_INSERT_EVENT, row).lastrowid
+        if len(self.batch) >= _BULK_BATCH:
+            self.flush()
+        return None
+
+    def flush(self):
+        if self.batch:
+            self.conn.executemany(_INSERT_EVENT, self.batch)
+            self.batch = []
+
+    def finish(self):
+        self.flush()
+        if not self.bulk:
+            return
+        for _, sql in self.indexes:
+            self.conn.execute(sql)
+        if self.has_fts:
+            self.conn.execute("INSERT INTO events_fts(events_fts) VALUES('rebuild')")
+
+
 def create_sqlite_db(db_path, eve_file):
     with _db_connection(db_path) as conn:
         has_fts = _init_db(conn)
 
         fileinfo_by_sha256 = {}
         fileinfo_rowids = {}
+        load = _BulkLoad(conn, has_fts)
 
         with open(eve_file, 'r', errors='replace') as f:
             for line in f:
@@ -252,16 +308,17 @@ def create_sqlite_db(db_path, eve_file):
                     # ~/socrates-data/suricata/classification.config.
                     if event.get('event_type') == 'alert' and event.get('alert', {}).get('category') == 'Generic Protocol Command Decode':
                         event['event_type'] = 'protocol_decode'
-                    rowid = _insert_event(conn, event, has_fts)
-
                     # Index fileinfo events by SHA256 for YARA correlation
-                    if event.get('event_type') == 'fileinfo':
-                        sha256 = event.get('fileinfo', {}).get('sha256')
-                        if sha256:
-                            fileinfo_by_sha256[sha256] = event
-                            fileinfo_rowids[sha256] = rowid
+                    # (by rowid, so one is inserted at once)
+                    sha256 = (event.get('fileinfo') or {}).get('sha256') if event.get('event_type') == 'fileinfo' \
+                        else None
+                    rowid = load.add(event, rowid_needed=bool(sha256))
+                    if sha256:
+                        fileinfo_by_sha256[sha256] = event
+                        fileinfo_rowids[sha256] = rowid
                 except json.JSONDecodeError:
                     continue
+        load.finish()
 
         # Create synthetic filealerts events from YARA matches correlated with fileinfo
         yara_file = _related_file_path(db_path, 'yara_matches.json')
