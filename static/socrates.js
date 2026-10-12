@@ -2604,6 +2604,7 @@
                     }
                 });
             }
+            revealActiveStatCard();
 
             // #sankeyPanel/#aggregations are single, page-level panels
             // shared across every tab (not per-section - see
@@ -5784,7 +5785,7 @@
         new MutationObserver(reapplyToggleBarSelection).observe(document.getElementById('sections'), { childList: true, subtree: true });
 
         function navigateStatTabs(direction) {
-            const cards = Array.from(document.querySelectorAll('#statsGrid .stat-card'));
+            const cards = Array.from(document.querySelectorAll('#statsGrid .stat-card:not(.stat-card-collapsed)'));
             if (cards.length === 0) return false;
             // Continue from a live preview selection if one exists, not
             // necessarily .tab-active - repeated Left/Right (like Down/Up
@@ -5857,12 +5858,15 @@
         // never drifts out of sync with reality once a real click commits
         // a different tab.
         function activeColumnStatCards() {
-            const referenceCard = (verticalNavSelection && verticalNavSelection.isConnected && verticalNavSelection.classList.contains('stat-card'))
+            let referenceCard = (verticalNavSelection && verticalNavSelection.isConnected && verticalNavSelection.classList.contains('stat-card'))
                 ? verticalNavSelection
                 : document.querySelector('.stat-card.tab-active');
             if (!referenceCard) return [];
-            const cards = Array.from(document.querySelectorAll('#statsGrid .stat-card'));
+            const cards = Array.from(document.querySelectorAll('#statsGrid .stat-card:not(.stat-card-collapsed)'));
             const columnCount = statsGridColumnCount();
+            // The open tab's card in a section the viewer collapsed: the
+            // grid is still reachable, from its first card showing
+            if (!cards.includes(referenceCard) && referenceCard.classList.contains('stat-card-collapsed')) referenceCard = cards[0];
             if (!cards.includes(referenceCard)) return [];
             // Each section's cards start a fresh row under its heading (see
             // STAT_GROUPS), so their columns count from the section's first
@@ -5870,7 +5874,7 @@
             let n = 0;
             for (const el of document.getElementById('statsGrid').children) {
                 if (el.classList.contains('stats-grid-heading')) n = 0;
-                else if (el.classList.contains('stat-card')) place.set(el, n++);
+                else if (el.classList.contains('stat-card') && !el.classList.contains('stat-card-collapsed')) place.set(el, n++);
             }
             const columnOf = c => place.get(c) % columnCount;
             const column = columnOf(referenceCard);
@@ -6664,7 +6668,10 @@
                     e.preventDefault();
                 }
             }
-            if (e.key === 'Enter' && (isNavigableKeyContext(e) || isAutocompleteModalActive())) {
+            // Enter on a focused section heading's button is the button's
+            // own (it toggles the section), not the arrow keys' selection's
+            if (e.key === 'Enter' && (isNavigableKeyContext(e) || isAutocompleteModalActive())
+                && !(e.target.closest && e.target.closest('.stats-grid-heading-toggle'))) {
                 if (activateKeyboardSelection()) {
                     e.preventDefault();
                 }
@@ -10289,12 +10296,89 @@
             { heading: 'Protocol records', note: 'what Suricata and tshark parsed from the traffic' },
             { heading: 'Connections', note: "a row per connection, and whether it was answered: Suricata's flows, and the protocols tshark identified by port, payload or link-layer type, with no records parsed" },
         ];
+        // A section collapses to its heading - a click on the heading, or
+        // Enter on its button. The viewer's choice for each section is
+        // kept (in this browser, for every analysis); until there is one,
+        // Connections starts collapsed past STAT_GROUP_AUTO_COLLAPSE_CARDS
+        // cards, and the rest open. A collapsed section's cards are out
+        // of Left/Right and Up/Down too. The open tab's section is never
+        // collapsed for it: buildStats opens it, as does opening a tab
+        // from elsewhere (revealActiveStatCard) - neither saved.
+        const STAT_GROUPS_COLLAPSED_KEY = 'socrates_statGroupsCollapsed';
+        const STAT_GROUP_AUTO_COLLAPSE_CARDS = 12;
+
+        function statGroupChoices() {
+            try {
+                const choices = JSON.parse(safeStorageGet(localStorage, STAT_GROUPS_COLLAPSED_KEY) || '{}');
+                return choices && typeof choices === 'object' ? choices : {};
+            } catch (e) {
+                return {};
+            }
+        }
+
+        function statGroupCollapsed(group, cardCount) {
+            const choice = statGroupChoices()[group];
+            if (typeof choice === 'boolean') return choice;
+            return group === 2 && cardCount > STAT_GROUP_AUTO_COLLAPSE_CARDS;
+        }
+
+        function statGroupSummary(cardCount) {
+            return `${cardCount.toLocaleString()} card${cardCount === 1 ? '' : 's'}`;
+        }
+
         // The Protocol records heading also ends with tshark's finished
         // line, once there is one (see updateTsharkLine)
-        const STAT_GROUP_HEADINGS_HTML = STAT_GROUPS.map((g, i) => `<div class="stats-grid-heading">${g.heading}`
-            + `<span class="stats-grid-heading-note">${escapeHtml(g.note)}</span>`
-            + (i === 1 ? '<span id="tsharkHeadingStatus" class="stats-grid-heading-aside" aria-live="polite" hidden></span>' : '')
-            + '</div>');
+        function statGroupHeadingHtml(group, collapsed, cardCount) {
+            const g = STAT_GROUPS[group];
+            return `<div class="stats-grid-heading${collapsed ? ' collapsed' : ''}" data-action="toggle-stat-group" data-group="${group}">`
+                + `<button type="button" class="stats-grid-heading-toggle" aria-expanded="${!collapsed}">`
+                + `<span class="stats-grid-heading-arrow" aria-hidden="true">${collapsed ? '▸' : '▾'}</span>`
+                + `<span class="stats-grid-heading-label">${g.heading}</span></button>`
+                + `<span class="stats-grid-heading-note">${escapeHtml(g.note)}</span>`
+                + `<span class="stats-grid-heading-summary"${collapsed ? '' : ' hidden'}>${statGroupSummary(cardCount)}</span>`
+                + (group === 1 ? '<span id="tsharkHeadingStatus" class="stats-grid-heading-aside" aria-live="polite" hidden></span>' : '')
+                + '</div>';
+        }
+
+        // Shows or hides one section's cards in place - no rebuild, so
+        // nothing re-animates
+        function setStatGroupCollapsed(group, collapsed) {
+            const grid = document.getElementById('statsGrid');
+            const heading = grid && grid.querySelector(`.stats-grid-heading[data-group="${group}"]`);
+            if (!heading) return;
+            const cards = grid.querySelectorAll(`.stat-card[data-stat-group="${group}"]`);
+            cards.forEach(c => c.classList.toggle('stat-card-collapsed', collapsed));
+            heading.classList.toggle('collapsed', collapsed);
+            heading.querySelector('.stats-grid-heading-toggle').setAttribute('aria-expanded', String(!collapsed));
+            heading.querySelector('.stats-grid-heading-arrow').textContent = collapsed ? '▸' : '▾';
+            heading.querySelector('.stats-grid-heading-summary').hidden = !collapsed;
+            if (collapsed) {
+                cards.forEach(c => {
+                    c.classList.remove('keyboard-selected');
+                    if (verticalNavSelection === c) verticalNavSelection = null;
+                });
+            } else {
+                // Labels hidden while collapsed couldn't be measured
+                fitStatLabels(grid);
+            }
+        }
+
+        function toggleStatGroup(heading) {
+            const group = Number(heading.dataset.group);
+            const collapsed = !heading.classList.contains('collapsed');
+            const choices = statGroupChoices();
+            choices[group] = collapsed;
+            safeStorageSet(localStorage, STAT_GROUPS_COLLAPSED_KEY, JSON.stringify(choices));
+            setStatGroupCollapsed(group, collapsed);
+        }
+
+        // Opening a tab whose card is in a collapsed section (a pivot, the
+        // Command Palette, DNS Heuristics' click-through) opens the
+        // section, for now
+        function revealActiveStatCard() {
+            const card = document.querySelector('#statsGrid .stat-card.tab-active.stat-card-collapsed');
+            if (card) setStatGroupCollapsed(Number(card.dataset.statGroup), false);
+        }
         // The leads, in their order
         const LEAD_CARDS = ['alert', 'filealerts', 'protocol_decode', 'anomaly', 'findings', 'dns_heuristics', 'acknowledged'];
 
@@ -10419,10 +10503,20 @@
             // alone, which every capture has, doesn't make a section.
             const visibleStats = stats.filter(s => s.count > 0);
             const showHeadings = grouped && new Set(visibleStats.filter(s => s.id !== 'all').map(s => s.group)).size > 1;
+            // Each section's card count, and which are collapsed - never
+            // the open tab's (see statGroupCollapsed)
+            const groupCards = {};
+            visibleStats.forEach(s => { groupCards[s.group] = (groupCards[s.group] || 0) + 1; });
+            const activeGroup = (visibleStats.find(s => s.id === activeType) || {}).group;
+            const collapsedGroups = new Set(showHeadings
+                ? Object.keys(groupCards).map(Number).filter(g => g !== activeGroup && statGroupCollapsed(g, groupCards[g]))
+                : []);
             let lastGroup = null;
             grid.innerHTML = visibleStats.map(s => {
-                const heading = showHeadings && s.group !== lastGroup ? STAT_GROUP_HEADINGS_HTML[s.group] : '';
+                const heading = showHeadings && s.group !== lastGroup ? statGroupHeadingHtml(s.group, collapsedGroups.has(s.group), groupCards[s.group]) : '';
                 lastGroup = s.group;
+                const collapsedClass = collapsedGroups.has(s.group) ? ' stat-card-collapsed' : '';
+                const groupAttr = s.group !== undefined ? ` data-stat-group="${s.group}"` : '';
                 // Filtered/searched-down counts show as just the filtered
                 // number, not "filtered / total" - the filter bar's own
                 // chips already signal that a filter is active, and a
@@ -10437,7 +10531,7 @@
                 // real final value immediately so assistive tech isn't
                 // stuck reading "0" or a mid-animation number.
                 return heading + `
-                    <div class="stat-card${activeClass}${s.connection ? ' stat-card-connection' : ''}" data-action="show-tab" data-section="section-${s.id}"${s.title ? ` title="${escapeHtml(s.title)}"` : ''}>
+                    <div class="stat-card${activeClass}${s.connection ? ' stat-card-connection' : ''}${collapsedClass}" data-action="show-tab" data-section="section-${s.id}"${groupAttr}${s.title ? ` title="${escapeHtml(s.title)}"` : ''}>
                         <div class="stat-number" style="color: ${s.color}" aria-label="${countDisplay}">0</div>
                         <div class="stat-label">${escapeHtml(s.label)}</div>${s.notInSuricata ? '<span class="stat-badge" title="From tshark: Suricata doesn\'t parse this protocol"><span class="sr-only">from tshark</span></span>' : ''}
                     </div>
@@ -14095,6 +14189,7 @@
             'view-dns-heuristic-domain': (el) => viewDnsHeuristicDomain(el.dataset.id),
             'toggle-dns-heuristics-info': (el) => toggleDnsHeuristicsInfo(el),
             'toggle-findings-info': (el) => toggleFindingsInfo(el),
+            'toggle-stat-group': (el) => toggleStatGroup(el),
 
             // Sankey / Aggregation panels.
             'toggle-diagram': () => toggleDiagram(),

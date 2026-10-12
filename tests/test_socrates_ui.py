@@ -21827,7 +21827,7 @@ class TestTsharkUI(unittest.TestCase):
             await new Promise(function(r) { setTimeout(r, 200); });
             buildStats();
             var grid = document.getElementById('statsGrid');
-            var order = [...grid.children].map(el => el.classList.contains('stats-grid-heading') ? 'HEADING ' + el.firstChild.textContent
+            var order = [...grid.children].map(el => el.classList.contains('stats-grid-heading') ? 'HEADING ' + el.querySelector('.stats-grid-heading-label').textContent
                 : el.querySelector('.stat-label').textContent);
             // a 3-column grid: each section starts a row of its own
             window.statsGridColumnCount = function() { return 3; };
@@ -21874,7 +21874,7 @@ class TestTsharkUI(unittest.TestCase):
                 return {line: document.getElementById('tsharkLineStatus').textContent,
                         lineHidden: document.querySelector('.tshark-line').hidden,
                         heading: h ? h.textContent : null, headingHidden: h ? h.hidden : null,
-                        headingParent: h ? h.closest('.stats-grid-heading').firstChild.textContent : null,
+                        headingParent: h ? h.closest('.stats-grid-heading').querySelector('.stats-grid-heading-label').textContent : null,
                         title: h ? h.title : null};
             };
             tsharkTypes = new Set(['s7comm', 'conn_rsh']);
@@ -21904,6 +21904,100 @@ class TestTsharkUI(unittest.TestCase):
         self.assertIsNone(result['noHeadings']['heading'])
         self.assertEqual(result['noHeadings']['line'], 'tshark found no additional protocols in 9s')
         self.assertFalse(result['noHeadings']['lineHidden'])
+
+    # A grid with every section: two leads, three record cards (All
+    # Events among them) and Flows plus the given number of connection
+    # cards - built with the given collapsed choices stored
+    def _sections_grid_js(self, connection_cards, choices=None):
+        conns = ['conn_p%02d' % i for i in range(connection_cards)]
+        types = ['alert', 'anomaly', 'dns', 'http', 'flow'] + conns
+        counts = dict({t: 1 for t in types}, flow=5)
+        return """
+            await new Promise(function(r) { setTimeout(r, 100); });
+            currentMd5 = 'abc123';
+            isLogAnalysisMode = false; isEmailAnalysisMode = false;
+            window.fetch = function() { return Promise.resolve({ ok: true, json: function() { return Promise.resolve({rules: [], findings: [], count: 0, counts: {}}); } }); };
+            safeStorageRemove(localStorage, 'socrates_statGroupsCollapsed');
+            """ + ("safeStorageSet(localStorage, 'socrates_statGroupsCollapsed', '%s');" % json.dumps(choices) if choices else '') + """
+            eventTypes = sortEventTypes(""" + json.dumps(types) + """);
+            eventStats = """ + json.dumps(counts) + """;
+            buildStats();
+            var grid = document.getElementById('statsGrid');
+            var shown = function() {
+                return [...grid.querySelectorAll('.stat-card:not(.stat-card-collapsed)')].map(c => c.querySelector('.stat-label').textContent);
+            };
+            var headings = function() {
+                return [...grid.querySelectorAll('.stats-grid-heading')].map(h => [h.querySelector('.stats-grid-heading-label').textContent,
+                    h.querySelector('.stats-grid-heading-toggle').getAttribute('aria-expanded'),
+                    h.querySelector('.stats-grid-heading-summary').hidden ? '' : h.querySelector('.stats-grid-heading-summary').textContent]);
+            };
+        """
+
+    def test_connections_collapse_by_default_past_the_threshold(self):
+        from tests.jsdom_helper import js_statements
+        few = js_statements(self._sections_grid_js(11) + "window.__jsdom_result = {headings: headings(), shown: shown().length};")
+        many = js_statements(self._sections_grid_js(12) + "window.__jsdom_result = {headings: headings(), shown: shown()};")
+        self.assertEqual(few['headings'][2], ['Connections', 'true', ''], '12 connection cards, Flows among them, stay open')
+        self.assertEqual(few['shown'], 2 + 3 + 12)
+        self.assertEqual(many['headings'], [['Leads', 'true', ''], ['Protocol records', 'true', ''],
+                                            ['Connections', 'false', '13 cards']])
+        self.assertEqual(many['shown'], ['Network Alerts', 'Anomalies', 'All Events', 'DNS Queries', 'HTTP'])
+
+    def test_toggling_a_section_hides_its_cards_and_is_remembered(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements(self._sections_grid_js(2) + """
+            grid.querySelector('.stats-grid-heading[data-group="1"] .stats-grid-heading-toggle').click();
+            var afterClick = {headings: headings(), shown: shown(), stored: safeStorageGet(localStorage, 'socrates_statGroupsCollapsed')};
+            buildStats();      // a rebuild keeps it
+            var afterRebuild = shown();
+            grid.querySelector('.stats-grid-heading[data-group="1"]').click();   // anywhere on the heading
+            window.__jsdom_result = {afterClick: afterClick, afterRebuild: afterRebuild, reopened: shown(),
+                                     stored: safeStorageGet(localStorage, 'socrates_statGroupsCollapsed')};
+        """)
+        self.assertEqual(result['afterClick']['headings'][1], ['Protocol records', 'false', '3 cards'])
+        self.assertEqual(result['afterClick']['shown'], ['Network Alerts', 'Anomalies', 'Flows', 'P00', 'P01'])
+        self.assertEqual(json.loads(result['afterClick']['stored']), {'1': True})
+        self.assertEqual(result['afterRebuild'], result['afterClick']['shown'])
+        self.assertEqual(len(result['reopened']), 2 + 3 + 3)
+        self.assertEqual(json.loads(result['stored']), {'1': False})
+
+    def test_a_viewer_choice_beats_the_threshold(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements(self._sections_grid_js(20, {'2': False, '0': True}) + "window.__jsdom_result = headings();")
+        self.assertEqual([h[1] for h in result], ['true', 'true', 'true'],
+                         "Leads holds the open tab, so it stays open; Connections was opened by the viewer")
+
+    def test_the_open_tabs_section_is_never_hidden(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements(self._sections_grid_js(2, {'1': True, '2': True}) + """
+            var before = headings();
+            // opening a tab from elsewhere (a pivot, the Command Palette)
+            await loadTabData('dns');
+            window.__jsdom_result = {before: before, after: headings(), stored: safeStorageGet(localStorage, 'socrates_statGroupsCollapsed'),
+                                     dnsShown: shown().indexOf('DNS Queries') >= 0};
+        """)
+        self.assertEqual([h[1] for h in result['before']], ['true', 'false', 'false'])
+        self.assertTrue(result['dnsShown'])
+        self.assertEqual([h[1] for h in result['after']], ['true', 'true', 'false'])
+        self.assertEqual(json.loads(result['stored']), {'1': True, '2': True}, 'opened for now, not saved')
+
+    def test_left_right_skip_a_collapsed_sections_cards(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements(self._sections_grid_js(2, {'1': True}) + """
+            window.statsGridColumnCount = function() { return 4; };
+            var seen = [];
+            for (var i = 0; i < 5; i++) {
+                navigateStatTabs(1);
+                seen.push(grid.querySelector('.stat-card.keyboard-selected').querySelector('.stat-label').textContent);
+            }
+            window.__jsdom_result = {seen: seen};
+        """)
+        self.assertEqual(result['seen'], ['Anomalies', 'Flows', 'P00', 'P01', 'Network Alerts'])
+
+    def test_enter_on_a_section_button_is_the_buttons_own(self):
+        keydown = JS_CONTENT.split("if (e.key === 'Enter' && (isNavigableKeyContext(e) || isAutocompleteModalActive())")[1][:200]
+        self.assertIn(".stats-grid-heading-toggle", keydown,
+                      "Enter on a focused heading button must toggle the section, not activate the arrow keys' selection")
 
     def test_no_headings_when_the_cards_fill_one_section(self):
         from tests.jsdom_helper import js_statements

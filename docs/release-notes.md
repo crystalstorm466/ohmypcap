@@ -190,7 +190,10 @@ analysis's cards now come in three sections, each under a heading:
 **Leads** (the alerts, Findings, DNS Heuristics and Acknowledged
 Alerts), **Protocol records** (All Events, then every type of record) and
 **Connections** (Flows, then tshark's connection cards). A capture whose
-cards all fall in one section shows no headings.
+cards all fall in one section shows no headings. A click on a heading
+collapses its section to the heading and a count of its cards; the choice
+is remembered, and until there is one, Connections starts collapsed past
+12 cards.
 
 ### Suricata 8.0.7 and tshark 4.4.19
 
