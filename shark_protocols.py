@@ -2148,7 +2148,7 @@ _TELNET_MAX_LINE = 200
 
 
 class _TelnetSession:
-    __slots__ = ('first', 'flow', 'server_text', 'tail', 'state', 'line', 'body', 'commands', 'attempt')
+    __slots__ = ('first', 'flow', 'server_text', 'tail', 'state', 'line', 'body', 'commands', 'attempt', 'named')
 
     def __init__(self, flow, when):
         self.flow, self.first = flow, when
@@ -2162,6 +2162,7 @@ class _TelnetSession:
         # start, after a user name or a failed login - not a later PIN or
         # enable secret, which is kept nowhere
         self.attempt = True
+        self.named = False         # whether this attempt typed a user name
 
 
 class Telnet:
@@ -2209,18 +2210,21 @@ class Telnet:
                 line, session.line = session.line, ''
                 # (each attempt's replaces the last's: a failed login and
                 # then one the server took is that one's record)
+                # (Enter alone at the prompts - typing nothing - is no attempt:
+                # it leaves the last one's user name and password standing)
                 if session.state == 'user':
-                    session.body['username'] = line
-                    session.attempt = True
+                    if line:
+                        session.body['username'] = line
+                        session.attempt = session.named = True
                     session.state = None
                 elif session.state == 'password':
-                    if session.attempt:
+                    if session.attempt and (line or session.named or 'password' not in session.body):
                         if session.body.pop('login', None) == 'failed':
                             # a new attempt after a failed one - failed only
                             # if the server says so again
                             session.body['earlier_failures'] = session.body.get('earlier_failures', 0) + 1
                         session.body['password'] = line
-                        session.attempt = False
+                        session.attempt = session.named = False
                     session.state = None
                 elif line.strip() and len(session.commands) < _TELNET_MAX_COMMANDS:
                     session.commands.append(line[:_TELNET_MAX_LINE])

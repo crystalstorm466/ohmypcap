@@ -2282,6 +2282,13 @@ class TestHostileInput(unittest.TestCase):
                          {'username': 'root', 'password': 'right', 'login': None, 'earlier_failures': 1,
                           'commands': ['show run']})
         self.assertNotIn('1234', json.dumps(body))
+        # Enter alone at the prompts after a login is no attempt of its own:
+        # the login typed stands (seen in the 4SICS captures)
+        telnet = Telnet()
+        server('login: '), client('admin\r'), server('Password: '), client('s3cret\r'), server('$ exit\r\nlogin: ')
+        client('\r'), server('Password: '), client('\r')
+        body = telnet.finish()[0][3]
+        self.assertEqual((body.get('username'), body.get('password')), ('admin', 's3cret'))
 
     def test_bytes_and_escapes_that_arent_what_they_should_be_dont_fail_the_run(self):
         from shark_protocols import _dict, _hex
