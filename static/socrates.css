@@ -1351,6 +1351,9 @@
         /* the cards' label color (.stat-label): readable on every theme, where
            --text-primary isn't always (Breadbin Blue's is the dimmer one) */
         .stats-grid-heading-note { font-weight: normal; text-transform: none; letter-spacing: normal; }
+        .stats-grid-heading-aside { margin-left: auto; font-weight: normal; text-transform: none; letter-spacing: normal; }
+        .stats-grid-heading-aside[hidden] { display: none; }
+        .stats-grid-heading-aside .stat-badge-dot { margin-right: 6px; vertical-align: 1px; }
         .stat-card { background: var(--bg-secondary); padding: 20px; border-radius: 10px; border: 1px solid var(--border-color); text-align: center; cursor: pointer; container-type: inline-size; position: relative; }
         .stat-card:hover { border-color: var(--interactive-highlight, var(--accent)); }
         .stat-card.tab-active { border-color: var(--interactive-highlight, var(--accent)); background: var(--bg-tertiary); }

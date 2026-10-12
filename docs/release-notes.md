@@ -160,7 +160,7 @@ Settings can turn tshark off.
 
 ### Findings
 
-A new **Findings** tab, just before All Events, gathers what the protocol
+A new **Findings** tab gathers what the protocol
 records show is worth a look, from every protocol, into one list ranked
 by severity. One row for each record that trips a rule, with a detail line
 and the record's own details a click away:
@@ -182,6 +182,15 @@ and the record's own details a click away:
 An **About Findings** card says what each rule that matched looks for. A
 search narrows the list like any other tab. No password is shown, even
 where the record keeps one. Suricata's alerts stay on their own tab.
+
+### Cards in three sections
+
+With tshark's protocols, a capture can have dozens of cards, so a PCAP
+analysis's cards now come in three sections, each under a heading:
+**Leads** (the alerts, Findings, DNS Heuristics and Acknowledged
+Alerts), **Protocol records** (All Events, then every type of record) and
+**Connections** (Flows, then tshark's connection cards). A capture whose
+cards all fall in one section shows no headings.
 
 ### Suricata 8.0.7 and tshark 4.4.19
 

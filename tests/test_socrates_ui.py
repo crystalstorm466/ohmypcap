@@ -695,13 +695,13 @@ class TestCardOrder(unittest.TestCase):
     def test_sortEventTypes_full_priority_order(self):
         """Network Alerts, File Alerts, Decoder Alerts, Anomalies (in that
         order) take priority over every other pcap-mode tab, which then
-        falls back to alphabetical - e.g. dns/flow/http here, regardless of
-        input order."""
+        falls back to alphabetical - e.g. dns/http here, regardless of
+        input order - with Flows after them, leading the connections."""
         from tests.jsdom_helper import js_expression
         result = js_expression(
             "sortEventTypes(['http', 'anomaly', 'flow', 'protocol_decode', 'dns', 'filealerts', 'alert'])"
         )
-        self.assertEqual(result, ['alert', 'filealerts', 'protocol_decode', 'anomaly', 'dns', 'flow', 'http'])
+        self.assertEqual(result, ['alert', 'filealerts', 'protocol_decode', 'anomaly', 'dns', 'http', 'flow'])
 
     def test_refresh_current_view_calls_both_section_and_aggregation(self):
         """Verify refreshCurrentView builds both section and aggregation when filtering"""
@@ -6793,7 +6793,7 @@ class TestAdvancedModeFilterBar(unittest.TestCase):
         every remaining card is guaranteed clickable once zero-count ones
         are filtered out first."""
         func = JS_CONTENT.split('function buildStats(')[1].split('function buildSections(')[0]
-        self.assertIn('stats.filter(s => s.count > 0).map(s => {', func,
+        self.assertIn('const visibleStats = stats.filter(s => s.count > 0);', func,
                       'buildStats must filter out zero-count cards before rendering')
         self.assertNotIn('stat-disabled', func,
                          'the old disabled-card styling is dead now that zero-count cards are dropped, not disabled')
@@ -6811,7 +6811,7 @@ class TestAdvancedModeFilterBar(unittest.TestCase):
         func = JS_CONTENT.split('function buildStats(')[1].split('function buildSections(')[0]
         self.assertIn('aria-label="${countDisplay}">0<', func,
                       'stat-number must start at 0 with the real value in aria-label')
-        self.assertIn('stats.filter(s => s.count > 0).forEach((s, i) => animateStatNumber(numberEls[i], s.count));', func,
+        self.assertIn('visibleStats.forEach((s, i) => animateStatNumber(numberEls[i], s.count));', func,
                       'buildStats must animate each rendered stat-number up to its real count')
 
     def test_animateStatNumber_counts_up_to_target(self):
@@ -12269,7 +12269,8 @@ class TestDnsHeuristicsTab(unittest.TestCase):
         never .keyboard-selected, so the ring stayed stuck on whichever
         card had it (Network Alerts in the report) even after switching
         to a different tab. Now that Left/Right also only previews, the
-        ring must move to exactly the new card (HTTP) - not stay behind
+        ring must move to exactly the new card (Acknowledged Alerts, the
+        next lead) - not stay behind
         on Network Alerts, and not duplicate onto both."""
         from tests.jsdom_helper import js_statements
         events = [{'event_type': 'alert', 'timestamp': '2026-01-01T00:00:00', 'src_ip': '10.0.0.5',
@@ -12321,7 +12322,7 @@ class TestDnsHeuristicsTab(unittest.TestCase):
             };
         ''')
         self.assertEqual(result['landedLabel'], 'Network Alerts')
-        self.assertEqual(result['ringedCards'], ['HTTP'], 'the ring must move to exactly the newly-previewed card, not stay on Network Alerts or duplicate')
+        self.assertEqual(result['ringedCards'], ['Acknowledged Alerts'], 'the ring must move to exactly the newly-previewed card, not stay on Network Alerts or duplicate')
         self.assertEqual(result['activeLabel'], 'Network Alerts', 'Right must only preview - the active tab must not change until Enter')
 
     # jsdom has no real CSS Grid layout engine, so getComputedStyle(...)
@@ -12340,10 +12341,14 @@ class TestDnsHeuristicsTab(unittest.TestCase):
             window.fetch = function(url) {
                 var u = String(url);
                 if (u.indexOf('/api/stats') >= 0) {
-                    return Promise.resolve({ ok: true, json: function() { return Promise.resolve({ counts: { alert: 1, dns: 1, flow: 1, ftp: 1, http: 1, tls: 1 } }); } });
+                    return Promise.resolve({ ok: true, json: function() { return Promise.resolve({ counts: { alert: 1, dns: 1, flow: 1, ftp: 1, http: 1, smb: 1, ssh: 1, tls: 1 } }); } });
                 }
                 if (u.indexOf('/api/events') >= 0 && u.indexOf('type=''' + active_event_type + '''') >= 0) {
                     return Promise.resolve({ ok: true, json: function() { return Promise.resolve(''' + json.dumps(events_for_type) + '''); } });
+                }
+                // nothing acknowledged: Network Alerts is the only lead
+                if (u.indexOf('/api/count') >= 0 && u.indexOf('acknowledged=only') >= 0) {
+                    return Promise.resolve({ ok: true, json: function() { return Promise.resolve({ count: 0 }); } });
                 }
                 if (u.indexOf('/api/count') >= 0) {
                     return Promise.resolve({ ok: true, json: function() { return Promise.resolve({ count: 1 }); } });
@@ -12369,14 +12374,13 @@ class TestDnsHeuristicsTab(unittest.TestCase):
         multi-row stat-card grid, Down while sitting on a card must only
         move the keyboard-selection ring (mirroring navigateThemeTiles'
         own preview-then-Enter-to-commit idiom); the active tab must not
-        change until Enter. Cards in DOM order here: alert(0,active),
-        dns(1), flow(2), ftp(3) | http(4), tls(5), All Events(6),
-        Acknowledged Alerts(7) - a 4-column, 2-row grid.
+        change until Enter. Cards here, in a 4-column grid, each section
+        starting a row of its own: Network Alerts (active) | All Events,
+        DNS Queries, FTP, HTTP | SMB, SSH, TLS | Flows.
         activeColumnStatCards() (see getVerticalNavItems) puts the active
         tab's own card (column 0, row 1) first in the unified nav list, so
         the first Down merely rings that same already-active card; a
-        second Down is what steps to column 0 of row 2 (index 0+4=4,
-        'http')."""
+        second Down is what steps to column 0 of row 2 (All Events)."""
         from tests.jsdom_helper import js_statements
         events = [{'event_type': 'alert', 'timestamp': '2026-01-01T00:00:00', 'src_ip': '10.0.0.5',
                    'src_port': 1, 'dest_ip': '10.0.0.6', 'dest_port': 2, 'proto': 'TCP',
@@ -12395,7 +12399,7 @@ class TestDnsHeuristicsTab(unittest.TestCase):
         self.assertTrue(result['handled'])
         self.assertEqual(result['activeBefore'], 'Network Alerts')
         self.assertEqual(result['activeAfter'], 'Network Alerts', 'the active tab must not change from a mere preview')
-        self.assertEqual(result['ringedLabel'], 'HTTP', 'the keyboard-selection ring must move to row 2')
+        self.assertEqual(result['ringedLabel'], 'All Events', 'the keyboard-selection ring must move to row 2')
 
     def test_enter_commits_a_previewed_stat_card_row(self):
         from tests.jsdom_helper import js_statements
@@ -12404,7 +12408,7 @@ class TestDnsHeuristicsTab(unittest.TestCase):
                    'alert': {'signature': 'Test', 'category': 'x', 'severity': 1, 'signature_id': 1}}]
         result = js_statements(self._bootstrap_multi_row_stat_grid_js('alert', events) + '''
             navigateVertical(1); // rings the active card itself (row 1)
-            navigateVertical(1); // preview HTTP (row 2)
+            navigateVertical(1); // preview All Events (row 2)
             var committed = activateKeyboardSelection(); // Enter
             await new Promise(function(r) { setTimeout(r, 30); });
             window.__jsdom_result = {
@@ -12413,7 +12417,7 @@ class TestDnsHeuristicsTab(unittest.TestCase):
             };
         ''')
         self.assertTrue(result['committed'])
-        self.assertEqual(result['activeAfterEnter'], 'HTTP')
+        self.assertEqual(result['activeAfterEnter'], 'All Events')
 
     def test_left_right_previews_without_switching_tabs(self):
         """REGRESSION GUARD: navigateStatTabs (Left/Right) used to
@@ -12438,7 +12442,7 @@ class TestDnsHeuristicsTab(unittest.TestCase):
         self.assertTrue(result['handled'])
         self.assertEqual(result['activeBefore'], 'Network Alerts')
         self.assertEqual(result['activeAfter'], 'Network Alerts', 'the active tab must not change from a mere Right preview')
-        self.assertEqual(result['ringedLabel'], 'DNS Queries', 'the ring must move to the next card in DOM order')
+        self.assertEqual(result['ringedLabel'], 'All Events', 'the ring must move to the next card in DOM order')
 
     def test_enter_commits_a_left_right_previewed_card(self):
         from tests.jsdom_helper import js_statements
@@ -12446,7 +12450,7 @@ class TestDnsHeuristicsTab(unittest.TestCase):
                    'src_port': 1, 'dest_ip': '10.0.0.6', 'dest_port': 2, 'proto': 'TCP',
                    'alert': {'signature': 'Test', 'category': 'x', 'severity': 1, 'signature_id': 1}}]
         result = js_statements(self._bootstrap_multi_row_stat_grid_js('alert', events) + '''
-            navigateStatTabs(1); // preview DNS Queries
+            navigateStatTabs(1); // preview All Events
             var committed = activateKeyboardSelection(); // Enter
             await new Promise(function(r) { setTimeout(r, 30); });
             window.__jsdom_result = {
@@ -12455,12 +12459,13 @@ class TestDnsHeuristicsTab(unittest.TestCase):
             };
         ''')
         self.assertTrue(result['committed'])
-        self.assertEqual(result['activeAfterEnter'], 'DNS Queries')
+        self.assertEqual(result['activeAfterEnter'], 'All Events')
 
     def test_falling_through_to_data_table_clears_a_previewed_stat_card_ring(self):
-        """REGRESSION GUARD: after previewing row 2 (without committing),
-        a third Down exhausts the grid column and moves on to the data
-        table - clearing the still-ringed row-2 preview card, since
+        """REGRESSION GUARD: after previewing the column's last card
+        (Flows - without committing), the next Down exhausts the grid
+        column and moves on to the data table - clearing the still-ringed
+        preview card, since
         navigateVertical() clears every candidate in its own flat list
         (which includes the whole grid column, not just the active card)
         before selecting the next one."""
@@ -12470,7 +12475,9 @@ class TestDnsHeuristicsTab(unittest.TestCase):
                    'alert': {'signature': 'Test', 'category': 'x', 'severity': 1, 'signature_id': 1}}]
         result = js_statements(self._bootstrap_multi_row_stat_grid_js('alert', events) + '''
             navigateVertical(1); // rings the active card itself (row 1)
-            navigateVertical(1); // preview HTTP (row 2)
+            navigateVertical(1); // preview All Events
+            navigateVertical(1); // preview SMB
+            navigateVertical(1); // preview Flows
             var handled = navigateVertical(1); // grid column exhausted -> moves into the data table
             window.__jsdom_result = {
                 handled: handled,
@@ -12499,7 +12506,9 @@ class TestDnsHeuristicsTab(unittest.TestCase):
                    'alert': {'signature': 'Test', 'category': 'x', 'severity': 1, 'signature_id': 1}}]
         result = js_statements(self._bootstrap_multi_row_stat_grid_js('alert', events) + '''
             navigateVertical(1); // rings the active card itself (row 1)
-            navigateVertical(1); // preview HTTP (row 2)
+            navigateVertical(1); // preview All Events
+            navigateVertical(1); // preview SMB
+            navigateVertical(1); // preview Flows
             navigateVertical(1); // exhausted -> falls into the data table
 
             var up1Handled = navigateVertical(-1);
@@ -12517,17 +12526,17 @@ class TestDnsHeuristicsTab(unittest.TestCase):
             };
         ''')
         self.assertTrue(result['up1Handled'])
-        self.assertEqual(result['ring1Label'], 'HTTP', 'the first Up must retrace back to row 2, not skip it')
+        self.assertEqual(result['ring1Label'], 'Flows', "the first Up must retrace back to the column's last card, not skip it")
         self.assertEqual(result['activeAfterUp1'], 'Network Alerts', 'Up must only preview - the active tab must not change')
         self.assertTrue(result['up2Handled'])
-        self.assertEqual(result['ring2Label'], 'Network Alerts', 'a second Up from row 2 must continue on to the active row')
+        self.assertEqual(result['ring2Label'], 'SMB', 'a second Up must continue on up the column')
 
     def test_down_after_right_preview_continues_down_the_previewed_column(self):
         """REGRESSION GUARD (real bug report): with a multi-row stat-card
         grid, Right previews a card in a DIFFERENT column than the active
-        tab's own (e.g. DNS Queries, column 1, still row 1), and Down
-        must then continue straight down THAT column (to TLS, column 1
-        row 2) - not jump back to the still-active tab's own column
+        tab's own (e.g. DNS Queries, column 1), and Down must then
+        continue straight down THAT column (to SSH, column 1 of the next
+        row) - not jump back to the still-active tab's own column
         (Network Alerts, column 0), which read as Down having gone
         backwards/left instead of down. activeColumnStatCards() now uses
         whichever stat card is currently ringed (verticalNavSelection) as
@@ -12538,17 +12547,18 @@ class TestDnsHeuristicsTab(unittest.TestCase):
                    'src_port': 1, 'dest_ip': '10.0.0.6', 'dest_port': 2, 'proto': 'TCP',
                    'alert': {'signature': 'Test', 'category': 'x', 'severity': 1, 'signature_id': 1}}]
         result = js_statements(self._bootstrap_multi_row_stat_grid_js('alert', events) + '''
-            navigateStatTabs(1); // Right -> DNS Queries (column 1, row 1)
+            navigateStatTabs(1); // Right -> All Events
+            navigateStatTabs(1); // Right -> DNS Queries (column 1)
             var afterRight = document.querySelector('.keyboard-selected').querySelector('.stat-label').textContent;
 
-            navigateVertical(1); // Down -> should continue down column 1, to TLS (row 2)
+            navigateVertical(1); // Down -> should continue down column 1, to SSH
             var afterDown = document.querySelector('.keyboard-selected').querySelector('.stat-label').textContent;
             var activeAfterDown = document.querySelector('.stat-card.tab-active').querySelector('.stat-label').textContent;
 
             window.__jsdom_result = { afterRight: afterRight, afterDown: afterDown, activeAfterDown: activeAfterDown };
         ''')
         self.assertEqual(result['afterRight'], 'DNS Queries')
-        self.assertEqual(result['afterDown'], 'TLS', 'Down must continue down the previewed column, not jump back to the active column')
+        self.assertEqual(result['afterDown'], 'SSH', 'Down must continue down the previewed column, not jump back to the active column')
         self.assertEqual(result['activeAfterDown'], 'Network Alerts', 'Down must only preview - the active tab must not change')
 
     def test_clicking_a_different_card_clears_a_stray_keyboard_ring(self):
@@ -12647,14 +12657,14 @@ class TestDnsHeuristicsTab(unittest.TestCase):
             }
 
             var seq = [];
-            for (var i = 0; i < 4; i++) {
+            for (var i = 0; i < 5; i++) {
                 navigateVertical(1);
                 seq.push(desc(document.querySelector('.keyboard-selected')));
             }
             window.__jsdom_result = { seq: seq };
         ''')
-        self.assertEqual(result['seq'], ['CARD:Network Alerts', 'TR', 'CHIP', 'CARD:Network Alerts'],
-                          'Down must move past the already-focused chip straight to the stat card and table row, wrapping back to the chip - never stepping onto Clear All')
+        self.assertEqual(result['seq'], ['CARD:Network Alerts', 'CARD:All Events', 'TR', 'CHIP', 'CARD:Network Alerts'],
+                          'Down must move past the already-focused chip straight down the stat cards (All Events beneath, in the next section) and to the table row, wrapping back to the chip - never stepping onto Clear All')
 
     def test_left_right_cycles_filter_chips_and_clear_all(self):
         """REGRESSION GUARD (real bug report): "moving between an active
@@ -12855,12 +12865,13 @@ class TestDnsHeuristicsTab(unittest.TestCase):
             window.__jsdom_result = {
                 activeBeforeLabel: activeBefore ? activeBefore.querySelector('.stat-label').textContent : null,
                 ringedBefore: !!ringedBefore,
-                afterDownIsRow: afterDown ? afterDown.tagName === 'TR' : false,
+                afterDownLabel: afterDown && afterDown.classList.contains('stat-card') ? afterDown.querySelector('.stat-label').textContent : null,
             };
         ''')
         self.assertEqual(result['activeBeforeLabel'], 'Network Alerts', 'setup check: the default tab must actually be active before any key press')
         self.assertFalse(result['ringedBefore'], 'no visible ring should appear before the user has pressed any arrow key')
-        self.assertTrue(result['afterDownIsRow'], 'the first Down must move past the default tab card to the row beneath it, not land on the card itself')
+        self.assertEqual(result['afterDownLabel'], 'All Events',
+                         'the first Down must move past the default tab card to the card beneath it (in the next section), not land on the card itself')
 
     def test_first_down_after_applying_a_filter_moves_past_the_new_chip(self):
         """REGRESSION GUARD (real user report, two rounds): applying a
@@ -13411,7 +13422,7 @@ class TestDnsHeuristicsTab(unittest.TestCase):
         there - and because that landing is on a stat card,
         navigateVertical() hands control back to Left/Right immediately
         (not require a second Up/Down first). Right itself only previews
-        - Enter is what actually switches to DNS Queries."""
+        - Enter is what actually switches to All Events, the next card."""
         from tests.jsdom_helper import js_statements
         events = [{'event_type': 'dns', 'timestamp': '2026-01-01T00:00:00', 'src_ip': '10.0.0.5',
                    'dns': {'rrname': '08kcbghk807qtl9.top', 'rrtype': 'A'}}]
@@ -13427,6 +13438,10 @@ class TestDnsHeuristicsTab(unittest.TestCase):
                 }
                 if (u.indexOf('/api/events') >= 0 && u.indexOf('type=dns') >= 0) {
                     return Promise.resolve({ ok: true, json: function() { return Promise.resolve(''' + json.dumps(events) + '''); } });
+                }
+                // nothing acknowledged: DNS Heuristics is the only lead
+                if (u.indexOf('/api/count') >= 0 && u.indexOf('acknowledged=only') >= 0) {
+                    return Promise.resolve({ ok: true, json: function() { return Promise.resolve({ count: 0 }); } });
                 }
                 if (u.indexOf('/api/count') >= 0) {
                     return Promise.resolve({ ok: true, json: function() { return Promise.resolve({ count: 1 }); } });
@@ -13455,6 +13470,7 @@ class TestDnsHeuristicsTab(unittest.TestCase):
             });
 
             navigateVertical(1); // rings the DNS Heuristics card itself
+            navigateVertical(1); // All Events, beneath it in the Protocol records section
             navigateVertical(1); // the one flagged row
             navigateVertical(1); // wraps -> DNS Heuristics stat card
             var wrapped = document.querySelector('.keyboard-selected');
@@ -13479,9 +13495,9 @@ class TestDnsHeuristicsTab(unittest.TestCase):
         ''')
         self.assertTrue(result['wrappedIsStatCard'], 'Down from the last item must wrap back onto a stat card')
         self.assertEqual(result['wrappedLabel'], 'DNS Heuristics')
-        self.assertEqual(result['ringedAfterRightLabel'], 'DNS Queries', 'ArrowRight must move the ring to the next card, with no second Up/Down press needed first')
+        self.assertEqual(result['ringedAfterRightLabel'], 'All Events', 'ArrowRight must move the ring to the next card, with no second Up/Down press needed first')
         self.assertEqual(result['activeAfterRightLabel'], 'DNS Heuristics', 'ArrowRight alone must only preview, not switch tabs')
-        self.assertEqual(result['activeAfterEnterLabel'], 'DNS Queries', 'Enter must commit the previewed tab')
+        self.assertEqual(result['activeAfterEnterLabel'], 'All Events', 'Enter must commit the previewed tab')
 
     def test_loadTabData_dns_heuristics_empty_state(self):
         from tests.jsdom_helper import js_statements
@@ -13639,6 +13655,7 @@ class TestDnsHeuristicsTab(unittest.TestCase):
                    'dns': {'rrname': '08kcbghk807qtl9.top', 'rrtype': 'A'}}]
         result = js_statements(self._dns_heuristics_bootstrap_js(events) + '''
             navigateVertical(1); // rings the DNS Heuristics stat card itself first
+            navigateVertical(1); // then All Events, beneath it in the Protocol records section
             navigateVertical(1); // the toggle bar renders before the table
             var sel = document.querySelector('.keyboard-selected');
             var selIsToggle = sel === infoToggle;
@@ -13663,6 +13680,7 @@ class TestDnsHeuristicsTab(unittest.TestCase):
                    'dns': {'rrname': '08kcbghk807qtl9.top', 'rrtype': 'A'}}]
         result = js_statements(self._dns_heuristics_bootstrap_js(events) + '''
             navigateVertical(1); // rings the DNS Heuristics stat card itself first
+            navigateVertical(1); // then All Events, beneath it in the Protocol records section
             navigateVertical(1); // toggle bar
             navigateVertical(1); // first row
             var sel = document.querySelector('.keyboard-selected');
@@ -13683,6 +13701,7 @@ class TestDnsHeuristicsTab(unittest.TestCase):
                    'dns': {'rrname': '08kcbghk807qtl9.top', 'rrtype': 'A'}}]
         result = js_statements(self._dns_heuristics_bootstrap_js(events) + '''
             navigateVertical(1); // rings the DNS Heuristics stat card itself first
+            navigateVertical(1); // then All Events, beneath it in the Protocol records section
             navigateVertical(1);
             var originalBar = document.querySelector('.keyboard-selected') === infoToggle;
 
@@ -14083,13 +14102,9 @@ class TestDnsHeuristicsTab(unittest.TestCase):
         self.assertTrue(result['cardFound'], 'DNS Heuristics card must still show after clicking a flagged row and clearing the filter')
         self.assertEqual(result['ariaLabel'], '1')
 
-    def test_dns_heuristics_card_sits_immediately_before_dns_queries_card(self):
-        """DNS Heuristics is inserted into the eventTypes loop right when
-        'dns' is reached, not appended after every other card with
-        'all'/'acknowledged' - it must render directly before DNS Queries
-        regardless of which other event types (and how many) are also
-        present, since eventTypes' own order is otherwise alphabetical
-        (see sortEventTypes) and DNS could land anywhere in it."""
+    def test_dns_heuristics_card_is_a_lead(self):
+        """DNS Heuristics is one of the leads - after the alerts and
+        Findings, ahead of every record type, DNS Queries among them."""
         from tests.jsdom_helper import js_statements
         events = [{'event_type': 'dns', 'timestamp': '2026-01-01T00:00:00', 'src_ip': '10.0.0.5',
                    'dns': {'rrname': '08kcbghk807qtl9.top', 'rrtype': 'A'}}]
@@ -14102,10 +14117,8 @@ class TestDnsHeuristicsTab(unittest.TestCase):
         labels = result['labels']
         self.assertIn('DNS Heuristics', labels)
         self.assertIn('DNS Queries', labels)
-        heuristics_idx = labels.index('DNS Heuristics')
-        dns_idx = labels.index('DNS Queries')
-        self.assertEqual(dns_idx, heuristics_idx + 1,
-                          'DNS Heuristics must render immediately before DNS Queries, not at the end with All Events/Acknowledged Alerts')
+        self.assertLess(labels.index('DNS Heuristics'), labels.index('All Events'))
+        self.assertEqual(labels[labels.index('All Events'):], ['All Events', 'DHCP', 'DNS Queries', 'FTP', 'HTTP'])
 
     def test_getVisibleEventType_maps_dns_heuristics_to_dns_for_truncation(self):
         """REGRESSION GUARD: DNS Heuristics is a derived view over the same
@@ -21786,37 +21799,138 @@ class TestTsharkUI(unittest.TestCase):
         self.assertEqual(result['title'], "From tshark: Suricata doesn't parse this protocol")
         self.assertIn('.stat-badge { position: absolute;', CSS_CONTENT)
 
-    def test_connection_cards_follow_all_events_under_a_heading_of_their_own(self):
-        """REGRESSION: the connection cards' alphabetical run (BFD...) after
-        the record types' (...TLS) read as the cards sorted wrong."""
+    def test_cards_come_in_sections_under_headings_of_their_own(self):
+        """A PCAP analysis's cards come in three sections - the leads, the
+        protocol records, the connections (Flows, then tshark's connection
+        cards) - each under a heading on a row of its own. (REGRESSION: the
+        connection cards' alphabetical run (BFD...) after the record
+        types' (...TLS) read as the cards sorted wrong.)"""
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""
+            await new Promise(function(r) { setTimeout(r, 100); });
+            currentMd5 = 'abc123';
+            isLogAnalysisMode = false; isEmailAnalysisMode = false;
+            var reply = function(v) { return Promise.resolve({ ok: true, json: function() { return Promise.resolve(v); } }); };
+            window.fetch = function(url) {
+                var u = String(url);
+                if (u.indexOf('/api/findings') >= 0) return reply({rules: [{id: 'x', count: 4}], findings: []});
+                if (u.indexOf('/api/events') >= 0 && u.indexOf('type=dns') >= 0) {
+                    return reply([{event_type: 'dns', timestamp: '2026-01-01T00:00:00', dns: {rrname: '08kcbghk807qtl9.top', rrtype: 'A'}}]);
+                }
+                if (u.indexOf('/api/count') >= 0 && u.indexOf('acknowledged=only') >= 0) return reply({count: 1});
+                if (u.indexOf('/api/sigma-count') >= 0) return reply({count: 0});
+                return reply({counts: eventStats});
+            };
+            eventTypes = sortEventTypes(['tls', 'conn__probed', 'conn_xdmcp', 'flow', 'alert', 'conn_bfd', 'http', 'dns', 'anomaly']);
+            eventStats = {tls: 2, conn__probed: 1640, conn_xdmcp: 73, flow: 40, alert: 1, conn_bfd: 10, http: 5, dns: 3, anomaly: 2};
+            buildStats();
+            await new Promise(function(r) { setTimeout(r, 200); });
+            buildStats();
+            var grid = document.getElementById('statsGrid');
+            var order = [...grid.children].map(el => el.classList.contains('stats-grid-heading') ? 'HEADING ' + el.firstChild.textContent
+                : el.querySelector('.stat-label').textContent);
+            // a 3-column grid: each section starts a row of its own
+            window.statsGridColumnCount = function() { return 3; };
+            // (the active card - a test can't set verticalNavSelection)
+            var column = function(label) {
+                grid.querySelectorAll('.stat-card').forEach(c => c.classList.toggle('tab-active', c.querySelector('.stat-label').textContent === label));
+                return activeColumnStatCards().map(c => c.querySelector('.stat-label').textContent);
+            };
+            var columns = {bfd: column('BFD'), flows: column('Flows'), dns: column('DNS Queries')};
+            var all = grid.querySelector('[data-section="section-all"]');
+            var notes = [...grid.querySelectorAll('.stats-grid-heading')].map(h => h.textContent);
+            var probedTitle = grid.querySelector('[data-section="section-conn__probed"]').title;
+            buildStats({tls: 2, alert: 1, http: 5, flow: 40});      // a filter that leaves no connection rows
+            window.__jsdom_result = {order: order, columns: columns, notes: notes, probedTitle: probedTitle,
+                                     allTitle: all.title, allTitleWithoutConnections: grid.querySelector('[data-section="section-all"]').title};
+        """)
+        self.assertEqual(result['order'], [
+            'HEADING Leads', 'Network Alerts', 'Anomalies', 'Findings', 'DNS Heuristics', 'Acknowledged Alerts',
+            'HEADING Protocol records', 'All Events', 'DNS Queries', 'HTTP', 'TLS',
+            'HEADING Connections', 'Flows', 'BFD', 'XDMCP', 'Probed Only'])
+        self.assertEqual(result['columns']['flows'], ['Network Alerts', 'DNS Heuristics', 'All Events', 'TLS', 'Flows', 'Probed Only'],
+                         "each section's columns count from its own first card")
+        self.assertEqual(result['columns']['bfd'], ['Anomalies', 'Acknowledged Alerts', 'DNS Queries', 'BFD'])
+        self.assertIn('worth a look', result['notes'][0])
+        self.assertIn("Suricata's flows", result['notes'][2])
+        self.assertEqual(result['allTitle'], "Every record except tshark's connection rows, which list connections by protocol the way Flows does")
+        self.assertIn('nothing ever answered', result['probedTitle'])
+        self.assertEqual(result['allTitleWithoutConnections'], '', 'nothing to explain with no connection cards')
+
+    def test_tshark_finished_line_moves_to_the_protocol_records_heading(self):
+        """Once tshark is done, its line ends the Protocol records heading,
+        right above its cards, and the line under the header goes; what
+        there is to wait on or click stays on that line - as does the
+        finished line when the grid has no headings."""
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""
+            await new Promise(function(r) { setTimeout(r, 100); });
+            currentMd5 = 'abc123';
+            isLogAnalysisMode = false; isEmailAnalysisMode = false;
+            window.fetch = function() { return Promise.resolve({ ok: true, json: function() { return Promise.resolve({rules: [], findings: [], count: 0, counts: {}}); } }); };
+            document.getElementById('tsharkLineContainer').innerHTML = tsharkLineHtml();
+            var state = function() {
+                var h = document.getElementById('tsharkHeadingStatus');
+                return {line: document.getElementById('tsharkLineStatus').textContent,
+                        lineHidden: document.querySelector('.tshark-line').hidden,
+                        heading: h ? h.textContent : null, headingHidden: h ? h.hidden : null,
+                        headingParent: h ? h.closest('.stats-grid-heading').firstChild.textContent : null,
+                        title: h ? h.title : null};
+            };
+            tsharkTypes = new Set(['s7comm', 'conn_rsh']);
+            eventTypes = sortEventTypes(['alert', 's7comm', 'flow', 'conn_rsh']);
+            eventStats = {alert: 1, s7comm: 4, flow: 9, conn_rsh: 2};
+            sharkStatus = {status: 'running', elapsed: 3};
+            buildStats();
+            var running = state();
+            sharkStatus = {status: 'ready', merged: true, seconds: 9, types: ['s7comm', 'conn_rsh']};
+            updateTsharkLine();
+            var done = state();
+            buildStats();           // a rebuilt grid keeps it
+            var rebuilt = state();
+            eventTypes = ['flow']; eventStats = {flow: 9}; tsharkTypes = new Set();
+            buildStats();           // one section: no headings
+            var noHeadings = state();
+            window.__jsdom_result = {running: running, done: done, rebuilt: rebuilt, noHeadings: noHeadings};
+        """)
+        self.assertIn('tshark is parsing', result['running']['line'])
+        self.assertTrue(result['running']['headingHidden'])
+        self.assertEqual(result['done']['heading'], 'tshark parsed 2 additional protocols in 9s')
+        self.assertEqual(result['done']['headingParent'], 'Protocol records')
+        self.assertFalse(result['done']['headingHidden'])
+        self.assertEqual((result['done']['line'], result['done']['lineHidden']), ('', True))
+        self.assertIn('under Connections', result['done']['title'])
+        self.assertEqual(result['rebuilt']['heading'], result['done']['heading'])
+        self.assertIsNone(result['noHeadings']['heading'])
+        self.assertEqual(result['noHeadings']['line'], 'tshark found no additional protocols in 9s')
+        self.assertFalse(result['noHeadings']['lineHidden'])
+
+    def test_no_headings_when_the_cards_fill_one_section(self):
         from tests.jsdom_helper import js_statements
         result = js_statements("""
             currentMd5 = 'abc123';
             isLogAnalysisMode = false; isEmailAnalysisMode = false;
-            eventTypes = sortEventTypes(['tls', 'conn__probed', 'conn_xdmcp', 'alert', 'conn_bfd', 'http']);
-            eventStats = {tls: 2, conn__probed: 1640, conn_xdmcp: 73, alert: 1, conn_bfd: 10, http: 5};
+            eventTypes = sortEventTypes(['flow']);
+            eventStats = {flow: 3};
             buildStats();
-            var grid = document.getElementById('statsGrid');
-            var order = [...grid.children].map(el => el.classList.contains('stats-grid-heading') ? 'HEADING'
+            var pcap = document.querySelectorAll('#statsGrid .stats-grid-heading').length;
+            isLogAnalysisMode = true;
+            eventTypes = ['sigmaalert', 'log'];
+            eventStats = {sigmaalert: 2, log: 9};
+            buildStats();
+            var log = [...document.getElementById('statsGrid').children].map(el => el.classList.contains('stats-grid-heading') ? 'HEADING'
                 : el.querySelector('.stat-label').textContent);
-            // a 3-column grid: the connection cards start a row of their own
-            window.statsGridColumnCount = function() { return 3; };
-            verticalNavSelection = [...grid.querySelectorAll('.stat-card')].find(c => c.textContent.includes('BFD'));
-            var column = activeColumnStatCards().map(c => c.querySelector('.stat-label').textContent);
-            var all = grid.querySelector('[data-section="section-all"]');
-            var heading = grid.querySelector('.stats-grid-heading').textContent;
-            var probedTitle = grid.querySelector('[data-section="section-conn__probed"]').title;
-            buildStats({tls: 2, alert: 1, http: 5});      // a filter that leaves no connection rows
-            window.__jsdom_result = {order: order, column: column, heading: heading, probedTitle: probedTitle,
-                                     allTitle: all.title, allTitleWithoutConnections: grid.querySelector('[data-section="section-all"]').title};
+            window.__jsdom_result = {pcap: pcap, log: log};
         """)
-        self.assertEqual(result['order'], ['Network Alerts', 'HTTP', 'TLS', 'All Events', 'HEADING', 'BFD', 'XDMCP', 'Probed Only'])
-        self.assertEqual(result['column'], ['Network Alerts', 'All Events', 'BFD'],
-                         "BFD heads the first column of its own rows, under All Events' column")
-        self.assertIn('Connections tshark identified', result['heading'])
-        self.assertEqual(result['allTitle'], "Every record except tshark's connection rows, which list connections by protocol the way Flows does")
-        self.assertIn('nothing ever answered', result['probedTitle'])
-        self.assertEqual(result['allTitleWithoutConnections'], '', 'nothing to explain with no connection cards')
+        self.assertEqual(result['pcap'], 0)
+        self.assertNotIn('HEADING', result['log'], 'a log analysis keeps its cards as they were')
+
+    def test_flows_follow_the_record_types(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""
+            window.__jsdom_result = sortEventTypes(['conn_bfd', 'flow', 'http', 'alert', 'conn__probed', 'dns']);
+        """)
+        self.assertEqual(result, ['alert', 'dns', 'http', 'flow', 'conn_bfd', 'conn__probed'])
 
     def test_tshark_connection_rows_show_its_flow_columns_and_say_so(self):
         from tests.jsdom_helper import js_statements
@@ -21915,9 +22029,10 @@ class TestTsharkUI(unittest.TestCase):
         self.assertEqual(result, 0)
 
     def test_connection_cards_follow_the_records_and_stay_out_of_all_events(self):
-        """One card order: alerts, record types alphabetically (Suricata's
-        and tshark's mixed), ALL EVENTS - which doesn't count connections,
-        each already one of Suricata's flows - then the connection cards."""
+        """One card order: alerts, ALL EVENTS - which doesn't count
+        connections, each already one of Suricata's flows - then the
+        record types alphabetically (Suricata's and tshark's mixed), then
+        Flows and the connection cards."""
         from tests.jsdom_helper import js_statements
         result = js_statements("""
             eventTypes = sortEventTypes(['flow', 'conn_rsh', 's7comm', 'alert', 'dns', 'conn_prp', 'nbns']);
@@ -21927,7 +22042,7 @@ class TestTsharkUI(unittest.TestCase):
             window.__jsdom_result = [...document.querySelectorAll('.stat-card')].map(c => [c.dataset.section.replace('section-', ''),
                 c.querySelector('.stat-number').getAttribute('aria-label')]);
         """)
-        self.assertEqual([t for t, _ in result], ['alert', 'dns', 'flow', 'nbns', 's7comm', 'all', 'conn_prp', 'conn_rsh'])
+        self.assertEqual([t for t, _ in result], ['alert', 'all', 'dns', 'nbns', 's7comm', 'flow', 'conn_prp', 'conn_rsh'])
         self.assertEqual(dict(result)['all'], '19', 'alert, dns, flow, nbns and s7comm - not the connections')
 
     def test_column_filters_count_connection_rows_like_any_type(self):

@@ -145,10 +145,11 @@
             // affecting the pcap-mode ordering above.
             // email/link only occur in email mode, where the message
             // itself leads, then its links.
-            // tshark's connection tabs follow every record type, Probed Only
-            // last.
+            // Flows, then tshark's connection tabs, follow every record
+            // type, Probed Only last - the order of the stat cards'
+            // sections (see STAT_GROUPS).
             const order = { email: -2, link: -1, alert: 0, filealerts: 1, protocol_decode: 2, anomaly: 3, sigmaalert: 4, log: 5,
-                            [PROBED_CONNECTION_TYPE]: 101 };
+                            flow: 99.5, [PROBED_CONNECTION_TYPE]: 101 };
             return [...types].sort((a, b) => {
                 const ai = order[a] ?? (isConnectionType(a) ? 100 : 99);
                 const bi = order[b] ?? (isConnectionType(b) ? 100 : 99);
@@ -5863,13 +5864,17 @@
             const cards = Array.from(document.querySelectorAll('#statsGrid .stat-card'));
             const columnCount = statsGridColumnCount();
             if (!cards.includes(referenceCard)) return [];
-            // tshark's connection cards start a fresh row under their
-            // heading (CONNECTIONS_HEADING_HTML), so their columns count
-            // from the first of them.
-            const firstConnection = cards.findIndex(c => c.classList.contains('stat-card-connection'));
-            const columnOf = i => (firstConnection === -1 || i < firstConnection ? i : i - firstConnection) % columnCount;
-            const column = columnOf(cards.indexOf(referenceCard));
-            return cards.filter((c, i) => columnOf(i) === column);
+            // Each section's cards start a fresh row under its heading (see
+            // STAT_GROUPS), so their columns count from the section's first
+            const place = new Map();
+            let n = 0;
+            for (const el of document.getElementById('statsGrid').children) {
+                if (el.classList.contains('stats-grid-heading')) n = 0;
+                else if (el.classList.contains('stat-card')) place.set(el, n++);
+            }
+            const columnOf = c => place.get(c) % columnCount;
+            const column = columnOf(referenceCard);
+            return cards.filter(c => columnOf(c) === column);
         }
 
         // True for the controls that behave as one horizontal group within
@@ -10273,11 +10278,38 @@
             requestAnimationFrame(tick);
         }
 
-        // Heads tshark's connection cards in #statsGrid, on a row of its own:
-        // they follow every type with records, in an alphabetical run of
-        // their own (sortEventTypes).
-        const CONNECTIONS_HEADING_HTML = '<div class="stats-grid-heading">Connections tshark identified'
-            + '<span class="stats-grid-heading-note">by port, payload or link-layer type; no records parsed - a row per connection, and whether it was answered</span></div>';
+        // A PCAP analysis's cards come in three sections, each under a
+        // heading on a row of its own: the leads (alerts, and the views
+        // that pick out what's worth a look), then the protocol records,
+        // then the connections - Suricata's flows and tshark's connection
+        // cards, which list connections the same way. STAT_GROUPS is in
+        // that order; statGroup() says which a card is in.
+        const STAT_GROUPS = [
+            { heading: 'Leads', note: 'alerts, and what the records show is worth a look' },
+            { heading: 'Protocol records', note: 'what Suricata and tshark parsed from the traffic' },
+            { heading: 'Connections', note: "a row per connection, and whether it was answered: Suricata's flows, and the protocols tshark identified by port, payload or link-layer type, with no records parsed" },
+        ];
+        // The Protocol records heading also ends with tshark's finished
+        // line, once there is one (see updateTsharkLine)
+        const STAT_GROUP_HEADINGS_HTML = STAT_GROUPS.map((g, i) => `<div class="stats-grid-heading">${g.heading}`
+            + `<span class="stats-grid-heading-note">${escapeHtml(g.note)}</span>`
+            + (i === 1 ? '<span id="tsharkHeadingStatus" class="stats-grid-heading-aside" aria-live="polite" hidden></span>' : '')
+            + '</div>');
+        // The leads, in their order
+        const LEAD_CARDS = ['alert', 'filealerts', 'protocol_decode', 'anomaly', 'findings', 'dns_heuristics', 'acknowledged'];
+
+        function statGroup(s) {
+            if (LEAD_CARDS.includes(s.id)) return 0;
+            return s.connection || s.id === 'flow' ? 2 : 1;
+        }
+
+        // A card's place in its section: the leads in LEAD_CARDS' order,
+        // All Events heading the records and Flows the connections, the
+        // rest in eventTypes' order (index)
+        function statGroupRank(s, index) {
+            if (LEAD_CARDS.includes(s.id)) return LEAD_CARDS.indexOf(s.id);
+            return s.id === 'all' || s.id === 'flow' ? -1 : index;
+        }
         const PROBED_TITLE = "Every connection of the protocols nothing ever answered - no reply, or only an ICMP error: a scanner's probes of closed ports. Each row has its protocol.";
 
         function buildStats(filteredStats) {
@@ -10325,11 +10357,7 @@
                 });
             });
 
-            // All Events and Acknowledged Alerts end the record types' cards,
-            // ahead of tshark's connection cards (sortEventTypes puts those
-            // last), which follow under a heading of their own.
-            const firstConnection = stats.findIndex(s => s.connection);
-            const connectionStats = firstConnection === -1 ? [] : stats.splice(firstConnection);
+            const hasConnections = stats.some(s => s.connection && s.count > 0);
             if (!isLogAnalysisMode && !isEmailAnalysisMode) {
                 // Findings lead the cards that gather other types' records
                 // - zero (no card) until this analysis's own count lands,
@@ -10346,7 +10374,7 @@
                     label: 'All Events',
                     count: allFiltered,
                     color: 'var(--text-bright)',
-                    title: connectionStats.some(c => c.count > 0) ? "Every record except tshark's connection rows, which list connections by protocol the way Flows does" : '',
+                    title: hasConnections ? "Every record except tshark's connection rows, which list connections by protocol the way Flows does" : '',
                 });
                 // Not filtered by the current search/filter bar the way
                 // every other card above is (filteredStats has no entry
@@ -10361,7 +10389,12 @@
                     color: 'var(--text-muted)'
                 });
             }
-            stats.push(...connectionStats);
+            // A PCAP analysis's cards in their sections (see STAT_GROUPS)
+            const grouped = !isLogAnalysisMode && !isEmailAnalysisMode;
+            if (grouped) {
+                stats.forEach((s, i) => { s.group = statGroup(s); s.rank = statGroupRank(s, i); });
+                stats.sort((a, b) => a.group - b.group || a.rank - b.rank);
+            }
 
             const visibleSection = document.querySelector('.section:not(.section-hidden):not(.agg-section)');
             // find(s => s.count > 0), not just stats[0] - a zero-count
@@ -10381,9 +10414,15 @@
             // dropped rather than shown disabled, so a heavily-filtered
             // large sample (20+ event types, most zeroed out) doesn't turn
             // into a wall of grayed-out cards.
-            let headingShown = false;
-            grid.innerHTML = stats.filter(s => s.count > 0).map(s => {
-                const heading = s.connection && !headingShown ? (headingShown = true, CONNECTIONS_HEADING_HTML) : '';
+            // Headings only when the cards fill more than one section - a
+            // small capture's handful of cards needs none. All Events
+            // alone, which every capture has, doesn't make a section.
+            const visibleStats = stats.filter(s => s.count > 0);
+            const showHeadings = grouped && new Set(visibleStats.filter(s => s.id !== 'all').map(s => s.group)).size > 1;
+            let lastGroup = null;
+            grid.innerHTML = visibleStats.map(s => {
+                const heading = showHeadings && s.group !== lastGroup ? STAT_GROUP_HEADINGS_HTML[s.group] : '';
+                lastGroup = s.group;
                 // Filtered/searched-down counts show as just the filtered
                 // number, not "filtered / total" - the filter bar's own
                 // chips already signal that a filter is active, and a
@@ -10405,7 +10444,9 @@
                 `;
             }).join('');
             const numberEls = grid.querySelectorAll('.stat-number');
-            stats.filter(s => s.count > 0).forEach((s, i) => animateStatNumber(numberEls[i], s.count));
+            visibleStats.forEach((s, i) => animateStatNumber(numberEls[i], s.count));
+            // The new Protocol records heading takes tshark's finished line
+            updateTsharkLine();
             fitStatLabels(grid);
             watchStatLabels(grid);
 
@@ -12861,7 +12902,7 @@
                     : 'tshark found no additional protocols \u2013 <a href="#" data-action="show-tshark-rows">Update the cards</a>';
             }
             if (st === 'ready' && tsharkRowsPending) return 'tshark is parsing additional protocols\u2026';
-            if (st === 'ready' && status.merged !== false) {
+            if (sharkFinished(status)) {
                 const took = Number.isFinite(status.seconds) ? ` in ${status.seconds.toLocaleString()}s` : '';
                 return tsharkTypes.size
                     ? `${dot}tshark parsed ${tsharkTypes.size} additional protocol${tsharkTypes.size === 1 ? '' : 's'}${took}`
@@ -12878,10 +12919,30 @@
             return '';    // waiting (Suricata isn't done), disabled, unavailable
         }
 
+        // tshark is done and its rows are in the cards - nothing left to
+        // wait for or click
+        function sharkFinished(status) {
+            return !!status && status.status === 'ready' && !tsharkRowsPending && status.merged !== false;
+        }
+
+        // The line under the header, but for tshark's finished line, which
+        // moves to the end of the Protocol records heading when the stats
+        // grid has one (right above tshark's cards, whose dot it starts
+        // with) - so the line goes, once there's nothing to wait for. The
+        // states to wait on or click stay on the line, where they're seen
+        // before any card.
         function updateTsharkLine() {
             const statusEl = document.getElementById('tsharkLineStatus');
             if (!statusEl) return;
-            statusEl.innerHTML = sharkStatusHtml(sharkStatus);
+            const html = sharkStatusHtml(sharkStatus);
+            const headingEl = document.getElementById('tsharkHeadingStatus');
+            const inHeading = !!headingEl && sharkFinished(sharkStatus);
+            if (headingEl) {
+                headingEl.innerHTML = inHeading ? html : '';
+                headingEl.hidden = !inHeading;
+                headingEl.title = inHeading && tsharkTypes.size ? 'Every type tshark added, here and under Connections' : '';
+            }
+            statusEl.innerHTML = inHeading ? '' : html;
             const bar = statusEl.closest('.tshark-line');
             if (bar) bar.hidden = !statusEl.textContent;
             syncSharkClock();
