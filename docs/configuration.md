@@ -26,8 +26,10 @@ All analyzed files are stored in `~/socrates-data/`. It holds a set of shared ru
   <md5>/
     <original-filename>        # The uploaded file
     .meta                      # Analysis metadata (file type, extracted name, version)
-    eve.json                   # Suricata's JSON output (PCAP only)
-    events.db                  # SQLite database (network/log/email events, Sigma alerts, row notes, acknowledgements)
+    eve.json                   # Suricata's JSON output (PCAP only) - removed once imported into events.db
+    events.db                  # SQLite database (network/log/email events, Sigma alerts, row notes, acknowledgements; for a PCAP also the rows tshark adds)
+    shark.db                   # tshark's flows and records, merged into events.db when done (PCAP only)
+    .shark_error               # Present only if the last tshark run failed (PCAP only)
     name.txt                   # Human-readable display name
     notes.txt                  # Freeform analyst notes (absent unless explicitly added)
     filestore/                 # Extracted files from Suricata file-store (PCAP), or an email's message and decoded attachments

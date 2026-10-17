@@ -419,7 +419,7 @@ def _parse_into(msg, depth, fallback_ts, events, attachments, budget, skipped, h
             links.append((_clean_url(url), '', 'text'))
 
     link_events = []
-    with_text = {u for u, t in seen if t}
+    with_text = set()  # URLs seen with visible <a> text, filled in the loop below
     for url, text, source in links:
         if (url, text) in seen:
             continue

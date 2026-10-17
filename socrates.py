@@ -92,7 +92,9 @@ MAX_TRANSCRIPT_SIZE = config.MAX_TRANSCRIPT_SIZE
 MAX_EVE_SIZE = config.MAX_EVE_SIZE
 SURICATA_DIR = os.path.join(DATA_DIR, 'suricata')
 
-MD5_RE = re.compile(r'^[a-f0-9]{32}$')
+# \A...\Z, not ^...$: in Python $ also matches just before a trailing newline,
+# so "<md5>\n" would slip through - \Z anchors the absolute end of the string.
+MD5_RE = re.compile(r'\A[a-f0-9]{32}\Z')
 # Deliberately permissive rather than an enum of known theme names, so the
 # client's own THEMES allowlist (static/socrates.js) stays the single source
 # of truth; this just bounds what a malformed/oversized file can smuggle
@@ -1288,7 +1290,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self._send_error(400, error)
             return
         sha256 = params.get('sha256', [''])[0]
-        if not re.match(r'^[a-f0-9]{64}$', sha256):
+        if not re.fullmatch(r'[a-f0-9]{64}', sha256):  # fullmatch: reject a trailing newline that $ would allow
             self._send_error(400, 'Invalid SHA256')
             return
         path = find_extracted_file(dir_path, sha256)

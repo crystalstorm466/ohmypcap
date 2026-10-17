@@ -45,7 +45,7 @@
 | `protocol_decode` | Suricata's built-in protocol-command-decode alerts, reclassified out of `alert` - labeled "Decoder Alerts" in the UI (synthetic - see note below) | `alert.signature`, `alert.severity`, `alert.category`, `alert.rule` |
 | `stats` | Suricata internal stats | (excluded from display) |
 
-**Note on Suricata 8 / DNS logging:** this app now runs on Suricata 8.0.6
+**Note on Suricata 8 / DNS logging:** this app now runs on Suricata 8.0.7
 (upgraded from 7.0.10 via Debian's `trixie-backports`). `enip`/`ntp` eve
 logging (previously unavailable - Suricata 7.0.10 had no output module for
 either; see `_enable_eve_log_protocol_types` in `suricata_analyzer.py`) now

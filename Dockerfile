@@ -229,7 +229,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # logging for several protocols this app supports (enip/ntp - no output
 # module in 7.0.10 at all; websocket/pop3/mdns/ldap/arp - don't exist in
 # 7.0.10's app-layer protocol list at all). Suricata 8 is available via
-# Debian's own trixie-backports repo (8.0.6 as of writing, confirmed via
+# Debian's own trixie-backports repo (8.0.7 as of writing, confirmed via
 # packages.debian.org) - this mirrors the exact upgrade path validated on a
 # real trixie install, rather than pulling in OISF's own third-party repo.
 # suricata-update is pulled from backports too (1.3.8 vs. regular trixie's
