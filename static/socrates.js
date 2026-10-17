@@ -2442,7 +2442,7 @@
                             <td style="text-align: center; padding: 8px 10px; color: var(--badge-success-text);">${CHECKMARK_ICON_SVG}</td>
                         </tr>
                         <tr>
-                            <td style="padding: 8px 10px; color: var(--text-primary); font-size: 0.85rem;">Onion AI Assistant</td>
+                            <td style="padding: 8px 10px; color: var(--text-primary); font-size: 0.85rem;">Onion AI Assistant with Agentic AI</td>
                             <td style="text-align: center; padding: 8px 10px; color: var(--bg-hover-light);">-</td>
                             <td style="text-align: center; padding: 8px 10px; color: var(--bg-hover-light);">-</td>
                             <td style="text-align: center; padding: 8px 10px; color: var(--badge-success-text);">${CHECKMARK_ICON_SVG}</td>
