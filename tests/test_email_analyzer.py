@@ -500,9 +500,12 @@ class TestBuiltInEmailSample(unittest.TestCase):
         self.assertIn(b'GET /update.bin', samples.build_pcap_sample())
 
     def test_pcap_sample(self):
-        """A valid pcap, deterministic, between the workstation and the
-        documentation-range C2 only, carrying the AgentTesla-style FTP
-        upload and the executable download Suricata's rules fire on.
+        """A valid pcap, deterministic, carrying the AgentTesla-style FTP
+        upload and the executable download Suricata's rules fire on between
+        the workstation and the documentation-range C2, the payload's DGA
+        DNS beacon, self-signed-TLS C2 check-in and IRC C2 join, plus the
+        workstation's LLMNR/NBNS/SSDP chatter to its link-local multicast and
+        subnet broadcast addresses (what the tshark view surfaces).
         (Which ET rules fire needs Suricata and its ruleset, so that's
         checked by hand - see build_pcap_sample.)"""
         import ipaddress
@@ -524,7 +527,11 @@ class TestBuiltInEmailSample(unittest.TestCase):
             ips.add(socket.inet_ntoa(ip_header[16:20]))
             offset += 16 + caplen
         self.assertEqual(offset, len(data), 'records end exactly at the end of the file')
-        self.assertEqual(ips, {'10.20.4.12', '203.0.113.66'})
+        # the workstation, its resolver and the C2 unicast flows, plus the
+        # chatter's link-local LLMNR multicast, SSDP multicast and subnet
+        # broadcast destinations
+        self.assertEqual(ips, {'10.20.4.12', '10.20.4.1', '203.0.113.66',
+                               '224.0.0.252', '239.255.255.250', '10.20.4.255'})
         self.assertIn(ipaddress.ip_address('203.0.113.66'), ipaddress.ip_network('203.0.113.0/24'))
         self.assertIn(b'STOR PW_jordan.lee-FIN-WS-0412_2026_', data)
         self.assertIn(b'User-Agent: Microsoft-CryptoAPI/10.0', data)

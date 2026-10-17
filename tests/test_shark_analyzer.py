@@ -198,8 +198,14 @@ class TestAgainstSuricata(unittest.TestCase):
     def tearDownClass(cls):
         shutil.rmtree(cls.tmpdir, ignore_errors=True)
 
-    def test_the_same_three_flows(self):
-        self.assertEqual(sorted(f['app_proto'] for f in self.flows.values()), ['ftp', 'ftp-data', 'http'])
+    def test_suricata_parsed_flows_match(self):
+        """The three flows Suricata also parses - HTTP and the FTP control
+        and data connections - carry Suricata's own community IDs. (The
+        capture also opens with LLMNR/NBNS/SSDP chatter flows, which Suricata
+        doesn't parse - those are the tshark view's to add, not matched here.)"""
+        parsed = sorted(f['app_proto'] for f in self.flows.values()
+                        if f['app_proto'] in ('ftp', 'ftp-data', 'http'))
+        self.assertEqual(parsed, ['ftp', 'ftp-data', 'http'])
         for cid in self.SURICATA_FLOWS:
             self.assertIn(cid, self.flows, 'Community IDs must match Suricata\'s')
 
@@ -2173,8 +2179,11 @@ class TestAnalyze(unittest.TestCase):
 
     def test_writes_a_queryable_shark_db_and_nothing_else(self):
         shark_analyzer.analyze(self.dir, self.pcap)
-        events = query_events_sqlite(shark_analyzer.shark_db_path(self.dir), 'flow')
-        self.assertEqual(len(events), 3)
+        db_path = shark_analyzer.shark_db_path(self.dir)
+        events = query_events_sqlite(db_path, 'flow')
+        self.assertEqual(len(events), 10)  # every flow tshark grouped: HTTP/DNS/TLS/IRC/FTP/FTP-data + LLMNR/NBNS/SSDP chatter
+        for et in ('llmnr', 'nbns', 'ssdp'):  # the chatter Suricata doesn't parse is recorded too
+            self.assertTrue(query_events_sqlite(db_path, et), et)
         self.assertFalse(os.path.exists(os.path.join(self.dir, 'shark.db.tmp')))
         self.assertFalse(os.path.exists(os.path.join(self.dir, shark_analyzer.SHARK_ERROR)))
         status = shark_analyzer.status(self.dir, self.pcap)
@@ -2214,9 +2223,9 @@ class TestAnalyze(unittest.TestCase):
 
     def test_background_limit_is_a_packet_count(self):
         """tshark's memory follows packets, not bytes: the limit counts them."""
-        self.assertEqual(shark_analyzer.packet_count(self.pcap), 52)
+        self.assertEqual(shark_analyzer.packet_count(self.pcap), 111)
         self.assertTrue(shark_analyzer.background_eligible(self.pcap))
-        with mock.patch.object(config, 'SHARK_BACKGROUND_MAX_PACKETS', 51):
+        with mock.patch.object(config, 'SHARK_BACKGROUND_MAX_PACKETS', 110):
             self.assertFalse(shark_analyzer.background_eligible(self.pcap))
             self.assertEqual(shark_analyzer.status(self.dir, self.pcap), {'status': 'too_large'})
         with mock.patch.object(config, 'SHARK_BACKGROUND_MAX_BYTES', 10):
@@ -2855,10 +2864,12 @@ class TestSharkAPI(unittest.TestCase):
         self.assertIn(body['status'], ('queued', 'running', 'ready'))
         body = self._wait_ready()
         self.assertIsInstance(body.pop('seconds'), int)
-        self.assertEqual(body, {'status': 'ready', 'merged': True, 'types': []},
-                         'types: what it added - nothing, so the page has nothing to reload')
+        self.assertEqual(sorted(body.pop('types')), ['conn_irc', 'llmnr', 'nbns', 'ssdp'],
+                         'what tshark added: the chatter records and the IRC connection row, which the page reloads its cards for')
+        self.assertEqual(body, {'status': 'ready', 'merged': True})
         _, stats = self._get(f'/api/stats?md5={self.md5}')
-        self.assertEqual(stats['tshark_types'], [], 'nothing here Suricata lacks - but the stats say so')
+        self.assertEqual(sorted(stats['tshark_types']), ['conn_irc', 'llmnr', 'nbns', 'ssdp'],
+                         'the protocols here Suricata lacks - the stats say which')
 
     def test_waits_for_suricata(self):
         with open(os.path.join(self.dir, '.phase'), 'w') as f:
