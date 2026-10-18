@@ -10449,13 +10449,14 @@
         }
 
         // A PCAP analysis's cards come in three sections, each under a
-        // heading on a row of its own: the leads (alerts, and the views
-        // that pick out what's worth a look), then the protocol records,
-        // then the connections - Suricata's flows and tshark's connection
-        // cards, which list connections the same way. STAT_GROUPS is in
-        // that order; statGroup() says which a card is in.
+        // heading on a row of its own: triage (the alert cards, the views
+        // that pick out what's worth a look, and All Events - the way into
+        // everything), then the protocol records, then the connections -
+        // Suricata's flows and tshark's connection cards, which list
+        // connections the same way. STAT_GROUPS is in that order;
+        // statGroup() says which a card is in.
         const STAT_GROUPS = [
-            { heading: 'Leads', note: 'alerts, and what the records show is worth a look' },
+            { heading: 'Triage', note: 'alerts, what the records show is worth a look, and every event in one view' },
             { heading: 'Protocol records', note: 'what Suricata and tshark parsed from the traffic' },
             { heading: 'Connections', note: "a row per connection, and whether it was answered: Suricata's flows, and the protocols tshark identified by port, payload or link-layer type, with no records parsed" },
         ];
@@ -10542,20 +10543,21 @@
             const card = document.querySelector('#statsGrid .stat-card.tab-active.stat-card-collapsed');
             if (card) setStatGroupCollapsed(Number(card.dataset.statGroup), false);
         }
-        // The leads, in their order
-        const LEAD_CARDS = ['alert', 'filealerts', 'protocol_decode', 'anomaly', 'findings', 'dns_heuristics', 'acknowledged'];
+        // The triage cards, in their order - All Events last, as the
+        // bridge into the protocol records below it
+        const LEAD_CARDS = ['alert', 'filealerts', 'protocol_decode', 'anomaly', 'findings', 'dns_heuristics', 'acknowledged', 'all'];
 
         function statGroup(s) {
             if (LEAD_CARDS.includes(s.id)) return 0;
             return s.connection || s.id === 'flow' ? 2 : 1;
         }
 
-        // A card's place in its section: the leads in LEAD_CARDS' order,
-        // All Events heading the records and Flows the connections, the
-        // rest in eventTypes' order (index)
+        // A card's place in its section: the triage cards in LEAD_CARDS'
+        // order (All Events last), Flows heading the connections, the rest
+        // in eventTypes' order (index)
         function statGroupRank(s, index) {
             if (LEAD_CARDS.includes(s.id)) return LEAD_CARDS.indexOf(s.id);
-            return s.id === 'all' || s.id === 'flow' ? -1 : index;
+            return s.id === 'flow' ? -1 : index;
         }
         const PROBED_TITLE = "Every connection of the protocols nothing ever answered - no reply, or only an ICMP error: a scanner's probes of closed ports. Each row has its protocol.";
 

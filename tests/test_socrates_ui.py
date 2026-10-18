@@ -12585,12 +12585,12 @@ class TestDnsHeuristicsTab(unittest.TestCase):
         move the keyboard-selection ring (mirroring navigateThemeTiles'
         own preview-then-Enter-to-commit idiom); the active tab must not
         change until Enter. Cards here, in a 4-column grid, each section
-        starting a row of its own: Network Alerts (active) | All Events,
-        DNS Queries, FTP, HTTP | SMB, SSH, TLS | Flows.
+        starting a row of its own: Network Alerts (active), All Events |
+        DNS Queries, FTP, HTTP, SMB | SSH, TLS | Flows.
         activeColumnStatCards() (see getVerticalNavItems) puts the active
         tab's own card (column 0, row 1) first in the unified nav list, so
         the first Down merely rings that same already-active card; a
-        second Down is what steps to column 0 of row 2 (All Events)."""
+        second Down is what steps to column 0 of the records (DNS Queries)."""
         from tests.jsdom_helper import js_statements
         events = [{'event_type': 'alert', 'timestamp': '2026-01-01T00:00:00', 'src_ip': '10.0.0.5',
                    'src_port': 1, 'dest_ip': '10.0.0.6', 'dest_port': 2, 'proto': 'TCP',
@@ -12598,7 +12598,7 @@ class TestDnsHeuristicsTab(unittest.TestCase):
         result = js_statements(self._bootstrap_multi_row_stat_grid_js('alert', events) + '''
             var activeBefore = document.querySelector('.stat-card.tab-active').querySelector('.stat-label').textContent;
             navigateVertical(1); // rings the active card itself (row 1)
-            var handled = navigateVertical(1); // rings row 2
+            var handled = navigateVertical(1); // rings the next card down the column
             window.__jsdom_result = {
                 handled: handled,
                 activeAfter: document.querySelector('.stat-card.tab-active').querySelector('.stat-label').textContent,
@@ -12609,7 +12609,7 @@ class TestDnsHeuristicsTab(unittest.TestCase):
         self.assertTrue(result['handled'])
         self.assertEqual(result['activeBefore'], 'Network Alerts')
         self.assertEqual(result['activeAfter'], 'Network Alerts', 'the active tab must not change from a mere preview')
-        self.assertEqual(result['ringedLabel'], 'All Events', 'the keyboard-selection ring must move to row 2')
+        self.assertEqual(result['ringedLabel'], 'DNS Queries', 'the keyboard-selection ring must move down the column')
 
     def test_enter_commits_a_previewed_stat_card_row(self):
         from tests.jsdom_helper import js_statements
@@ -12618,7 +12618,7 @@ class TestDnsHeuristicsTab(unittest.TestCase):
                    'alert': {'signature': 'Test', 'category': 'x', 'severity': 1, 'signature_id': 1}}]
         result = js_statements(self._bootstrap_multi_row_stat_grid_js('alert', events) + '''
             navigateVertical(1); // rings the active card itself (row 1)
-            navigateVertical(1); // preview All Events (row 2)
+            navigateVertical(1); // preview DNS Queries (down the column)
             var committed = activateKeyboardSelection(); // Enter
             await new Promise(function(r) { setTimeout(r, 30); });
             window.__jsdom_result = {
@@ -12627,7 +12627,7 @@ class TestDnsHeuristicsTab(unittest.TestCase):
             };
         ''')
         self.assertTrue(result['committed'])
-        self.assertEqual(result['activeAfterEnter'], 'All Events')
+        self.assertEqual(result['activeAfterEnter'], 'DNS Queries')
 
     def test_left_right_previews_without_switching_tabs(self):
         """REGRESSION GUARD: navigateStatTabs (Left/Right) used to
@@ -12685,8 +12685,8 @@ class TestDnsHeuristicsTab(unittest.TestCase):
                    'alert': {'signature': 'Test', 'category': 'x', 'severity': 1, 'signature_id': 1}}]
         result = js_statements(self._bootstrap_multi_row_stat_grid_js('alert', events) + '''
             navigateVertical(1); // rings the active card itself (row 1)
-            navigateVertical(1); // preview All Events
-            navigateVertical(1); // preview SMB
+            navigateVertical(1); // preview DNS Queries
+            navigateVertical(1); // preview SSH
             navigateVertical(1); // preview Flows
             var handled = navigateVertical(1); // grid column exhausted -> moves into the data table
             window.__jsdom_result = {
@@ -12716,8 +12716,8 @@ class TestDnsHeuristicsTab(unittest.TestCase):
                    'alert': {'signature': 'Test', 'category': 'x', 'severity': 1, 'signature_id': 1}}]
         result = js_statements(self._bootstrap_multi_row_stat_grid_js('alert', events) + '''
             navigateVertical(1); // rings the active card itself (row 1)
-            navigateVertical(1); // preview All Events
-            navigateVertical(1); // preview SMB
+            navigateVertical(1); // preview DNS Queries
+            navigateVertical(1); // preview SSH
             navigateVertical(1); // preview Flows
             navigateVertical(1); // exhausted -> falls into the data table
 
@@ -12739,14 +12739,14 @@ class TestDnsHeuristicsTab(unittest.TestCase):
         self.assertEqual(result['ring1Label'], 'Flows', "the first Up must retrace back to the column's last card, not skip it")
         self.assertEqual(result['activeAfterUp1'], 'Network Alerts', 'Up must only preview - the active tab must not change')
         self.assertTrue(result['up2Handled'])
-        self.assertEqual(result['ring2Label'], 'SMB', 'a second Up must continue on up the column')
+        self.assertEqual(result['ring2Label'], 'SSH', 'a second Up must continue on up the column')
 
     def test_down_after_right_preview_continues_down_the_previewed_column(self):
         """REGRESSION GUARD (real bug report): with a multi-row stat-card
         grid, Right previews a card in a DIFFERENT column than the active
-        tab's own (e.g. DNS Queries, column 1), and Down must then
-        continue straight down THAT column (to SSH, column 1 of the next
-        row) - not jump back to the still-active tab's own column
+        tab's own (e.g. All Events, column 1), and Down must then
+        continue straight down THAT column (to FTP, column 1 of the
+        records) - not jump back to the still-active tab's own column
         (Network Alerts, column 0), which read as Down having gone
         backwards/left instead of down. activeColumnStatCards() now uses
         whichever stat card is currently ringed (verticalNavSelection) as
@@ -12757,18 +12757,17 @@ class TestDnsHeuristicsTab(unittest.TestCase):
                    'src_port': 1, 'dest_ip': '10.0.0.6', 'dest_port': 2, 'proto': 'TCP',
                    'alert': {'signature': 'Test', 'category': 'x', 'severity': 1, 'signature_id': 1}}]
         result = js_statements(self._bootstrap_multi_row_stat_grid_js('alert', events) + '''
-            navigateStatTabs(1); // Right -> All Events
-            navigateStatTabs(1); // Right -> DNS Queries (column 1)
+            navigateStatTabs(1); // Right -> All Events (column 1)
             var afterRight = document.querySelector('.keyboard-selected').querySelector('.stat-label').textContent;
 
-            navigateVertical(1); // Down -> should continue down column 1, to SSH
+            navigateVertical(1); // Down -> should continue down column 1, to FTP
             var afterDown = document.querySelector('.keyboard-selected').querySelector('.stat-label').textContent;
             var activeAfterDown = document.querySelector('.stat-card.tab-active').querySelector('.stat-label').textContent;
 
             window.__jsdom_result = { afterRight: afterRight, afterDown: afterDown, activeAfterDown: activeAfterDown };
         ''')
-        self.assertEqual(result['afterRight'], 'DNS Queries')
-        self.assertEqual(result['afterDown'], 'SSH', 'Down must continue down the previewed column, not jump back to the active column')
+        self.assertEqual(result['afterRight'], 'All Events')
+        self.assertEqual(result['afterDown'], 'FTP', 'Down must continue down the previewed column, not jump back to the active column')
         self.assertEqual(result['activeAfterDown'], 'Network Alerts', 'Down must only preview - the active tab must not change')
 
     def test_clicking_a_different_card_clears_a_stray_keyboard_ring(self):
@@ -12873,8 +12872,8 @@ class TestDnsHeuristicsTab(unittest.TestCase):
             }
             window.__jsdom_result = { seq: seq };
         ''')
-        self.assertEqual(result['seq'], ['CARD:Network Alerts', 'CARD:All Events', 'TR', 'CHIP', 'CARD:Network Alerts'],
-                          'Down must move past the already-focused chip straight down the stat cards (All Events beneath, in the next section) and to the table row, wrapping back to the chip - never stepping onto Clear All')
+        self.assertEqual(result['seq'], ['CARD:Network Alerts', 'CARD:HTTP', 'TR', 'CHIP', 'CARD:Network Alerts'],
+                          'Down must move past the already-focused chip straight down the stat cards (HTTP beneath, in the next section) and to the table row, wrapping back to the chip - never stepping onto Clear All')
 
     def test_left_right_cycles_filter_chips_and_clear_all(self):
         """REGRESSION GUARD (real bug report): "moving between an active
@@ -13080,7 +13079,7 @@ class TestDnsHeuristicsTab(unittest.TestCase):
         ''')
         self.assertEqual(result['activeBeforeLabel'], 'Network Alerts', 'setup check: the default tab must actually be active before any key press')
         self.assertFalse(result['ringedBefore'], 'no visible ring should appear before the user has pressed any arrow key')
-        self.assertEqual(result['afterDownLabel'], 'All Events',
+        self.assertEqual(result['afterDownLabel'], 'HTTP',
                          'the first Down must move past the default tab card to the card beneath it (in the next section), not land on the card itself')
 
     def test_first_down_after_applying_a_filter_moves_past_the_new_chip(self):
@@ -22016,7 +22015,7 @@ class TestTsharkUI(unittest.TestCase):
         self.assertIn('.stat-badge { position: absolute;', CSS_CONTENT)
 
     def test_cards_come_in_sections_under_headings_of_their_own(self):
-        """A PCAP analysis's cards come in three sections - the leads, the
+        """A PCAP analysis's cards come in three sections - triage, the
         protocol records, the connections (Flows, then tshark's connection
         cards) - each under a heading on a row of its own. (REGRESSION: the
         connection cards' alphabetical run (BFD...) after the record
@@ -22061,12 +22060,12 @@ class TestTsharkUI(unittest.TestCase):
                                      allTitle: all.title, allTitleWithoutConnections: grid.querySelector('[data-section="section-all"]').title};
         """)
         self.assertEqual(result['order'], [
-            'HEADING Leads', 'Network Alerts', 'Anomalies', 'Findings', 'DNS Heuristics', 'Acknowledged Alerts',
-            'HEADING Protocol records', 'All Events', 'DNS Queries', 'HTTP', 'TLS',
+            'HEADING Triage', 'Network Alerts', 'Anomalies', 'Findings', 'DNS Heuristics', 'Acknowledged Alerts', 'All Events',
+            'HEADING Protocol records', 'DNS Queries', 'HTTP', 'TLS',
             'HEADING Connections', 'Flows', 'BFD', 'XDMCP', 'Probed Only'])
-        self.assertEqual(result['columns']['flows'], ['Network Alerts', 'DNS Heuristics', 'All Events', 'TLS', 'Flows', 'Probed Only'],
+        self.assertEqual(result['columns']['flows'], ['Network Alerts', 'DNS Heuristics', 'DNS Queries', 'Flows', 'Probed Only'],
                          "each section's columns count from its own first card")
-        self.assertEqual(result['columns']['bfd'], ['Anomalies', 'Acknowledged Alerts', 'DNS Queries', 'BFD'])
+        self.assertEqual(result['columns']['bfd'], ['Anomalies', 'Acknowledged Alerts', 'HTTP', 'BFD'])
         self.assertIn('worth a look', result['notes'][0])
         self.assertIn("Suricata's flows", result['notes'][2])
         self.assertEqual(result['allTitle'], "Every record except tshark's connection rows, which list connections by protocol the way Flows does")
@@ -22121,9 +22120,9 @@ class TestTsharkUI(unittest.TestCase):
         self.assertEqual(result['noHeadings']['line'], 'tshark found no additional protocols in 9s')
         self.assertFalse(result['noHeadings']['lineHidden'])
 
-    # A grid with every section: two leads, three record cards (All
-    # Events among them) and Flows plus the given number of connection
-    # cards - built with the given collapsed choices stored
+    # A grid with every section: three triage cards (All Events among
+    # them), two record cards and Flows plus the given number of
+    # connection cards - built with the given collapsed choices stored
     def _sections_grid_js(self, connection_cards, choices=None):
         conns = ['conn_p%02d' % i for i in range(connection_cards)]
         types = ['alert', 'anomaly', 'dns', 'http', 'flow'] + conns
@@ -22154,8 +22153,8 @@ class TestTsharkUI(unittest.TestCase):
         few = js_statements(self._sections_grid_js(11) + "window.__jsdom_result = {headings: headings(), shown: shown().length};")
         many = js_statements(self._sections_grid_js(12) + "window.__jsdom_result = {headings: headings(), shown: shown()};")
         self.assertEqual(few['headings'][2], ['Connections', 'true', ''], '12 connection cards, Flows among them, stay open')
-        self.assertEqual(few['shown'], 2 + 3 + 12)
-        self.assertEqual(many['headings'], [['Leads', 'true', ''], ['Protocol records', 'true', ''],
+        self.assertEqual(few['shown'], 3 + 2 + 12)
+        self.assertEqual(many['headings'], [['Triage', 'true', ''], ['Protocol records', 'true', ''],
                                             ['Connections', 'false', '13 cards']])
         self.assertEqual(many['shown'], ['Network Alerts', 'Anomalies', 'All Events', 'DNS Queries', 'HTTP'])
 
@@ -22170,18 +22169,18 @@ class TestTsharkUI(unittest.TestCase):
             window.__jsdom_result = {afterClick: afterClick, afterRebuild: afterRebuild, reopened: shown(),
                                      stored: safeStorageGet(localStorage, 'socrates_statGroupsCollapsed')};
         """)
-        self.assertEqual(result['afterClick']['headings'][1], ['Protocol records', 'false', '3 cards'])
-        self.assertEqual(result['afterClick']['shown'], ['Network Alerts', 'Anomalies', 'Flows', 'P00', 'P01'])
+        self.assertEqual(result['afterClick']['headings'][1], ['Protocol records', 'false', '2 cards'])
+        self.assertEqual(result['afterClick']['shown'], ['Network Alerts', 'Anomalies', 'All Events', 'Flows', 'P00', 'P01'])
         self.assertEqual(json.loads(result['afterClick']['stored']), {'1': True})
         self.assertEqual(result['afterRebuild'], result['afterClick']['shown'])
-        self.assertEqual(len(result['reopened']), 2 + 3 + 3)
+        self.assertEqual(len(result['reopened']), 3 + 2 + 3)
         self.assertEqual(json.loads(result['stored']), {'1': False})
 
     def test_a_viewer_choice_beats_the_threshold(self):
         from tests.jsdom_helper import js_statements
         result = js_statements(self._sections_grid_js(20, {'2': False, '0': True}) + "window.__jsdom_result = headings();")
         self.assertEqual([h[1] for h in result], ['true', 'true', 'true'],
-                         "Leads holds the open tab, so it stays open; Connections was opened by the viewer")
+                         "Triage holds the open tab, so it stays open; Connections was opened by the viewer")
 
     def test_the_open_tabs_section_is_never_hidden(self):
         from tests.jsdom_helper import js_statements
@@ -22208,7 +22207,7 @@ class TestTsharkUI(unittest.TestCase):
             }
             window.__jsdom_result = {seen: seen};
         """)
-        self.assertEqual(result['seen'], ['Anomalies', 'Flows', 'P00', 'P01', 'Network Alerts'])
+        self.assertEqual(result['seen'], ['Anomalies', 'All Events', 'Flows', 'P00', 'P01'])
 
     def test_enter_on_a_section_button_is_the_buttons_own(self):
         keydown = JS_CONTENT.split("if (e.key === 'Enter' && (isNavigableKeyContext(e) || isAutocompleteModalActive())")[1][:200]
