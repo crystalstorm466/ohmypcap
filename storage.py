@@ -12,6 +12,7 @@ import json
 import os
 import shutil
 import zipfile
+import zlib
 from datetime import datetime
 
 import config
@@ -22,8 +23,10 @@ PCAP_EXTENSIONS = ('.pcap', '.pcapng', '.cap', '.trace')
 # Pipeline output artifacts removed by /api/reanalyze before re-running analysis
 # fast.log/stats.log/suricata.log are Suricata's own logs, written in append
 # mode - left in place, every reanalyze added another copy of each.
-PCAP_ANALYSIS_ARTIFACTS = ('eve.json', 'events.db', '.phase', '.error', 'yara_matches.json', 'sigma_matches.json', '.meta', 'file_metadata.json', 'fast.log', 'stats.log', 'suricata.log')
-FILE_ANALYSIS_ARTIFACTS = ('events.db', '.error', 'yara_matches.json', 'sigma_matches.json', '.meta', 'zircolite.log', '.zircolite_events.db')
+PCAP_ANALYSIS_ARTIFACTS = ('eve.json', 'events.db', '.phase', '.error', '.warnings', 'yara_matches.json', 'sigma_matches.json', '.meta', 'file_metadata.json', 'fast.log', 'stats.log', 'suricata.log',
+                           # tshark - shark_analyzer.SHARK_ARTIFACTS (a test keeps the two in step)
+                           'shark.db', 'shark.db-wal', 'shark.db-shm', 'shark.db.tmp', '.shark_error')
+FILE_ANALYSIS_ARTIFACTS = ('events.db', '.error', '.warnings', 'yara_matches.json', 'sigma_matches.json', '.meta', 'zircolite.log', '.zircolite_events.db')
 
 
 def upload_tmp_dir(data_dir):
@@ -60,6 +63,31 @@ def cleanup_upload_tmp_dir(data_dir):
             pass
 
 
+def remove_imported_eve_files(data_dir):
+    """Remove eve.json from every finished PCAP analysis in data_dir.
+    events.db keeps each of its events in full, and nothing reads eve.json
+    once it has been imported, so it only doubles the disk an analysis
+    takes (spawn_suricata removes it itself as soon as the import
+    succeeds - this catches analyses made before it did). One still
+    running (.phase) or with an error (.error, which may be a failed
+    import) keeps it. Meant to be called once at startup, before
+    any analysis can be under way. Returns the bytes freed."""
+    freed = 0
+    for entry in os.listdir(data_dir):
+        dir_path = os.path.join(data_dir, entry)
+        eve_path = os.path.join(dir_path, 'eve.json')
+        if not os.path.isfile(eve_path) or not os.path.isfile(os.path.join(dir_path, 'events.db')) or \
+                any(os.path.exists(os.path.join(dir_path, f)) for f in ('.phase', '.error')):
+            continue
+        try:
+            size = os.path.getsize(eve_path)
+            os.unlink(eve_path)
+            freed += size
+        except OSError:
+            pass
+    return freed
+
+
 def resolve_upload_size_limit(requested):
     """Resolve the effective per-request upload-size ceiling from a
     client-provided override (X-Max-Upload-Size header for /api/upload, or
@@ -79,6 +107,43 @@ def resolve_upload_size_limit(requested):
     return min(value, config.MAX_UPLOAD_SIZE)
 
 
+# What extracting raises for an archive this password doesn't open:
+# RuntimeError for a bad or missing password; NotImplementedError,
+# zipfile's own signal for strong encryption (AES) or an unsupported
+# compression method - real, and fairly common in malware-sample
+# archives; and BadZipFile (a bad CRC), zlib.error or EOFError when a wrong
+# ZipCrypto password slips past its one-byte check (1 in 256) and the
+# result is garbage - so the next password is still tried.
+_ZIP_EXTRACT_ERRORS = (RuntimeError, NotImplementedError, zipfile.BadZipFile, zlib.error, EOFError)
+
+
+# An analysis's warnings: what went wrong without failing it - its results
+# are shown, with these above them (a YARA scan that failed, so its file
+# alerts may be missing). .error, by contrast, is an analysis that failed.
+WARNINGS_FILE = '.warnings'
+_MAX_WARNINGS = 20
+
+
+def add_analysis_warning(dir_path, message):
+    warnings = read_analysis_warnings(dir_path)
+    if message in warnings or len(warnings) >= _MAX_WARNINGS:
+        return
+    try:
+        with open(os.path.join(dir_path, WARNINGS_FILE), 'w') as f:
+            json.dump(warnings + [message[:500]], f)
+    except OSError:
+        pass
+
+
+def read_analysis_warnings(dir_path):
+    try:
+        with open(os.path.join(dir_path, WARNINGS_FILE)) as f:
+            warnings = json.load(f)
+    except (OSError, ValueError):
+        return []
+    return [w for w in warnings if isinstance(w, str)] if isinstance(warnings, list) else []
+
+
 def attempt_zip_extract(zip_ref, extract_dir, passwords, max_size=None):
     """Extract ZIP contents, trying passwords if needed.
 
@@ -90,11 +155,7 @@ def attempt_zip_extract(zip_ref, extract_dir, passwords, max_size=None):
     try:
         zip_ref.extractall(extract_dir)
         extracted = True
-    except (RuntimeError, NotImplementedError):
-        # RuntimeError: bad/missing password. NotImplementedError: zipfile's
-        # own signal for strong encryption (AES) or an unsupported
-        # compression method - both are real, fairly common in
-        # malware-sample archives, not just "wrong password".
+    except _ZIP_EXTRACT_ERRORS:
         pass
 
     if not extracted and passwords:
@@ -103,7 +164,7 @@ def attempt_zip_extract(zip_ref, extract_dir, passwords, max_size=None):
                 zip_ref.extractall(extract_dir, pwd=pwd)
                 extracted = True
                 break
-            except (RuntimeError, NotImplementedError):
+            except _ZIP_EXTRACT_ERRORS:
                 continue
 
     return extracted
@@ -121,9 +182,14 @@ def extract_zip_contents(zip_path, extract_dir, passwords=None, max_size=None):
     Returns list of extracted file paths.
     Raises ValueError if extraction fails.
     """
-    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+    try:
+        zip_ref = zipfile.ZipFile(zip_path, 'r')
+    except (zipfile.BadZipFile, EOFError, OSError):
+        raise ValueError('This ZIP file is damaged and could not be read.')
+    with zip_ref:
         if not attempt_zip_extract(zip_ref, extract_dir, passwords, max_size):
-            raise ValueError('Password-protected ZIP could not be opened.')
+            raise ValueError('The ZIP could not be extracted: its password is not one tried here, it uses '
+                             'encryption or compression that can\'t be read (such as AES), or it is damaged.')
 
     # Return all extracted files recursively, excluding hidden/metadata files
     files = []

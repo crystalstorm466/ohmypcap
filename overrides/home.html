@@ -455,7 +455,7 @@
         <a class="sx-btn sx-btn-ghost" href="installation/">Install</a>
       </div>
       <div class="sx-engines">
-        Powered by <span>Suricata</span>&#183;<span>YARA</span>&#183;<span>Sigma</span>&#183;<span>AI Playbooks</span>
+        Powered by <span>Suricata</span>&#183;<span>tshark</span>&#183;<span>YARA</span>&#183;<span>Sigma</span>&#183;<span>AI Playbooks</span>
       </div>
       <div class="sx-themes" role="group" aria-label="Page theme">
         <span>[ theme ]</span>
@@ -486,6 +486,16 @@
           <p>Replay pcaps through Suricata for alerts, protocol metadata, flow records, and extracted files &mdash; then drill into any stream's transcript or hexdump.</p>
         </div>
         <div class="sx-card reveal">
+          <svg viewBox="0 0 24 24"><path d="M12 3l9 4.5-9 4.5-9-4.5z"/><path d="M3 12l9 4.5 9-4.5"/><path d="M3 16.5L12 21l9-4.5"/></svg>
+          <h3>tshark Protocols</h3>
+          <p>tshark adds the protocols Suricata doesn't parse &mdash; S7comm, IEC&nbsp;104, BACnet, OPC&nbsp;UA, Telnet, RADIUS, IPMI and more &mdash; each with its own tab, aggregations, and search.</p>
+        </div>
+        <div class="sx-card reveal">
+          <svg viewBox="0 0 24 24"><path d="M12 3l9 16H3z"/><path d="M12 10v4"/><path d="M12 17h.01"/></svg>
+          <h3>Findings</h3>
+          <p>Weaknesses, control actions, and probes from every protocol in one ranked list &mdash; a controller accepting cipher zero, a PLC stopped, a self&#8209;signed command&#8209;and&#8209;control certificate.</p>
+        </div>
+        <div class="sx-card reveal">
           <svg viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/><path d="M9 12h6M9 15h6M9 18h4"/></svg>
           <h3>YARA Binary Scanning</h3>
           <p>Scan uploaded binaries and files carved from network traffic against YARA rule sets.</p>
@@ -504,6 +514,11 @@
           <svg viewBox="0 0 24 24"><path d="M12 3l1.7 4.6L18 9.3l-4.3 1.7L12 15.6l-1.7-4.6L6 9.3l4.3-1.7z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/></svg>
           <h3>AI Summaries &amp; Playbooks</h3>
           <p>Alerts come with an AI summary of what the rule detects, plus a plain&#8209;English investigation playbook.</p>
+        </div>
+        <div class="sx-card reveal">
+          <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3c2.8 3 2.8 15 0 18M12 3c-2.8 3-2.8 15 0 18"/></svg>
+          <h3>DNS Heuristics</h3>
+          <p>Score every domain for tunneling, DGA, and fan&#8209;out shapes, with CDN and vendor noise filtered out first.</p>
         </div>
         <div class="sx-card reveal">
           <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/><path d="M12 1.5v4M12 18.5v4M1.5 12h4M18.5 12h4"/></svg>

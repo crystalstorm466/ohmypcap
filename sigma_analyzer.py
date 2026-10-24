@@ -3,7 +3,8 @@
 
 Zircolite is optional. If installed, log files (EVTX, JSON, CSV, XML)
 are scanned with Sigma rules after upload. Rules are baked into Docker
-images; non-Docker deployments download on first run if internet is available.
+images; a deployment without them gets them only from the Rules modal -
+nothing is downloaded unasked (see AGENTS.md's Detection Rule Freshness).
 """
 
 import json

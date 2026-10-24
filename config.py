@@ -30,6 +30,7 @@ MAX_HEXDUMP_PACKETS = 500
 # Timeouts (seconds)
 STREAM_TIMEOUT_SECONDS = 60
 URL_DOWNLOAD_TIMEOUT = 30
+URL_DOWNLOAD_MAX_SECONDS = 3600            # a whole download (URL_DOWNLOAD_TIMEOUT is per read, which a trickle never trips)
 SQLITE_TIMEOUT_SECONDS = 30
 FILE_COMMAND_TIMEOUT = 10
 RULES_DOWNLOAD_TIMEOUT = 60
@@ -38,6 +39,7 @@ SURICATA_UPDATE_TIMEOUT = 60
 SURICATA_SOURCE_RECONCILE_TIMEOUT = 30      # per enable-source/disable-source subprocess call
 SURICATA_RUN_TIMEOUT = 300                 # 5 minutes max for a single PCAP
 SIGMA_RUN_TIMEOUT = 300                    # 5 minutes max for Zircolite log analysis
+SHARK_RUN_TIMEOUT = 1800                   # 30 minutes max for one tshark run - it runs in the background at low priority, after Suricata
 
 # Sigma / Zircolite
 ZIRCOLITE_VERSION = '3.7.1'
@@ -98,6 +100,21 @@ MAX_EMAIL_DEPTH = 5                        # levels of forwarded messages (messa
 MAX_EMAIL_MESSAGES = 50                    # forwarded messages parsed per upload, at any depth
 MAX_EMAIL_SIZE = 100 * 1024 * 1024         # bigger .eml files are analyzed as plain files - parsing holds the message and its decoded attachments in memory
 MAX_EMAIL_BODY_CHARS = 65536               # characters of body text kept in the email event
+
+# tshark (shark_analyzer.py) - a run's memory grows with a capture's
+# packet count (its connections, really), not its size: tshark's own and
+# the build's flow table together, ~1.1 KB per packet measured - 2.9 GB
+# for the 2.27 million packets of a 209 MB capture, 3.9 GB for 3.53
+# million. A run whose processes together pass SHARK_MAX_MEMORY_BYTES is
+# stopped, and only captures up to SHARK_BACKGROUND_MAX_PACKETS are
+# analyzed without being asked - bigger ones run when the user requests
+# them (and may hit the memory limit). 3 million keeps a run that starts
+# on its own about 0.7 GB under the limit.
+SHARK_MAX_MEMORY_BYTES = 4 * 1024 ** 3
+SHARK_BACKGROUND_MAX_PACKETS = 3_000_000
+# ... and only up to this size when the packets can't be counted (no capinfos)
+SHARK_BACKGROUND_MAX_BYTES = 250 * 1024 * 1024
+SHARK_MEMORY_CHECK_SECONDS = 0.5
 
 # Thresholds
 STALE_THRESHOLD_SECONDS = 600              # 10 minutes

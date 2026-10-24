@@ -42,7 +42,7 @@ from playwright.async_api import async_playwright
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from record_demo import (  # noqa: E402
-    CAPTION_INIT_JS_TEMPLATE, CAPTION_REMOVE_JS, VIEWPORT, caption, clear_pointer, find_chromium,
+    CAPTION_INIT_JS_TEMPLATE, CAPTION_REMOVE_JS, VIEWPORT, caption, clear_pointer, find_chromium, point_to,
 )
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -282,13 +282,70 @@ async def main(base_url):
             stor = detail.locator('.ascii-transcript div', has_text='STOR PW_').last
             await stor.wait_for(timeout=15000)
             await stor.scroll_into_view_if_needed()
-            await caption(page, "The transcript shows what left: Jordan's harvested passwords", stor)
+            await caption(page, "The FTP control channel shows the STOR command - a file named\n"
+                                "the way the AgentTesla infostealer names the passwords it steals", stor)
             await page.wait_for_timeout(5000)
+            await clear_pointer(page)
+            # The control channel only names the file; the data channel carried
+            # it. Open the FTP Data flow and read its payload - the file itself.
+            await caption(page, "But that's just the request. The file crossed on the FTP data\n"
+                                "channel - open it to read what actually left")
+            detail = await _expand_row(page, 'FTP Data', 'PW_')
+            creds = detail.locator('.ascii-transcript div', has_text='Summer2026!').first
+            await creds.wait_for(timeout=15000)
+            await creds.scroll_into_view_if_needed()
+            await point_to(page, creds)
+            await page.wait_for_timeout(3000)
+            await caption(page, "There they are - Jordan's saved passwords, exfiltrated in the clear", creds)
+            await page.wait_for_timeout(6000)
             await clear_pointer(page)
             detail = await _expand_row(page, 'File Info', 'update.bin')
             sha = detail.locator('.detail-label', has_text='SHA256').first
             await sha.scroll_into_view_if_needed()
             await caption(page, "Suricata also extracted the payload, update.bin - note its SHA256", sha)
+            await page.wait_for_timeout(5000)
+            await clear_pointer(page)
+
+            # The views beyond Suricata's alerts: protocols tshark decodes but
+            # Suricata doesn't parse, DNS Heuristics, Findings, and Connections.
+            # Each caption's text is set *before* its tab switch/scroll, so it
+            # never lingers over the previous view while the next one settles;
+            # the arrow (point_to) is added once its target is in place, and
+            # every tab a caption names is actually switched to, so the data
+            # table on screen always matches the words.
+            ssdp = page.locator('.stat-card', has_text='SSDP').first
+            await ssdp.wait_for(timeout=30000)  # also means tshark's run has finished
+            await caption(page, "Alongside Suricata, tshark decodes protocols Suricata doesn't parse -\n"
+                                "the workstation's own LLMNR, NBNS and SSDP chatter, each marked with a dot")
+            await ssdp.scroll_into_view_if_needed()
+            await point_to(page, ssdp)
+            await page.wait_for_timeout(5500)
+
+            await caption(page, "DNS Heuristics flags the payload's DGA beacon -\n"
+                                "a burst of machine-generated domains hunting for its C2")
+            await page.locator('.stat-card', has_text='DNS Heuristics').first.click()
+            await page.wait_for_timeout(1200)
+            dga = page.locator('.section:not(.section-hidden) tbody tr').first
+            await dga.scroll_into_view_if_needed()
+            await point_to(page, dga)
+            await page.wait_for_timeout(5000)
+
+            await caption(page, "Findings gathers what the records show is worth a look -\n"
+                                "here, the C2's self-signed TLS certificate")
+            await page.locator('.stat-card', has_text='Findings').first.click()
+            await page.wait_for_timeout(1200)
+            finding = page.locator('.section:not(.section-hidden) tbody tr', has_text='self-signed').first
+            await finding.scroll_into_view_if_needed()
+            await point_to(page, finding)
+            await page.wait_for_timeout(5000)
+
+            await caption(page, "And Connections lists every connection by protocol - the IRC\n"
+                                "channel the bot joined, which tshark named but nothing parsed")
+            await page.locator('.stat-card', has_text='IRC').first.click()
+            await page.wait_for_timeout(1200)
+            irc = page.locator('.stat-card', has_text='IRC').first
+            await irc.scroll_into_view_if_needed()
+            await point_to(page, irc)
             await page.wait_for_timeout(5000)
             await clear_pointer(page)
 

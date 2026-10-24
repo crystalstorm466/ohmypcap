@@ -21,6 +21,7 @@ Main Screen (no analysis loaded)
 
 Analysis View (analysis loaded)
   ├── App header (SO-CRATES logo/home link, file name, MD5, date range, notes/reanalyze/delete icons, gear menu)
+  ├── tshark line (PCAP analyses: what tshark is adding, and the key to the cards' tshark dot)
   ├── Search bar
   ├── File Info card (binary-file analyses only)
   ├── Filter Bar (active search and filters as removable chips)

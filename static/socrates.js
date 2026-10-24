@@ -77,6 +77,64 @@
             return days !== null ? days * 24 : serverHours;
         }
 
+        // tshark's connection types (see db.py's CONNECTION_TYPE_PREFIX):
+        // 'conn_<app proto>' rows are the connections tshark found carrying
+        // a protocol neither Suricata nor shark_protocols has records for -
+        // a tab per protocol, with tshark's flow columns.
+        const CONNECTION_TYPE_PREFIX = 'conn_';
+        // ... except the protocols whose every connection was a probe nothing
+        // answered (db.py's PROBED_CONNECTION_TYPE): one tab for all of them.
+        const PROBED_CONNECTION_TYPE = CONNECTION_TYPE_PREFIX + '_probed';
+        // A tshark flow's columns: no State or Alerted (Suricata's own flow
+        // tracking and detection) - its protocol is the point.
+        const TSHARK_FLOW_COLUMNS = ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'App Proto', 'Answered', 'Pkts →', 'Pkts ←', 'Bytes →', 'Bytes ←'];
+        function isConnectionType(type) { return typeof type === 'string' && type.startsWith(CONNECTION_TYPE_PREFIX); }
+        function eventTypeLabel(type) {
+            if (type === PROBED_CONNECTION_TYPE) return 'Probed Only';
+            if (isConnectionType(type)) {
+                const proto = type.slice(CONNECTION_TYPE_PREFIX.length);
+                // tshark's own name otherwise, with _ as a space so a name
+                // like steam_ihs_discovery can wrap onto the card's two lines
+                return typeLabels[proto.replace(/-/g, '_')] || proto.replace(/_/g, ' ').toUpperCase();
+            }
+            return typeLabels[type] || type.replace(/_/g, ' ').toUpperCase();
+        }
+
+        // A card's label never breaks inside a word (.stat-label's
+        // word-break: keep-all), so one word too long for its card -
+        // tshark's PORTCONTROL or CLASSICSTUN on a ten-column row - would
+        // run out of it. Such a label is measured and its text scaled down
+        // just enough to fit; every label that fits keeps its size. Run
+        // after the cards render and again whenever the grid's width
+        // changes (watchStatLabels), since that changes the cards'.
+        function fitStatLabels(root) {
+            root.querySelectorAll('.stat-label').forEach(label => {
+                label.style.fontSize = '';
+                // letter-spacing doesn't scale with the font, so a pass can
+                // fall just short - a couple more close it
+                for (let pass = 0; pass < 3 && label.scrollWidth > label.clientWidth + 1; pass++) {
+                    const size = parseFloat(getComputedStyle(label).fontSize);
+                    label.style.fontSize = `${(size * label.clientWidth / label.scrollWidth * 0.98).toFixed(2)}px`;
+                }
+            });
+        }
+
+        var statLabelObserver = null;
+        function watchStatLabels(grid) {
+            if (typeof ResizeObserver === 'undefined') return;
+            if (!statLabelObserver) {
+                let lastWidth = null;
+                statLabelObserver = new ResizeObserver(entries => {
+                    const width = entries[entries.length - 1].contentRect.width;
+                    if (width === lastWidth) return;
+                    lastWidth = width;
+                    fitStatLabels(entries[entries.length - 1].target);
+                });
+            }
+            statLabelObserver.disconnect();
+            statLabelObserver.observe(grid);
+        }
+
         function sortEventTypes(types) {
             // Network Alerts, File Alerts, Decoder Alerts, Anomalies (in
             // that order) take priority over everything else, which then
@@ -87,10 +145,14 @@
             // affecting the pcap-mode ordering above.
             // email/link only occur in email mode, where the message
             // itself leads, then its links.
-            const order = { email: -2, link: -1, alert: 0, filealerts: 1, protocol_decode: 2, anomaly: 3, sigmaalert: 4, log: 5 };
+            // Flows, then tshark's connection tabs, follow every record
+            // type, Probed Only last - the order of the stat cards'
+            // sections (see STAT_GROUPS).
+            const order = { email: -2, link: -1, alert: 0, filealerts: 1, protocol_decode: 2, anomaly: 3, sigmaalert: 4, log: 5,
+                            flow: 99.5, [PROBED_CONNECTION_TYPE]: 101 };
             return [...types].sort((a, b) => {
-                const ai = order[a] ?? 99;
-                const bi = order[b] ?? 99;
+                const ai = order[a] ?? (isConnectionType(a) ? 100 : 99);
+                const bi = order[b] ?? (isConnectionType(b) ? 100 : 99);
                 if (ai !== bi) return ai - bi;
                 return a.localeCompare(b);
             });
@@ -2088,6 +2150,38 @@
                 anomaly: '#ff9800',
                 dns: '#66bb6a',
                 dnp3: '#26c6da',
+                // Records tshark adds (protocols Suricata doesn't parse)
+                llmnr: '#9ccc65',
+                nbns: '#8d6e63',
+                s7comm: '#00897b',
+                ssdp: '#7e57c2',
+                telnet: '#ffa726',
+                iec104: '#ef5350',
+                bacnet: '#ab47bc',
+                opcua: '#29b6f6',
+                goose: '#d4e157',
+                browser: '#78909c',
+                lldp: '#26a69a',
+                cdp: '#8d6e63',
+                dhcpv6: '#9ccc65',
+                syslog: '#ffca28',
+                dtls: '#4dd0e1',
+                tls_failure: '#ef5350',
+                rpc: '#a1887f',
+                socks: '#ab47bc',
+                radius: '#ef5350',
+                stun: '#66bb6a',
+                coap: '#ffa726',
+                slp: '#7e57c2',
+                ipmi: '#ec407a',
+                l2tp: '#26c6da',
+                rip: '#9ccc65',
+                tunnel: '#8d6e63',
+                xdmcp: '#78909c',
+                opcua_action: '#ff7043',
+                bacnet_property: '#5c6bc0',
+                bacnet_device: '#8d6e63',
+                iec104_point: '#26a69a',
                 email: '#4fc3f7',
                 filealerts: '#e91e63',
                 fileinfo: '#9c27b0',
@@ -2348,7 +2442,7 @@
                             <td style="text-align: center; padding: 8px 10px; color: var(--badge-success-text);">${CHECKMARK_ICON_SVG}</td>
                         </tr>
                         <tr>
-                            <td style="padding: 8px 10px; color: var(--text-primary); font-size: 0.85rem;">Onion AI Assistant</td>
+                            <td style="padding: 8px 10px; color: var(--text-primary); font-size: 0.85rem;">Onion AI Assistant with Agentic AI</td>
                             <td style="text-align: center; padding: 8px 10px; color: var(--bg-hover-light);">-</td>
                             <td style="text-align: center; padding: 8px 10px; color: var(--bg-hover-light);">-</td>
                             <td style="text-align: center; padding: 8px 10px; color: var(--badge-success-text);">${CHECKMARK_ICON_SVG}</td>
@@ -2511,6 +2605,7 @@
                     }
                 });
             }
+            revealActiveStatCard();
 
             // #sankeyPanel/#aggregations are single, page-level panels
             // shared across every tab (not per-section - see
@@ -2537,6 +2632,9 @@
             if (sankeyPanel && !isLogAnalysisMode) sankeyPanel.style.display = '';
             const aggContainer = document.getElementById('aggregations');
             if (aggContainer) aggContainer.innerHTML = AGG_COLLAPSED_HTML;
+            // (and an earlier tab's aggregations still on their way don't
+            // land here when they arrive)
+            bumpAggregationFetchGeneration();
 
             if (eventType === 'acknowledged') {
                 await buildAcknowledgedAlertsSection();
@@ -2548,6 +2646,16 @@
                 if (sankeyPanel) sankeyPanel.style.display = 'none';
                 if (aggContainer) aggContainer.innerHTML = '';
                 if (sectionEl) await buildDnsHeuristicsSection();
+                updateFilterBarVisibility();
+                return;
+            }
+
+            // Findings, like DNS Heuristics, is a view of other types'
+            // records - no Sankey or aggregations of its own
+            if (eventType === 'findings') {
+                if (sankeyPanel) sankeyPanel.style.display = 'none';
+                if (aggContainer) aggContainer.innerHTML = '';
+                if (sectionEl) await buildFindingsSection();
                 updateFilterBarVisibility();
                 return;
             }
@@ -2645,7 +2753,7 @@
             } catch(e) {
                 console.error('Failed to load tab data:', e);
                 if (sectionEl) {
-                    sectionEl.innerHTML = `<div class="section-header">${escapeHtml(typeLabels[eventType] || eventType.toUpperCase())}</div><div class="loading">Error loading data</div>`;
+                    sectionEl.innerHTML = `<div class="section-header">${escapeHtml(eventTypeLabel(eventType))}</div><div class="loading">Error loading data</div>`;
                 }
             }
         }
@@ -2918,12 +3026,31 @@
         // DOM removal needed, and this keeps stat-card counts correct for
         // free instead of hand-updating them separately.
         async function setAlertAcknowledged(table, rowId, acknowledged) {
-            await fetch('/api/acknowledge-alert', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ md5: currentMd5, table, rowId, acknowledged }),
-            });
+            if (!await postJsonOrToast('/api/acknowledge-alert', { md5: currentMd5, table, rowId, acknowledged },
+                acknowledged ? 'Acknowledging the alert' : 'Un-acknowledging the alert')) return;
             await refreshAnalysisData();
+        }
+
+        // A POST whose failure the user should hear about: true when it
+        // worked - otherwise a toast with the server's reason, and false,
+        // rather than carrying on as if it had (the row just staying put)
+        async function postJsonOrToast(url, body, what) {
+            try {
+                const resp = await fetch(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body),
+                });
+                if (resp.ok) return true;
+                let reason = '';
+                try {
+                    reason = (await resp.json()).error || '';
+                } catch (e) { /* no JSON body */ }
+                showToast(`${what} failed${reason ? ': ' + reason : ''}`);
+            } catch (err) {
+                showToast(`${what} failed: SO-CRATES couldn't be reached`);
+            }
+            return false;
         }
 
         // "All instances of this alert" - computed client-side from
@@ -2946,11 +3073,8 @@
             if (truncatedTypes.has(ackInfo.eventType)) {
                 showToast('Only matches within the current query limit were acknowledged - some may remain', { sticky: true });
             }
-            await fetch('/api/acknowledge-alerts-bulk', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ md5: currentMd5, table: ackInfo.table, rowIds: matchIds }),
-            });
+            if (!await postJsonOrToast('/api/acknowledge-alerts-bulk',
+                { md5: currentMd5, table: ackInfo.table, rowIds: matchIds }, 'Acknowledging the alerts')) return;
             await refreshAnalysisData();
         }
 
@@ -3172,6 +3296,7 @@
                     }
                     loadPlaybookSectionIfPresent(detailRow);
                     loadAiSummaryPlaceholders(detailRow);
+                    loadFindingMembersIfPresent(detailRow);
                 }
             }
         }
@@ -3401,7 +3526,13 @@
             try {
                 const resp = await fetch(url);
                 const data = await resp.json();
-                
+
+                // The server's own error - shown, and not marked loaded, so
+                // opening the view again retries (as the ASCII transcript does)
+                if (data.error) {
+                    container.innerHTML = '<div style="color:var(--text-muted);">Error loading hexdump: ' + escapeHtml(String(data.error)) + '</div>';
+                    return;
+                }
                 if (data.packets && data.packets.length > 0) {
                     let html = '<div class="packet-controls"><button class="packet-control-btn" data-action="expand-all-packets">Expand All</button><button class="packet-control-btn" data-action="collapse-all-packets">Collapse All</button></div>';
                     
@@ -3463,8 +3594,10 @@
         }
         
         function htmlRow(label, innerHtml, className, style) {
-            const valueCls = className ? `detail-value ${className}` : 'detail-value';
-            const sty = style ? ` style="${style}"` : '';
+            // (escaped like everything else put in an attribute, though every
+            // caller passes constants today)
+            const valueCls = className ? `detail-value ${escapeHtml(className)}` : 'detail-value';
+            const sty = style ? ` style="${escapeHtml(style)}"` : '';
             return `<span class="detail-label">${escapeHtml(label)}</span><span class="${valueCls}"${sty}>${innerHtml}</span>`;
         }
         
@@ -3493,7 +3626,9 @@
         // collide with something read genuinely doesn't need to worry
         // about it, since only these two call sites ever set it.
         function htmlRowText(label, text, className, style, dynamicField) {
-            const value = String(text || '');
+            // A 0 is a value (Modbus write data, a DNP3 address) - only
+            // nothing, or false, leaves the row blank
+            const value = text === undefined || text === null || text === false ? '' : String(text);
             if (!value) return htmlRow(label, '', className, style);
             const pivotPayload = dynamicField ? [label, value, true] : [label, value];
             const encoded = encodeURIComponent(JSON.stringify(pivotPayload));
@@ -3527,6 +3662,8 @@
             let html = `<div style="display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 8px; font-size: 0.85rem; min-width: 0;">`;
             html += htmlRowText('Timestamp', ts);
             html += htmlRow('Event Type', `${valueDotSpan(COLORS.EVENT[e.event_type])}${escapeHtml(e.event_type || '')}`);
+            // A row tshark added (shark_analyzer.merge): a protocol Suricata doesn't parse
+            if (e.source === 'tshark') html += htmlRow('Decoded by', 'tshark');
             if (e.proto) html += htmlRowText('Protocol', e.proto);
             if (e.flow_id) html += htmlRowText('Flow ID', e.flow_id);
             if (e.community_id) html += htmlRowText('Community ID', e.community_id, 'mono');
@@ -3640,8 +3777,672 @@
             html += htmlRowText('Query Name', e.dns?.rrname || e.dns?.queries?.[0]?.rrname, 'mono');
             html += htmlRowText('Query Type', e.dns?.rrtype || e.dns?.queries?.[0]?.rrtype);
             if (e.dns?.answers) {
-                html += htmlRowText('Answers', e.dns.answers.map(a => a.rdata).join(', '), 'mono');
+                html += htmlRowText('Answers', e.dns.answers.map(a => a.rdata).filter(Boolean).join(', '), 'mono');
             }
+            return html;
+        }
+
+        // tshark's LLMNR records (shark_protocols.LLMNR): DNS's own message
+        // format, so DNS's layout, under e.llmnr.
+        function renderLlmnrDetails(e) {
+            let html = htmlSection('LLMNR Details', COLORS.EVENT.llmnr);
+            html += htmlRowText('Type', e.llmnr?.type);
+            html += htmlRowText('Query Name', e.llmnr?.queries?.[0]?.rrname, 'mono');
+            html += htmlRowText('Query Type', e.llmnr?.queries?.[0]?.rrtype);
+            html += htmlRowText('Response Code', e.llmnr?.rcode);
+            if (e.llmnr?.answers) {
+                html += htmlRowText('Answers', e.llmnr.answers.map(a => a.rdata).filter(Boolean).join(', '), 'mono');
+            }
+            if (e.llmnr?.transmissions) html += htmlRowText('Transmissions', e.llmnr.transmissions);
+            if (e.llmnr?.responses) html += htmlRowText('Responses', e.llmnr.responses);
+            return html;
+        }
+
+        // tshark's NBNS records (shark_protocols.NBNS).
+        function renderNbnsDetails(e) {
+            const n = e.nbns || {};
+            let html = htmlSection('NBNS Details', COLORS.EVENT.nbns);
+            html += htmlRowText('Operation', n.opcode);
+            html += htmlRowText('NetBIOS Name', n.name, 'mono');
+            html += htmlRowText('Suffix', n.suffix ? `<${n.suffix}>` : '', 'mono');
+            html += htmlRowText('Service', n.service);
+            html += htmlRowText('Address', n.address, 'mono');
+            html += htmlRowText('TTL', n.ttl === undefined ? '' : `${n.ttl} seconds`);
+            html += htmlRowText('Type', n.type);
+            html += htmlRowText('Response Code', n.rcode);
+            html += htmlRowText('Transmissions', n.transmissions);
+            return html;
+        }
+
+        // tshark's S7comm records (shark_protocols.S7comm): a job and its
+        // acknowledgement, or a userdata message.
+        function renderS7commDetails(e) {
+            const s7 = e.s7comm || {};
+            const resp = s7.response || {};
+            let html = htmlSection('S7comm Details', COLORS.EVENT.s7comm);
+            html += htmlRowText('Type', s7.type);
+            html += htmlRowText('Function', s7.function || s7.function_group);
+            html += htmlRowText('Subfunction', s7.subfunction);
+            html += htmlRowText('PDU Reference', s7.pdu_ref);
+            html += htmlRowText('Items', s7.item_count);
+            (s7.items || []).forEach((item, i) => {
+                const where = [item.area, item.db !== undefined ? `DB ${item.db}` : '', item.address || ''].filter(Boolean).join(' ');
+                html += htmlRowText(`Item ${i + 1}`, where, 'mono');
+            });
+            if (s7.type === 'job') html += htmlRowText('Acknowledged', s7.response ? 'Yes' : 'No');
+            html += htmlRowText('Error Class', resp.error_class);
+            html += htmlRowText('Error Code', resp.error_code);
+            return html;
+        }
+
+        // tshark's Windows Browser records (shark_protocols.Browser): one per
+        // host, name and kind of message.
+        function renderBrowserDetails(e) {
+            const b = e.browser || {};
+            let html = htmlSection('Windows Browser Details', COLORS.EVENT.browser);
+            html += htmlRowText('Message', b.message);
+            html += htmlRowText('NetBIOS Name', b.source_name, 'mono');
+            html += htmlRowText('Workgroup', b.destination_name, 'mono');
+            html += htmlRowText('Announced Name', b.name && b.name !== b.source_name ? b.name : '', 'mono');
+            html += htmlRowText('Windows', b.os_version);
+            html += htmlRowText('Roles', (b.roles || []).join(', '));
+            html += htmlRowText('Comment', b.comment);
+            html += htmlRowText('Master Browser', b.master_browser, 'mono');
+            html += htmlRowText('Reply To', b.reply_to, 'mono');
+            html += htmlRowText('Backup Browsers', (b.backup_servers || []).join(', '), 'mono');
+            html += htmlRowText('Promoted', b.promote, 'mono');
+            html += htmlRowText('Browser Version', b.browser_version);
+            html += htmlRowText('Count', b.count !== undefined ? b.count.toLocaleString() : '');
+            html += htmlRowText('Last Seen', (b.last_seen || '').slice(0, 23).replace('T', ' '));
+            return html;
+        }
+
+        // tshark's ONC RPC records (shark_protocols.RPC): one per call, with
+        // its reply - the portmapper's mappings, mountd's exports.
+        function renderRpcDetails(e) {
+            const r = e.rpc || {};
+            let html = htmlSection('ONC RPC Details', COLORS.EVENT.rpc);
+            html += htmlRowText('Program', r.program_number !== undefined && String(r.program_number) !== r.program
+                ? `${r.program} (${r.program_number})` : r.program);
+            html += htmlRowText('Version', r.version !== undefined ? String(r.version) : '');
+            html += htmlRowText('Procedure', r.procedure);
+            html += htmlRowText('Reply', r.reply || 'none');
+            html += htmlRowText('Auth', r.auth);
+            html += htmlRowText('Machine Name', r.machine_name, 'mono');
+            html += htmlRowText('UID / GID', r.uid !== undefined ? `${r.uid} / ${r.gid ?? ''}` : '', 'mono');
+            if (r.query) html += htmlRowText('Asked For', `${r.query.program} v${r.query.version ?? '?'} ${r.query.transport || ''}`);
+            html += htmlRowText('Port', r.port !== undefined ? String(r.port) : '', 'mono');
+            html += htmlRowText('Path', r.path, 'mono');
+            html += htmlRowText('Mount Status', r.mount_status);
+            html += htmlRow('Registered', (r.mappings || []).map(m =>
+                escapeHtml(`${m.program} v${m.version ?? '?'} ${m.transport || ''} ${m.port ?? ''}`)).join('<br>'), 'mono');
+            html += htmlRowText('Exports', (r.exports || []).join(', '), 'mono');
+            html += htmlRowText('Export Clients', (r.export_clients || []).join(', '), 'mono');
+            html += htmlRowText('Mounted By', (r.mounted_by || []).join(', '), 'mono');
+            html += htmlRowText('XID', r.xid, 'mono');
+            html += htmlRowText('Calls', r.calls ? r.calls.toLocaleString() : '');
+            return html;
+        }
+
+        // tshark's CoAP records (shark_protocols.CoAP): one per request and
+        // its response, like Suricata's http records.
+        function renderCoapDetails(e) {
+            const c = e.coap || {};
+            const size = n => n !== undefined ? `${n.toLocaleString()} bytes` : '';
+            let html = htmlSection('CoAP Details', COLORS.EVENT.coap);
+            html += htmlRowText('Method', c.method);
+            html += htmlRowText('URI', c.uri, 'mono');
+            html += htmlRowText('Query', c.query, 'mono');
+            html += htmlRowText('Host', c.host, 'mono');
+            html += htmlRowText('Type', c.type);
+            html += htmlRowText('Response Code', c.response_code || 'no response');
+            html += htmlRowText('Response Time', c.response_time !== undefined ? `${c.response_time} s` : '');
+            html += htmlRowText('Accept', c.accept);
+            html += htmlRowText('Request Content Format', c.request_content_format);
+            html += htmlRowText('Request Size', size(c.request_length));
+            html += htmlRowText('Response Content Format', c.response_content_format);
+            html += htmlRowText('Response Size', size(c.response_length));
+            html += htmlRow('Resources', (c.resources || []).map(escapeHtml).join('<br>'), 'mono');
+            html += htmlRowText('Observe', c.observe ? 'yes' : '');
+            html += htmlRowText('Responses', c.responses > 1 ? c.responses.toLocaleString() : '');
+            html += htmlRowText('Retransmissions', c.retransmissions ? c.retransmissions.toLocaleString() : '');
+            return html;
+        }
+
+        // tshark's SLP records (shark_protocols.SLP): one per request and
+        // its replies - every host's, for a multicast request - or per
+        // advertisement.
+        function renderSlpDetails(e) {
+            const s = e.slp || {};
+            const size = n => n !== undefined ? `${n.toLocaleString()} bytes` : '';
+            const asked = s.response !== undefined || ['Service Request', 'Service Registration', 'Service Deregistration',
+                'Attribute Request', 'Service Type Request'].includes(s.function);
+            let html = htmlSection('SLP Details', COLORS.EVENT.slp);
+            html += htmlRowText('Function', s.function);
+            html += htmlRowText('Version', s.version !== undefined ? String(s.version) : '');
+            html += htmlRowText('Service Type', s.service_type, 'mono');
+            html += htmlRowText('Scopes', s.scopes, 'mono');
+            html += htmlRowText('URL', s.url, 'mono');
+            html += htmlRowText('Predicate', s.predicate, 'mono');
+            html += htmlRowText('Tags', s.tags, 'mono');
+            html += htmlRowText('Naming Authority', s.naming_authority, 'mono');
+            html += htmlRowText('Lifetime', s.lifetime !== undefined ? `${s.lifetime.toLocaleString()} s` : '');
+            html += htmlRowText('Fresh Registration', s.fresh ? 'yes' : '');
+            html += htmlRowText('Multicast', s.multicast ? 'yes' : '');
+            html += htmlRowText('Request Size', size(s.request_length));
+            if (asked) html += htmlRowText('Response', s.response || 'no response');
+            html += htmlRowText('Status', s.status);
+            html += htmlRowText('Response Time', s.response_time !== undefined ? `${s.response_time} s` : '');
+            html += htmlRow('URLs', (s.urls || []).map(escapeHtml).join('<br>'), 'mono');
+            html += htmlRow('Service Types', (s.service_types || []).map(escapeHtml).join('<br>'), 'mono');
+            html += htmlRowText('Attributes', s.attributes, 'mono');
+            html += htmlRowText('Responders', (s.responders || []).join(', '), 'mono');
+            html += htmlRowText('Response Size', size(s.response_length));
+            html += htmlRowText('Size', size(s.length));
+            html += htmlRowText('Responses', s.responses > 1 ? s.responses.toLocaleString() : '');
+            html += htmlRowText('Retransmissions', s.retransmissions ? s.retransmissions.toLocaleString() : '');
+            html += htmlRowText('XID', s.xid !== undefined ? String(s.xid) : '', 'mono');
+            return html;
+        }
+
+        // tshark's IPMI records (shark_protocols.IPMI): one per flow to a
+        // server's management controller - what it says before any login.
+        function renderIpmiDetails(e) {
+            const p = e.ipmi || {};
+            const yes = b => b === undefined ? '' : (b ? 'yes' : 'no');
+            const cipher = c => c ? [c.authentication, c.integrity, c.confidentiality].filter(Boolean).join(' / ') : '';
+            let html = htmlSection('IPMI Details', COLORS.EVENT.ipmi);
+            html += htmlRowText('Requests', (p.requests || []).join(', '));
+            html += htmlRowText('Result', p.result);
+            html += htmlRowText('Weaknesses', (p.weaknesses || []).join(', '));
+            html += htmlRowText('IPMI Supported', yes(p.ipmi_supported));
+            html += htmlRowText('IPMI Versions', (p.ipmi_versions || []).join(', '));
+            html += htmlRowText('Auth Types', (p.auth_types || []).join(', '));
+            html += htmlRowText('Anonymous Login', yes(p.anonymous_login));
+            html += htmlRowText('Null User Names', yes(p.null_user_names));
+            html += htmlRowText('Non-null User Names', yes(p.non_null_user_names));
+            html += htmlRowText('User-level Authentication', yes(p.user_level_authentication));
+            html += htmlRowText('Per-message Authentication', yes(p.per_message_authentication));
+            html += htmlRowText('KG Set', yes(p.kg_set));
+            html += htmlRowText('Channel', p.channel !== undefined ? String(p.channel) : '');
+            html += htmlRowText('OEM IANA', p.oem_iana !== undefined ? String(p.oem_iana) : '', 'mono');
+            html += htmlRowText('Completion Code', p.completion_code, 'mono');
+            html += htmlRowText('Requested Privilege', p.requested_privilege);
+            html += htmlRowText('Cipher Requested', cipher(p.cipher_requested));
+            html += htmlRowText('Cipher Accepted', cipher(p.cipher_accepted));
+            html += htmlRowText('Session Status', p.session_status);
+            html += htmlRowText('Responses', p.responses ? p.responses.toLocaleString() : '');
+            return html;
+        }
+
+        // tshark's L2TP records (shark_protocols.L2TP): one per control
+        // connection - who each end said it was, and how it ended.
+        function renderL2tpDetails(e) {
+            const l = e.l2tp || {};
+            const count = n => n ? n.toLocaleString() : '';
+            let html = htmlSection('L2TP Details', COLORS.EVENT.l2tp);
+            html += htmlRowText('State', l.state);
+            html += htmlRowText('Messages', (l.messages || []).join(', '));
+            html += htmlRowText('Client Host', l.client_host_name, 'mono');
+            html += htmlRowText('Client Vendor', l.client_vendor);
+            html += htmlRowText('Client Firmware', l.client_firmware, 'mono');
+            html += htmlRowText('Server Host', l.server_host_name, 'mono');
+            html += htmlRowText('Server Vendor', l.server_vendor);
+            html += htmlRowText('Server Firmware', l.server_firmware, 'mono');
+            html += htmlRowText('L2TP Version', l.version !== undefined ? String(l.version) : '');
+            html += htmlRowText('Protocol Version', l.protocol_version);
+            html += htmlRowText('Tunnel Authentication', l.tunnel_authentication ? 'yes' : '');
+            html += htmlRowText('Hidden AVPs', l.hidden_avps ? 'yes' : '');
+            html += htmlRowText('Calls', count(l.calls));
+            html += htmlRowText('Calling Number', l.calling_number, 'mono');
+            html += htmlRowText('Called Number', l.called_number, 'mono');
+            html += htmlRowText('Data Messages', count(l.data_messages));
+            html += htmlRowText('Call Result', [l.call_result, l.call_error, l.call_message].filter(Boolean).join(' - '));
+            html += htmlRowText('Stop Result', [l.stop_result, l.stop_error, l.stop_message].filter(Boolean).join(' - '));
+            return html;
+        }
+
+        // tshark's RIP records (shark_protocols.RIP): one per sender,
+        // destination and kind of message - the routes it announced.
+        function renderRipDetails(e) {
+            const r = e.rip || {};
+            const count = n => n ? n.toLocaleString() : '';
+            let html = htmlSection('RIP Details', COLORS.EVENT.rip);
+            html += htmlRowText('Command', r.command);
+            html += htmlRowText('Version', r.version);
+            html += htmlRowText('Messages', count(r.messages));
+            html += htmlRowText('Whole Table', r.whole_table ? 'yes' : '');
+            html += htmlRowText('Requested', (r.requested || []).join(', '), 'mono');
+            if (r.command === 'request' || r.command === 'update request') html += htmlRowText('Responses', count(r.responses) || 'no response');
+            html += htmlRowText('Route Count', count(r.route_count));
+            html += htmlRow('Routes', (r.routes || []).map(escapeHtml).join('<br>'), 'mono');
+            html += htmlRowText('Withdrawn', count(r.withdrawn));
+            html += htmlRowText('Metric Changes', count(r.metric_changes));
+            html += htmlRowText('Authentication', r.authentication);
+            return html;
+        }
+
+        // tshark's tunnel records (shark_analyzer._Tunnels): one per tunnel
+        // - its type and outer endpoints - with what crossed it.
+        function renderTunnelDetails(e) {
+            const t = e.tunnel || {};
+            const count = n => n !== undefined ? n.toLocaleString() : '';
+            let html = htmlSection('Tunnel Details', COLORS.EVENT.tunnel);
+            html += htmlRowText('Type', t.type);
+            html += htmlRowText('Returns to Sender', t.returns_to_sender ? 'yes - a probe of whether this end unwraps tunnels' : '');
+            html += htmlRowText('Packets →', count(t.packets_toserver));
+            html += htmlRowText('Packets ←', count(t.packets_toclient));
+            html += htmlRowText('Bytes →', count(t.bytes_toserver));
+            html += htmlRowText('Bytes ←', count(t.bytes_toclient));
+            html += htmlRowText('Inner Flows', count(t.inner_flows));
+            html += htmlRowText('Inner Hosts', (t.inner_hosts || []).join(', '), 'mono');
+            html += htmlRowText('Start', t.start);
+            html += htmlRowText('End', t.end);
+            html += htmlRowText('Duration', t.age !== undefined ? `${t.age.toLocaleString()} s` : '');
+            return html;
+        }
+
+        // tshark's XDMCP records (shark_protocols.XDMCP): one per client and
+        // login manager - whether it offered a login screen, and to whom.
+        function renderXdmcpDetails(e) {
+            const x = e.xdmcp || {};
+            let html = htmlSection('XDMCP Details', COLORS.EVENT.xdmcp);
+            html += htmlRowText('Result', x.result);
+            html += htmlRowText('Messages', (x.messages || []).join(', '));
+            html += htmlRowText('Server Host', x.server_host_name, 'mono');
+            html += htmlRowText('Server Status', x.server_status);
+            html += htmlRow('Answers', (x.answers || []).map(escapeHtml).join('<br>'), 'mono');
+            html += htmlRowText('Responders', (x.responders || []).join(', '), 'mono');
+            html += htmlRowText('Status', x.status);
+            html += htmlRowText('Authentication', (x.authentication_names || []).join(', '));
+            html += htmlRowText('Authorization', (x.authorization_names || []).join(', '));
+            html += htmlRowText('Display Number', x.display_number !== undefined ? String(x.display_number) : '');
+            html += htmlRowText('Display Addresses', (x.display_addresses || []).join(', '), 'mono');
+            html += htmlRowText('Manufacturer Display ID', x.manufacturer_display_id, 'mono');
+            html += htmlRowText('Display Class', x.display_class);
+            html += htmlRowText('Version', x.version !== undefined ? String(x.version) : '');
+            return html;
+        }
+
+        // tshark's STUN records (shark_protocols.STUN): one per flow and
+        // method - the public addresses the server reported, a TURN relay.
+        function renderStunDetails(e) {
+            const s = e.stun || {};
+            const count = n => n !== undefined ? n.toLocaleString() : '';
+            let html = htmlSection('STUN Details', COLORS.EVENT.stun);
+            html += htmlRowText('Method', s.method);
+            html += htmlRowText('Result', s.result || 'no answer');
+            html += htmlRow('Mapped Addresses', (s.mapped_addresses || []).map(escapeHtml).join('<br>'), 'mono');
+            html += htmlRow('Relayed Addresses', (s.relayed_addresses || []).map(escapeHtml).join('<br>'), 'mono');
+            html += htmlRow('Peer Addresses', (s.peer_addresses || []).map(escapeHtml).join('<br>'), 'mono');
+            html += htmlRowText('Other Addresses', (s.other_addresses || []).concat(s.response_origin_addresses || []).join(', '), 'mono');
+            html += htmlRowText('Requests', count(s.requests));
+            html += htmlRowText('Retransmissions', count(s.retransmissions));
+            html += htmlRowText('Indications', count(s.indications));
+            html += htmlRowText('Successes', count(s.successes));
+            html += htmlRowText('Errors', count(s.errors));
+            html += htmlRowText('Error Codes', (s.error_codes || []).join(', '));
+            html += htmlRowText('Client Software', s.client_software);
+            html += htmlRowText('Server Software', s.server_software);
+            html += htmlRowText('User', s.username, 'mono');
+            html += htmlRowText('Realm', s.realm);
+            html += htmlRowText('Lifetime', s.lifetime !== undefined ? `${s.lifetime.toLocaleString()} s` : '');
+            return html;
+        }
+
+        // tshark's RADIUS records (shark_protocols.RADIUS): one per login -
+        // its rounds of challenges and the final answer - and one per
+        // accounting message.
+        function renderRadiusDetails(e) {
+            const r = e.radius || {};
+            const count = n => n !== undefined ? n.toLocaleString() : '';
+            let html = htmlSection('RADIUS Details', COLORS.EVENT.radius);
+            html += htmlRowText('Message', r.message);
+            html += htmlRowText('Result', r.result || (r.reply ? `${r.reply}, no final answer` : 'no reply'));
+            html += htmlRowText('User', r.user, 'mono');
+            html += htmlRowText('Calling Station', r.calling_station, 'mono');
+            html += htmlRowText('Called Station', r.called_station, 'mono');
+            html += htmlRowText('NAS', r.nas_identifier);
+            html += htmlRowText('NAS IP', r.nas_ip, 'mono');
+            html += htmlRowText('Port Type', r.port_type);
+            html += htmlRowText('Service Type', r.service_type);
+            html += htmlRowText('EAP Methods', (r.eap_methods || []).join(', '));
+            html += htmlRowText('Challenges', count(r.challenges));
+            html += htmlRowText('Reply Message', r.reply_message);
+            html += htmlRowText('Framed IP', r.framed_ip, 'mono');
+            html += htmlRowText('Session ID', r.session_id, 'mono');
+            html += htmlRowText('Session Time', r.session_time !== undefined ? `${r.session_time.toLocaleString()} s` : '');
+            html += htmlRowText('Bytes In', count(r.bytes_in));
+            html += htmlRowText('Bytes Out', count(r.bytes_out));
+            html += htmlRowText('Terminate Cause', r.terminate_cause);
+            html += htmlRowText('Requests', count(r.requests));
+            html += htmlRowText('Retransmissions', count(r.retransmissions));
+            html += htmlRowText('Response Time', r.response_time !== undefined ? `${r.response_time} s` : '');
+            return html;
+        }
+
+        // tshark's SOCKS records (shark_protocols.SOCKS): one per connection
+        // through the proxy - the host it was asked to reach, and its answer.
+        function renderSocksDetails(e) {
+            const s = e.socks || {};
+            let html = htmlSection('SOCKS Details', COLORS.EVENT.socks);
+            html += htmlRowText('Version', s.version);
+            html += htmlRowText('Command', s.command);
+            html += htmlRowText('Destination', s.request_name || s.request_host, 'mono');
+            html += htmlRowText('Destination Port', s.request_port !== undefined ? String(s.request_port) : '', 'mono');
+            html += htmlRowText('Status', s.status || 'no reply');
+            html += htmlRowText('Bound Address', s.bound_host, 'mono');
+            html += htmlRowText('Bound Port', s.bound_port !== undefined ? String(s.bound_port) : '', 'mono');
+            html += htmlRowText('Auth Methods Offered', (s.auth_methods || []).join(', '));
+            html += htmlRowText('Auth Method', s.auth_method);
+            html += htmlRowText('User', s.user, 'mono');
+            html += htmlRowText('Login', s.login);
+            html += htmlRowText('Tunneled', s.tunneled);
+            return html;
+        }
+
+        // tshark's DTLS records (shark_protocols.DTLS): one per connection's
+        // handshake, with the fields Suricata's tls records have.
+        function renderDtlsDetails(e) {
+            const d = e.dtls || {};
+            let html = htmlSection('DTLS Details', COLORS.EVENT.dtls);
+            html += htmlRowText('SNI', d.sni, 'mono');
+            html += htmlRow('Version', `${valueDotSpan(tlsVersionColor(d.version))}${escapeHtml(d.version || '')}`);
+            html += htmlRowText('Client Version', d.client_version && d.client_version !== d.version ? d.client_version : '');
+            html += htmlRowText('Handshake', d.handshake);
+            html += htmlRowText('Cipher Suite', d.cipher_suite, 'mono');
+            html += htmlRowText('Client ALPNs', (d.client_alpns || []).join(', '), 'mono');
+            html += htmlRowText('Server ALPNs', (d.server_alpns || []).join(', '), 'mono');
+            html += htmlRowText('SRTP Profile', d.srtp_profile || (d.srtp_profiles || []).join(', '), 'mono');
+            if (d.ja3?.hash) html += htmlRowText('JA3', d.ja3.hash, 'mono');
+            if (d.ja3s?.hash) html += htmlRowText('JA3S', d.ja3s.hash, 'mono');
+            if (d.ja4) html += htmlRowText('JA4', d.ja4, 'mono');
+            html += htmlRowText('Subject', d.subject, 'mono');
+            html += htmlRowText('Issuer', d.issuerdn, 'mono');
+            html += htmlRowText('Serial', d.serial, 'mono');
+            html += htmlRowText('SANs', (d.san || []).join(', '), 'mono');
+            html += htmlRowText('Not Before', d.notbefore);
+            html += htmlRowText('Not After', d.notafter);
+            html += htmlRowText('Fingerprint', d.fingerprint, 'mono');
+            html += htmlRowText('Cookie Exchange', d.cookie_exchange ? 'yes' : '');
+            html += htmlRowText('Alerts', (d.alerts || []).join(', '));
+            html += htmlRowText('Client Hellos', d.client_hellos ? d.client_hellos.toLocaleString() : '');
+            return html;
+        }
+
+        // tshark's TLS failure records (shark_analyzer._TLSFailures): one
+        // per TCP connection that sent an alert while it could still be read,
+        // with the certificate from Suricata's tls record of the connection.
+        function renderTlsFailureDetails(e) {
+            const t = e.tls_failure || {};
+            let html = htmlSection('TLS Failure Details', COLORS.EVENT.tls_failure);
+            html += htmlRowText('Alert', t.alert);
+            html += htmlRowText('Sent By', t.sent_by);
+            html += htmlRowText('Alerts', (t.alerts || []).length > 1 ? t.alerts.join(', ') : '');
+            html += htmlRowText('SNI', t.sni, 'mono');
+            if (t.version) html += htmlRow('Version', `${valueDotSpan(tlsVersionColor(t.version))}${escapeHtml(t.version)}`);
+            html += htmlRowText('Subject', t.subject, 'mono');
+            html += htmlRowText('Issuer', t.issuerdn, 'mono');
+            html += htmlRowText('SANs', (t.subjectaltname || []).join(', '), 'mono');
+            html += htmlRowText('Serial', t.serial, 'mono');
+            html += htmlRowText('Not Before', t.notbefore);
+            html += htmlRowText('Not After', t.notafter);
+            html += htmlRowText('Fingerprint', t.fingerprint, 'mono');
+            return html;
+        }
+
+        // tshark's syslog records (shark_protocols.Syslog): one per message.
+        function renderSyslogDetails(e) {
+            const l = e.syslog || {};
+            let html = htmlSection('Syslog Details', COLORS.EVENT.syslog);
+            html += htmlRowText('Severity', l.severity);
+            html += htmlRowText('Facility', l.facility);
+            html += htmlRowText('Host', l.hostname, 'mono');
+            html += htmlRowText('Program', l.program, 'mono');
+            html += htmlRowText('PID', l.pid, 'mono');
+            html += htmlRowText('Message ID', l.msgid, 'mono');
+            html += htmlRowText('Device Time', l.timestamp);
+            html += htmlRowText('Format', l.format);
+            html += htmlRowText('Message', l.message + (l.truncated ? ' …' : ''), 'mono', 'white-space: pre-wrap; word-break: break-word;');
+            for (const [element, params] of Object.entries(l.structured_data || {})) {
+                html += htmlRowText(element, Object.entries(params).map(([k, v]) => `${k}="${v}"`).join(' '), 'mono');
+            }
+            return html;
+        }
+
+        // tshark's DHCPv6 records (shark_protocols.DHCPv6): one per
+        // transaction - a client's message and the server's reply.
+        function renderDhcpv6Details(e) {
+            const d = e.dhcpv6 || {};
+            let html = htmlSection('DHCPv6 Details', COLORS.EVENT.dhcpv6);
+            html += htmlRowText('Message', d.message);
+            html += htmlRowText('Reply', d.reply);
+            html += htmlRowText('Result', d.status);
+            html += htmlRowText('Status Message', d.status_message);
+            html += htmlRowText('Transaction ID', d.transaction_id, 'mono');
+            html += htmlRowText('Hostname', d.hostname, 'mono');
+            html += htmlRowText('Client MAC', d.client_mac, 'mono');
+            html += htmlRowText('Client DUID', d.client_duid, 'mono');
+            html += htmlRowText('Vendor Class', d.vendor_class);
+            html += htmlRowText('Requested Addresses', (d.requested_addresses || []).join(', '), 'mono');
+            html += htmlRowText('Assigned Addresses', (d.assigned_addresses || []).join(', '), 'mono');
+            html += htmlRowText('Delegated Prefixes', (d.prefixes || []).join(', '), 'mono');
+            html += htmlRowText('Server DUID', d.server_duid, 'mono');
+            html += htmlRowText('DNS Servers', (d.dns_servers || []).join(', '), 'mono');
+            html += htmlRowText('Search Domains', (d.domain_search || []).join(', '), 'mono');
+            html += htmlRowText('Relay Link', d.link_address, 'mono');
+            html += htmlRowText('Transmissions', d.transmissions !== undefined ? d.transmissions.toLocaleString() : '');
+            return html;
+        }
+
+        // tshark's LLDP and CDP records (shark_protocols.LLDP/CDP): one per
+        // sending MAC, device and port.
+        function renderNeighborDetails(e) {
+            const lldp = e.event_type === 'lldp';
+            const n = (lldp ? e.lldp : e.cdp) || {};
+            let html = htmlSection(lldp ? 'LLDP Details' : 'CDP Details', COLORS.EVENT[e.event_type]);
+            if (lldp) {
+                html += htmlRowText('System Name', n.system_name, 'mono');
+                html += htmlRowText('Chassis ID', n.chassis_id, 'mono');
+            } else {
+                html += htmlRowText('Device ID', n.device_id, 'mono');
+                html += htmlRowText('System Name', n.system_name, 'mono');
+            }
+            html += htmlRowText('Port ID', n.port_id, 'mono');
+            html += htmlRowText('Port Description', n.port_description);
+            html += htmlRowText('Platform', n.platform);
+            html += htmlRowText(lldp ? 'Description' : 'Software', lldp ? n.system_description : n.software_version, '', 'white-space: pre-wrap; word-break: break-word;');
+            html += htmlRowText('Capabilities', (n.capabilities || []).join(', '));
+            html += htmlRowText('Management IP', (n.management_addresses || n.addresses || []).join(', '), 'mono');
+            html += htmlRowText('VLAN', n.vlan !== undefined ? String(n.vlan) : '');
+            html += htmlRowText('VLAN Names', (n.vlan_names || []).join(', '));
+            html += htmlRowText('Native VLAN', n.native_vlan !== undefined ? String(n.native_vlan) : '');
+            html += htmlRowText('Voice VLAN', n.voice_vlan !== undefined ? String(n.voice_vlan) : '');
+            html += htmlRowText('VTP Domain', n.vtp_domain, 'mono');
+            html += htmlRowText('Duplex', n.duplex);
+            html += htmlRowText('Location', n.location);
+            html += htmlRowText('Manufacturer', n.manufacturer);
+            html += htmlRowText('Model', n.model);
+            html += htmlRowText('Serial Number', n.serial_number, 'mono');
+            html += htmlRowText('Hardware', n.hardware_revision);
+            html += htmlRowText('Firmware', n.firmware_revision);
+            html += htmlRowText('Software Revision', n.software_revision);
+            html += htmlRowText('Asset ID', n.asset_id, 'mono');
+            html += htmlRowText('TTL', n.ttl !== undefined ? `${n.ttl} s` : '');
+            html += htmlRowText('Shutdowns', n.shutdowns ? n.shutdowns.toLocaleString() : '');
+            html += htmlRowText('Count', n.count !== undefined ? n.count.toLocaleString() : '');
+            html += htmlRowText('Last Seen', (n.last_seen || '').slice(0, 23).replace('T', ' '));
+            return html;
+        }
+
+        // tshark's GOOSE records (shark_protocols.GOOSE): one per state change.
+        function renderGooseDetails(e) {
+            const g = e.goose || {};
+            let html = htmlSection('GOOSE Details', COLORS.EVENT.goose);
+            html += htmlRowText('Control Block', g.gocb_ref, 'mono');
+            html += htmlRowText('Dataset', g.dataset, 'mono');
+            html += htmlRowText('GOOSE ID', g.go_id);
+            html += htmlRowText('APPID', g.appid !== undefined ? String(g.appid) : '');
+            html += htmlRowText('stNum', g.stnum !== undefined ? String(g.stnum) : '');
+            html += htmlRowText('Repeats', g.repeats !== undefined ? g.repeats.toLocaleString() : '');
+            html += htmlRowText('Anomaly', g.anomaly);
+            html += htmlRowText('Event Time', g.event_time);
+            html += htmlRowText('Config Revision', g.conf_rev !== undefined ? String(g.conf_rev) : '');
+            if (g.simulation) html += htmlRowText('Simulation', 'yes');
+            if (g.needs_commissioning) html += htmlRowText('Needs Commissioning', 'yes');
+            const changed = new Set(g.changed || []);
+            html += htmlRowText('Values', (g.values || []).map((v, i) => `${changed.has(i) ? '*' : ''}${v}`).join(', '), 'mono');
+            if (changed.size) html += htmlRowText('Changed', [...changed].map(i => `#${i + 1}`).join(', '));
+            return html;
+        }
+
+        // tshark's OPC UA records (shark_protocols.OPCUA): a connection's
+        // session, and a change (write, call, node added...).
+        function renderOpcuaDetails(e) {
+            const u = e.opcua || {};
+            let html = htmlSection('OPC UA Details', COLORS.EVENT.opcua);
+            html += htmlRowText('Endpoint', u.endpoint, 'mono');
+            html += htmlRowText('Security', [u.security_policy, u.security_mode && `mode ${u.security_mode}`].filter(Boolean).join(', '));
+            if (u.encrypted_messages) html += htmlRowText('Encrypted', `${u.encrypted_messages.toLocaleString()} messages unreadable`);
+            html += htmlRowText('Application', u.client_application);
+            html += htmlRowText('Application URI', u.client_uri, 'mono');
+            html += htmlRowText('Product URI', u.client_product, 'mono');
+            html += htmlRowText('Session', u.session_name);
+            html += htmlRowText('User Token', [u.user_token, u.user_policy && `policy ${u.user_policy}`].filter(Boolean).join(', '));
+            html += htmlRowText('User', u.username);
+            if (u.password !== undefined) html += htmlRowText('Password', u.password === '' ? '(empty)' : u.password, 'mono');
+            else if (u.password_encrypted) html += htmlRowText('Password', '(encrypted)');
+            html += htmlRowText('Activation', u.activation);
+            html += htmlRowText('Services', Object.entries(u.services || {}).map(([s, n]) => `${s} ${n.toLocaleString()}`).join(', '));
+            if (u.errors) html += htmlRowText('Errors', `${u.errors.toLocaleString()} (last: ${u.last_error || ''})`);
+            html += htmlRowText('Transport Error', u.transport_error);
+            return html;
+        }
+
+        function renderOpcuaActionDetails(e) {
+            const a = e.opcua_action || {};
+            let html = htmlSection('OPC UA Action Details', COLORS.EVENT.opcua_action);
+            html += htmlRowText('Service', a.service);
+            html += htmlRowText(a.service === 'Call' ? 'Method' : 'Node', a.node, 'mono');
+            html += htmlRowText('Object', a.object, 'mono');
+            html += htmlRowText('Parent', a.parent, 'mono');
+            html += htmlRowText('Target', a.target, 'mono');
+            html += htmlRowText('Browse Name', a.browse_name);
+            html += htmlRowText('Attribute', a.attribute);
+            html += htmlRowText('Value', a.value !== undefined ? String(a.value) : '', 'mono');
+            if (a.arguments) html += htmlRowText('Arguments', a.arguments.join(', '), 'mono');
+            // a user-management method's (a password among them) - never kept
+            if (a.arguments_redacted) html += htmlRowText('Arguments', `${a.arguments_redacted} - not kept (user management)`);
+            html += htmlRowText('Result', a.result);
+            return html;
+        }
+
+        // tshark's BACnet records (shark_protocols.BACnet): an action with
+        // its reply, a read/notification summary, a device.
+        function renderBacnetDetails(e) {
+            const b = e.bacnet || {};
+            let html = htmlSection('BACnet Details', COLORS.EVENT.bacnet);
+            html += htmlRowText('Service', b.service ? `${b.service} (${b.kind})` : '');
+            html += htmlRowText('Device', b.device);
+            html += htmlRowText('Object', b.object, 'mono');
+            html += htmlRowText('Property', b.property);
+            html += htmlRowText('Value', b.value !== undefined ? String(b.value) : '', 'mono');
+            html += htmlRowText('Range', b.range);
+            if (b.count !== undefined) {
+                html += htmlRowText('Count', b.count.toLocaleString());
+                html += htmlRowText('Last Seen', (b.last_seen || '').slice(0, 23).replace('T', ' '));
+            }
+            html += htmlRowText('State', b.state);
+            html += htmlRowText('Duration', b.duration !== undefined ? `${b.duration} min` : '');
+            if (b.password !== undefined) html += htmlRowText('Password', b.password === '' ? '(empty)' : b.password, 'mono');
+            html += htmlRowText('Result', b.result);
+            return html;
+        }
+
+        function renderBacnetPropertyDetails(e) {
+            const p = e.bacnet_property || {};
+            let html = htmlSection('BACnet Property Details', COLORS.EVENT.bacnet_property);
+            html += htmlRowText('Service', p.service);
+            html += htmlRowText('Device', p.device);
+            html += htmlRowText('Object', p.object, 'mono');
+            html += htmlRowText('Property', p.property);
+            html += htmlRowText('Count', p.count !== undefined ? p.count.toLocaleString() : '');
+            html += htmlRowText('Errors', p.errors ? p.errors.toLocaleString() : '');
+            html += htmlRowText('Last Error', p.last_error);
+            html += htmlRowText('Last Value', p.last_value !== undefined ? String(p.last_value) : '', 'mono');
+            html += htmlRowText('Last Update', (p.last_update || '').slice(0, 23).replace('T', ' '));
+            return html;
+        }
+
+        function renderBacnetDeviceDetails(e) {
+            const d = e.bacnet_device || {};
+            let html = htmlSection('BACnet Device Details', COLORS.EVENT.bacnet_device);
+            html += htmlRowText('Device', d.device !== undefined ? String(d.device) : '');
+            html += htmlRowText('Vendor', d.vendor ? `${d.vendor} (${d.vendor_id})` : (d.vendor_id !== undefined ? String(d.vendor_id) : ''));
+            html += htmlRowText('Announcements', d.announcements !== undefined ? d.announcements.toLocaleString() : '');
+            html += htmlRowText('Last Seen', (d.last_seen || '').slice(0, 23).replace('T', ' '));
+            return html;
+        }
+
+        // tshark's IEC 104 records (shark_protocols.IEC104): a control
+        // action with its replies, and a monitored point's summary.
+        function renderIec104Details(e) {
+            const c = e.iec104 || {};
+            let html = htmlSection('IEC 104 Details', COLORS.EVENT.iec104);
+            html += htmlRowText('Command', c.action);
+            html += htmlRowText('Type', c.type ? `${c.type} (${c.type_id})` : '', 'mono');
+            html += htmlRowText('Cause', c.cause);
+            html += htmlRowText('Station', c.station !== undefined ? String(c.station) : '');
+            html += htmlRowText('IOA', c.ioa !== undefined ? String(c.ioa) : '');
+            html += htmlRowText('Value', c.value !== undefined ? String(c.value) : '', 'mono');
+            if (c.test) html += htmlRowText('Test', 'yes');
+            html += htmlRowText('Result', c.result);
+            if (c.response) html += htmlRowText('Reply', `${c.response.cause}${c.response.negative ? ' (negative)' : ''}`);
+            return html;
+        }
+
+        function renderIec104PointDetails(e) {
+            const p = e.iec104_point || {};
+            let html = htmlSection('IEC 104 Point Details', COLORS.EVENT.iec104_point);
+            html += htmlRowText('Station', p.station !== undefined ? String(p.station) : '');
+            html += htmlRowText('IOA', p.ioa !== undefined ? String(p.ioa) : '');
+            html += htmlRowText('Type', p.type ? `${p.type} (${p.type_id})` : '', 'mono');
+            html += htmlRowText('Updates', p.updates !== undefined ? p.updates.toLocaleString() : '');
+            html += htmlRowText('Causes', Object.entries(p.causes || {}).map(([c, n]) => `${c} ${n.toLocaleString()}`).join(', '));
+            html += htmlRowText('Last Value', p.last_value !== undefined ? String(p.last_value) : '', 'mono');
+            html += htmlRowText('Last Update', (p.last_update || '').slice(0, 23).replace('T', ' '));
+            return html;
+        }
+
+        // tshark's Telnet records (shark_protocols.Telnet): one per session.
+        function renderTelnetDetails(e) {
+            const t = e.telnet || {};
+            let html = htmlSection('Telnet Details', COLORS.EVENT.telnet);
+            html += htmlRowText('Banner', t.banner);
+            html += htmlRowText('User', t.username, 'mono');
+            html += htmlRowText('Password', t.password, 'mono');
+            html += htmlRowText('Login', t.login);
+            html += htmlRowText('Earlier Failed Logins', t.earlier_failures ? String(t.earlier_failures) : '');
+            // the lines typed after logging in, one per line
+            if ((t.commands || []).length) html += htmlRow('Commands', escapeHtml(t.commands.join('\n')), 'mono', 'white-space: pre-wrap');
+            return html;
+        }
+
+        // tshark's SSDP records (shark_protocols.SSDP).
+        function renderSsdpDetails(e) {
+            const sp = e.ssdp || {};
+            let html = htmlSection('SSDP Details', COLORS.EVENT.ssdp);
+            html += htmlRowText('Type', sp.type);
+            html += htmlRowText('Method', sp.method);
+            html += htmlRowText('Status', sp.status);
+            html += htmlRowText('Search Target', sp.search_target, 'mono');
+            html += htmlRowText('Notification Type', sp.notification_type, 'mono');
+            html += htmlRowText('Notification Subtype', sp.notification_sub_type, 'mono');
+            html += htmlRowText('USN', sp.usn, 'mono');
+            html += htmlRowText('Location', sp.location, 'mono');
+            html += htmlRowText('Server', sp.server);
+            html += htmlRowText('User Agent', sp.user_agent);
+            html += htmlRowText('MX', sp.mx);
             return html;
         }
 
@@ -3673,6 +4474,7 @@
 
         function renderFlowDetails(e) {
             let html = htmlSection('Flow Details', COLORS.EVENT.flow);
+            if (e.shark) return html + renderSharkFlowDetails(e);
             html += htmlRowText('State', e.flow?.state);
             // An age of 0 is real (not missing) - only a missing one is blank.
             html += htmlRowText('Age', e.flow?.age == null ? '' : `${e.flow.age} seconds`);
@@ -3681,6 +4483,32 @@
             html += htmlRowText('Bytes to Server', (e.flow?.bytes_toserver || 0).toLocaleString());
             html += htmlRowText('Bytes to Client', (e.flow?.bytes_toclient || 0).toLocaleString());
             html += htmlRowText('Alerted', e.flow?.alerted ? 'Yes' : 'No');
+            return html;
+        }
+
+        // Whether a tshark flow's server answered (shark_analyzer._Flow.answered):
+        // 'ICMP error only' is a probe of a closed UDP port.
+        function answeredCell(answered) {
+            if (!answered) return '<td></td>';
+            const color = answered === 'yes' ? 'var(--badge-success-text)' : 'var(--text-muted)';
+            return `<td>${valueDotSpan(color)}${escapeHtml(answered)}</td>`;
+        }
+
+        // A tshark flow (shark_analyzer.py): no Suricata state or
+        // alerts, but every protocol tshark found in the flow, with how many
+        // packets carried each.
+        function renderSharkFlowDetails(e) {
+            let html = htmlRowText('App Proto', e.app_proto, 'mono');
+            html += htmlRowText('Answered', e.shark?.answered);
+            html += htmlRowText('Age', e.flow?.age == null ? '' : `${e.flow.age} seconds`);
+            html += htmlRowText('Pkts to Server', (e.flow?.pkts_toserver || 0).toLocaleString());
+            html += htmlRowText('Pkts to Client', (e.flow?.pkts_toclient || 0).toLocaleString());
+            html += htmlRowText('Bytes to Server', (e.flow?.bytes_toserver || 0).toLocaleString());
+            html += htmlRowText('Bytes to Client', (e.flow?.bytes_toclient || 0).toLocaleString());
+            const protocols = Object.entries(e.shark?.protocols || {});
+            if (protocols.length) {
+                html += htmlRowText('Protocols', protocols.map(([name, n]) => `${name} (${n} packet${n === 1 ? '' : 's'})`).join(', '), 'mono');
+            }
             return html;
         }
 
@@ -3967,6 +4795,37 @@
             alert: renderAlertDetails,
             protocol_decode: renderProtocolDecodeDetails,
             dns: renderDnsDetails,
+            llmnr: renderLlmnrDetails,
+            nbns: renderNbnsDetails,
+            s7comm: renderS7commDetails,
+            ssdp: renderSsdpDetails,
+            telnet: renderTelnetDetails,
+            iec104: renderIec104Details,
+            bacnet: renderBacnetDetails,
+            opcua: renderOpcuaDetails,
+            goose: renderGooseDetails,
+            browser: renderBrowserDetails,
+            dhcpv6: renderDhcpv6Details,
+            syslog: renderSyslogDetails,
+            dtls: renderDtlsDetails,
+            tls_failure: renderTlsFailureDetails,
+            socks: renderSocksDetails,
+            radius: renderRadiusDetails,
+            stun: renderStunDetails,
+            coap: renderCoapDetails,
+            slp: renderSlpDetails,
+            ipmi: renderIpmiDetails,
+            l2tp: renderL2tpDetails,
+            rip: renderRipDetails,
+            tunnel: renderTunnelDetails,
+            xdmcp: renderXdmcpDetails,
+            rpc: renderRpcDetails,
+            lldp: renderNeighborDetails,
+            cdp: renderNeighborDetails,
+            opcua_action: renderOpcuaActionDetails,
+            bacnet_property: renderBacnetPropertyDetails,
+            bacnet_device: renderBacnetDeviceDetails,
+            iec104_point: renderIec104PointDetails,
             dnp3: renderDnp3Details,
             http: renderHttpDetails,
             modbus: renderModbusDetails,
@@ -3983,7 +4842,8 @@
 
         function formatEvent(e) {
             let html = _formatEventCommon(e);
-            const renderer = EVENT_RENDERERS[e.event_type];
+            // tshark's connection rows (conn_<protocol>) are flows
+            const renderer = EVENT_RENDERERS[isConnectionType(e.event_type) ? 'flow' : e.event_type];
             if (renderer) {
                 html += renderer(e);
             }
@@ -4059,6 +4919,8 @@
             document.getElementById('sections').innerHTML = '';
             document.getElementById('filterBarContainer').innerHTML = '';
             document.getElementById('filterBarContainer').style.display = 'none';
+            document.getElementById('tsharkLineContainer').innerHTML = '';
+            showAnalysisWarnings([]);
             document.querySelectorAll('.file-info-card').forEach(c => c.remove());
             const fileInfoContainer = document.getElementById('fileInfoContainer');
             if (fileInfoContainer) {
@@ -4167,8 +5029,7 @@
         }
 
         // Backing count for the Danger Zone's Delete All button
-        // (openDeleteAllAnalyses(settingsAnalysisCount) in the HTML reads
-        // this by name at click time, not by the value baked in at
+        // (the 'open-delete-all-analyses' action reads this by name at click time, not by the value baked in at
         // render time, since the real count only arrives after an async
         // fetch - see showSettingsModal()'s own fetch below).
         let settingsAnalysisCount = 0;
@@ -4205,6 +5066,16 @@
                 uploadInput.max = maxUploadMB;
                 uploadHint.textContent = `Default: ${CONFIG.DEFAULT_UPLOAD_SIZE_MB.toLocaleString()} MB. Server maximum: ${maxUploadMB.toLocaleString()} MB.`;
             }).catch(() => {});
+            // The tshark switch is the server's, not this browser's: shown
+            // as the server has it, and only saved if it changes.
+            const sharkInput = document.getElementById('sharkEnabledInput');
+            document.getElementById('sharkSettingError').style.display = 'none';
+            sharkInput.disabled = true;
+            fetch('/api/shark-settings').then(r => r.json()).then(data => {
+                sharkInput.checked = data.enabled !== false;
+                sharkInput.dataset.saved = String(sharkInput.checked);
+                sharkInput.disabled = false;
+            }).catch(() => { sharkInput.disabled = false; });
             renderCustomLookupSitesSection();
             renderSettingsDeleteAllSection();
             document.getElementById('settingsModal').classList.add('active');
@@ -4366,6 +5237,7 @@
         }
 
         async function saveSettings() {
+            const previousQueryLimit = getUserQueryLimit();
             const queryLimitResult = _validateAndMaybeSaveNumberSetting(
                 'maxQueryLimitInput', 'settingsError', 'socrates_maxQueryLimit',
                 1000, 'Please enter a number of at least 1,000.', 500000
@@ -4376,9 +5248,12 @@
             );
 
             // refreshAnalysisData() only matters for the query-limit field --
-            // upload size has no bearing on already-loaded analysis data.
-            if (queryLimitResult === 'saved') {
-                if (currentMd5) {
+            // upload size has no bearing on already-loaded analysis data -
+            // and only for an analysis on screen: from the welcome screen
+            // (currentMd5 still set) it would draw the last analysis's cards
+            // and Sankey over it.
+            if (queryLimitResult === 'saved' && getUserQueryLimit() !== previousQueryLimit) {
+                if (currentMd5 && !isWelcomeScreen()) {
                     const saveBtn = document.getElementById('settingsSaveBtn');
                     saveBtn.disabled = true;
                     try {
@@ -4389,9 +5264,31 @@
                 }
             }
 
-            if (queryLimitResult === 'saved' && uploadSizeResult === 'saved') {
+            const sharkResult = await saveSharkSetting();
+
+            if (queryLimitResult === 'saved' && uploadSizeResult === 'saved' && sharkResult !== 'error') {
                 closeSettingsModal();
             }
+        }
+
+        // Saves the tshark switch if it changed, then refreshes the open
+        // analysis's tshark line.
+        async function saveSharkSetting() {
+            const input = document.getElementById('sharkEnabledInput');
+            const errorEl = document.getElementById('sharkSettingError');
+            if (input.disabled || input.dataset.saved === String(input.checked)) return 'unchanged';
+            try {
+                const resp = await fetch('/api/shark-settings', {method: 'POST', headers: {'Content-Type': 'application/json'},
+                                                                 body: JSON.stringify({enabled: input.checked})});
+                if (!resp.ok) throw new Error();
+            } catch (e) {
+                errorEl.textContent = 'Could not save the tshark setting. Check that the server is running and try again.';
+                errorEl.style.display = 'block';
+                return 'error';
+            }
+            input.dataset.saved = String(input.checked);
+            if (currentMd5 && document.getElementById('tsharkLineStatus')) await refreshSharkStatus(currentMd5);
+            return 'saved';
         }
 
         function showAnalysisUI() {
@@ -4409,6 +5306,7 @@
         async function showWelcome() {
             document.title = 'SO-CRATES';
             closeAllModals();
+            stopSharkPolling();
             if (window.location.search.includes('file=') || window.location.search.includes('pcap=')) {
                 history.replaceState({}, '', window.location.pathname);
             }
@@ -4525,7 +5423,11 @@
         // there's no longer an analysis page under them).
         function closeAllModals() {
             closeMenu();
-            closeHelpModal();
+            // Only if it's open: closing it saves the welcome screen's "show
+            // again" checkbox, which isn't synced until Help is shown - an
+            // Escape on the welcome screen would otherwise undo "don't show
+            // this again" (see closeOtherMenuModals)
+            if (document.getElementById('helpModal')?.classList.contains('active')) closeHelpModal();
             closeThemesModal();
             closeSettingsModal();
             closeErrorModal();
@@ -4728,6 +5630,7 @@
             sankey: '#sankeyPanel > .section-toggle-bar',
             agg: '#aggregations .section-toggle-bar',
             dnsHeuristicsInfo: '#section-dns_heuristics .dns-heuristics-info-toggle',
+            findingsInfo: '#section-findings .findings-info-toggle',
         };
 
         // Groups the currently-visible aggregation tables into visual rows
@@ -4827,6 +5730,7 @@
                 document.querySelector(TOGGLE_BAR_SELECTORS.sankey),
                 document.querySelector(TOGGLE_BAR_SELECTORS.agg),
                 document.querySelector(TOGGLE_BAR_SELECTORS.dnsHeuristicsInfo),
+                document.querySelector(TOGGLE_BAR_SELECTORS.findingsInfo),
             ];
             const aggRows = aggTableAndPaginationItems();
             // Positioned right after the filter chips, matching where
@@ -4945,7 +5849,7 @@
         new MutationObserver(reapplyToggleBarSelection).observe(document.getElementById('sections'), { childList: true, subtree: true });
 
         function navigateStatTabs(direction) {
-            const cards = Array.from(document.querySelectorAll('#statsGrid .stat-card'));
+            const cards = Array.from(document.querySelectorAll('#statsGrid .stat-card:not(.stat-card-collapsed)'));
             if (cards.length === 0) return false;
             // Continue from a live preview selection if one exists, not
             // necessarily .tab-active - repeated Left/Right (like Down/Up
@@ -5018,20 +5922,27 @@
         // never drifts out of sync with reality once a real click commits
         // a different tab.
         function activeColumnStatCards() {
-            const referenceCard = (verticalNavSelection && verticalNavSelection.isConnected && verticalNavSelection.classList.contains('stat-card'))
+            let referenceCard = (verticalNavSelection && verticalNavSelection.isConnected && verticalNavSelection.classList.contains('stat-card'))
                 ? verticalNavSelection
                 : document.querySelector('.stat-card.tab-active');
             if (!referenceCard) return [];
-            const cards = Array.from(document.querySelectorAll('#statsGrid .stat-card'));
+            const cards = Array.from(document.querySelectorAll('#statsGrid .stat-card:not(.stat-card-collapsed)'));
             const columnCount = statsGridColumnCount();
-            const referenceIndex = cards.indexOf(referenceCard);
-            if (referenceIndex === -1) return [];
-            const columnStart = referenceIndex % columnCount;
-            const column = [];
-            for (let i = columnStart; i < cards.length; i += columnCount) {
-                column.push(cards[i]);
+            // The open tab's card in a section the viewer collapsed: the
+            // grid is still reachable, from its first card showing
+            if (!cards.includes(referenceCard) && referenceCard.classList.contains('stat-card-collapsed')) referenceCard = cards[0];
+            if (!cards.includes(referenceCard)) return [];
+            // Each section's cards start a fresh row under its heading (see
+            // STAT_GROUPS), so their columns count from the section's first
+            const place = new Map();
+            let n = 0;
+            for (const el of document.getElementById('statsGrid').children) {
+                if (el.classList.contains('stats-grid-heading')) n = 0;
+                else if (el.classList.contains('stat-card') && !el.classList.contains('stat-card-collapsed')) place.set(el, n++);
             }
-            return column;
+            const columnOf = c => place.get(c) % columnCount;
+            const column = columnOf(referenceCard);
+            return cards.filter(c => columnOf(c) === column);
         }
 
         // True for the controls that behave as one horizontal group within
@@ -5245,6 +6156,7 @@
                 : verticalNavSelection.matches(TOGGLE_BAR_SELECTORS.sankey) ? 'sankey'
                 : verticalNavSelection.matches(TOGGLE_BAR_SELECTORS.agg) ? 'agg'
                 : verticalNavSelection.matches(TOGGLE_BAR_SELECTORS.dnsHeuristicsInfo) ? 'dnsHeuristicsInfo'
+                : verticalNavSelection.matches(TOGGLE_BAR_SELECTORS.findingsInfo) ? 'findingsInfo'
                 : null;
             verticalNavSelection.classList.add('keyboard-selected');
             scrollKeyboardSelectionIntoView(verticalNavSelection);
@@ -5554,7 +6466,7 @@
                 // ever look at code, never label.
                 code: `${theme.label.toLowerCase()} theme`,
                 label: `${theme.label} theme`,
-                action: () => { closeAutocompleteModal(); setTheme(key); showToast(`Switched to ${theme.label} theme.`); },
+                action: () => { closeAutocompleteModal(); setTheme(key); showToast(`Switched to ${theme.label} theme`); },
             })),
         ];
 
@@ -5586,7 +6498,7 @@
             autocompleteNavSelection = null;
         }
 
-        // Only letters/digits - the codes are all-alphanumeric, and this
+        // Only letters/digits - every command starts with one, and this
         // doubles as the trigger-key test (see the keydown handler below):
         // any bare letter/digit typed outside a text field, with nothing
         // else already open, opens the palette pre-seeded with that
@@ -5761,10 +6673,10 @@
                 showHelpModal();
             }
             // '<'/'>' (not the 't' key formerly used here, and not arrow
-            // keys either) - 't' collided with typing several of the
-            // app's own theme cheat codes (e.g. "retro", "digit" both
-            // contain a 't'), toggling the theme on every matching
-            // keystroke while the cheat code was still being typed.
+            // keys either) - 't' collided with typing theme names into the
+            // command palette (e.g. "retro", "digital" both contain a 't'),
+            // toggling the theme on every matching keystroke while the name
+            // was still being typed.
             // Arrow keys are reserved for real in-app navigation (stat
             // tabs, sample buttons, table rows), so this uses '<'/'>'
             // instead - reads naturally as previous/next (same
@@ -5820,7 +6732,10 @@
                     e.preventDefault();
                 }
             }
-            if (e.key === 'Enter' && (isNavigableKeyContext(e) || isAutocompleteModalActive())) {
+            // Enter on a focused section heading's button is the button's
+            // own (it toggles the section), not the arrow keys' selection's
+            if (e.key === 'Enter' && (isNavigableKeyContext(e) || isAutocompleteModalActive())
+                && !(e.target.closest && e.target.closest('.stats-grid-heading-toggle'))) {
                 if (activateKeyboardSelection()) {
                     e.preventDefault();
                 }
@@ -5919,7 +6834,7 @@
                 const n = result.additionalMd5s.length;
                 showToast(
                     `${n} additional file${n === 1 ? '' : 's'} found in the ZIP ${n === 1 ? 'is' : 'are'} also being analyzed`,
-                    { sticky: true, actionLabel: 'View Recent Analyses', onAction: () => showWelcome() }
+                    { sticky: true, actionLabel: 'View Previous Analyses', onAction: () => showWelcome() }
                 );
             }
         }
@@ -6130,7 +7045,7 @@
             // that button was removed in favor of this one label reflecting
             // expanded/collapsed state.
             const sourceLink = source
-                ? `<a href="${source.url}" target="_blank" rel="noopener noreferrer" style="color: var(--accent); text-decoration: none; font-size: 0.8rem; margin-left: 6px;">(${source.label})</a>`
+                ? `<a href="${escapeHtml(source.url)}" target="_blank" rel="noopener noreferrer" style="color: var(--accent); text-decoration: none; font-size: 0.8rem; margin-left: 6px;">(${escapeHtml(source.label)})</a>`
                 : `<button data-action="toggle-suricata-sources" style="background: none; color: var(--accent); border: none; padding: 0; cursor: pointer; font-size: 0.8rem; margin-left: 6px;">(${suricataSourcesExpanded ? 'Hide Rulesets' : 'Enable/Disable Rulesets'})</button>`;
             return `
                 <div style="${sectionDivider}">
@@ -6204,7 +7119,7 @@
                             <span class="theme-switch-slider"></span>
                         </span>
                         <span>${escapeHtml(src.label)}</span>
-                        <a href="${src.url}" target="_blank" rel="noopener noreferrer" style="color: var(--text-muted); font-size: 0.75rem; text-decoration: none;" data-action="stop-propagation">(source)</a>
+                        <a href="${escapeHtml(src.url)}" target="_blank" rel="noopener noreferrer" style="color: var(--text-muted); font-size: 0.75rem; text-decoration: none;" data-action="stop-propagation">(source)</a>
                         ${noteHtml}
                     </label>`;
             }).join('');
@@ -6342,9 +7257,8 @@
                 .sort(function(a, b) { return a - b; })[0] ?? null;
             const sigmaText = `${formatRuleCount(sigmaTotalCount)} — updated ${formatDateSpan(sigmaUpdated, t)}`;
             // Ordered shortest-to-longest output (YARA/Sigma are a couple
-            // lines; Suricata's suricata-update log can run to dozens of
-            // lines) so the two quick summaries are visible without
-            // scrolling past the long, variable-length Suricata log first.
+            // lines; Suricata's has a line per rule source) so the two quick
+            // summaries are visible without scrolling past Suricata's first.
             return (
                 renderRuleSection('yara', RULESET_LABELS.yara, yaraText, status.yara, false) +
                 renderRuleSection('sigma', RULESET_LABELS.sigma, sigmaText, status.sigma, false) +
@@ -6482,8 +7396,8 @@
 
         // expandSuricataSources: true opens the modal with the sources
         // picker already expanded (e.g. the welcome help table's "Multiple
-        // Rulesets" link) rather than requiring an extra click on "(Show
-        // Rulesets)" once the modal is already open. Must be set before
+        // Rulesets" link) rather than requiring an extra click on
+        // "(Enable/Disable Rulesets)" once the modal is already open. Must be set before
         // refreshRulesModal()'s first render below, not after.
         async function showRulesModal(expandSuricataSources) {
             closeOtherMenuModals('rulesModal');
@@ -6520,11 +7434,8 @@
                 body.sources = Object.keys(suricataSourceSelection).filter(k => suricataSourceSelection[k]);
                 body.showProtocolDecodeAlerts = showProtocolDecodeAlerts;
             }
-            await fetch('/api/update-rules', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(body),
-            });
+            // (refreshed either way - it shows an update already under way)
+            await postJsonOrToast('/api/update-rules', body, 'Starting the rules update');
             await refreshRulesModal();
             // Only (re)start polling if the modal is still open - closing it
             // (Escape/backdrop/close button) while this fetch/refresh was
@@ -6585,7 +7496,39 @@
             anomaly: 'Anomalies',
             protocol_decode: 'Decoder Alerts',
             dns: 'DNS Queries',
+            llmnr: 'LLMNR',
+            nbns: 'NBNS',
+            s7comm: 'S7comm',
+            ssdp: 'SSDP',
+            telnet: 'Telnet',
+            iec104: 'IEC 104',
+            bacnet: 'BACnet',
+            opcua: 'OPC UA',
+            goose: 'GOOSE',
+            browser: 'Windows Browser',
+            dhcpv6: 'DHCPv6',
+            syslog: 'Syslog',
+            dtls: 'DTLS',
+            tls_failure: 'TLS Failures',
+            rpc: 'ONC RPC',
+            socks: 'SOCKS',
+            radius: 'RADIUS',
+            stun: 'STUN',
+            coap: 'CoAP',
+            slp: 'SLP',
+            ipmi: 'IPMI',
+            l2tp: 'L2TP',
+            rip: 'RIP',
+            tunnel: 'Tunnel',
+            xdmcp: 'XDMCP',
+            lldp: 'LLDP',
+            cdp: 'CDP',
+            opcua_action: 'OPC UA Actions',
+            bacnet_property: 'BACnet Properties',
+            bacnet_device: 'BACnet Devices',
+            iec104_point: 'IEC 104 Points',
             dns_heuristics: 'DNS Heuristics',
+            findings: 'Findings',
             email: 'Emails',
             filealerts: 'File Alerts',
             fileinfo: 'File Info',
@@ -6873,6 +7816,7 @@
 
         function getColumnsForType(eventType) {
             if (isEmailAnalysisMode && EMAIL_MODE_COLUMNS[eventType]) return EMAIL_MODE_COLUMNS[eventType];
+            if (isConnectionType(eventType)) return TSHARK_FLOW_COLUMNS;
             switch(eventType) {
                 case 'alert':
                 case 'protocol_decode':
@@ -6952,7 +7896,68 @@
                 case 'pop3':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Command', 'Args', 'Status'];
                 case 'mdns':
+                case 'llmnr':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Query', 'Type'];
+                case 'nbns':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Opcode', 'NetBIOS Name', 'Service', 'Address'];
+                case 's7comm':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Type', 'Function', 'Area', 'Error'];
+                case 'ssdp':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Method', 'Search Target', 'Location', 'Server'];
+                case 'telnet':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Banner', 'User', 'Password', 'Login'];
+                case 'iec104':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Command', 'Station', 'IOA', 'Value', 'Result'];
+                case 'bacnet':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Service', 'Object', 'Property', 'Value', 'Password', 'Result'];
+                case 'browser':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Message', 'NetBIOS Name', 'Workgroup', 'Windows', 'Roles', 'Count'];
+                case 'rpc':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Program', 'Version', 'Procedure', 'Reply', 'Machine Name'];
+                case 'dtls':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'SNI / Host', 'Version', 'Handshake', 'Subject', 'JA4'];
+                case 'coap':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Method', 'URI', 'Query', 'Response Code', 'Content Format', 'Type'];
+                case 'xdmcp':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Result', 'Server Host', 'Server Status', 'Messages', 'Display Address', 'Authentication', 'Authorization'];
+                case 'tunnel':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Tunnel Type', 'Tunnel Packets →', 'Tunnel Packets ←', 'Inner Flows', 'Inner Host', 'Returns to Sender'];
+                case 'rip':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Command', 'Version', 'Route Count', 'Route', 'Withdrawn', 'Metric Changes', 'Authentication'];
+                case 'l2tp':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Client Host', 'Vendor', 'Firmware', 'Server Host', 'State', 'Result', 'Calls'];
+                case 'ipmi':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Requests', 'Result', 'IPMI Versions', 'Auth Types', 'Privilege', 'Cipher', 'Weaknesses'];
+                case 'slp':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Function', 'Service Type', 'Scopes', 'URL', 'Response', 'Status', 'Version'];
+                case 'stun':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Method', 'Result', 'Requests', 'Mapped Address', 'Relayed Address', 'Software', 'User'];
+                case 'radius':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Message', 'User', 'Calling Station', 'NAS', 'Result', 'EAP Method', 'Reply Message'];
+                case 'socks':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Version', 'Command', 'Destination', 'Destination Port', 'Status', 'User', 'Tunneled'];
+                case 'syslog':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Severity', 'Facility', 'Host', 'Program', 'Message'];
+                case 'tls_failure':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Alert', 'Sent By', 'SNI / Host', 'Subject', 'Issuer'];
+                case 'dhcpv6':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Message', 'Reply', 'Hostname', 'Client MAC', 'Assigned IP', 'Vendor Class', 'Result'];
+                case 'lldp':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'System Name', 'Chassis ID', 'Port ID', 'Capabilities', 'Management IP', 'VLAN', 'Count'];
+                case 'cdp':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Device ID', 'Port ID', 'Platform', 'Capabilities', 'Management IP', 'Native VLAN', 'Count'];
+                case 'goose':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Control Block', 'Dataset', 'stNum', 'Repeats', 'Anomaly'];
+                case 'opcua':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Endpoint', 'Security', 'Application', 'User', 'Password', 'Activation'];
+                case 'opcua_action':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Service', 'Node', 'Value', 'Result'];
+                case 'bacnet_property':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Service', 'Object', 'Property', 'Count', 'Errors', 'Last Value'];
+                case 'bacnet_device':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Device', 'Vendor', 'Announcements'];
+                case 'iec104_point':
+                    return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Station', 'IOA', 'Type', 'Updates', 'Last Value'];
                 case 'ldap':
                     return ['Time', 'Protocol', 'Source IP', 'Source Port', 'Dest IP', 'Dest Port', 'Operation', 'Message ID', 'Result Code'];
                 case 'arp':
@@ -7145,7 +8150,7 @@
             let row = '';
             let colSpan = 6;
 
-            switch(etype) {
+            switch(isConnectionType(etype) ? 'flow' : etype) {
                 case 'alert':
                 case 'protocol_decode':
                     const sig = e.alert?.signature || 'N/A';
@@ -7198,8 +8203,15 @@
                     const alerted = e.flow?.alerted || false;
                     const alertedColor = alerted ? 'var(--badge-danger-text)' : 'var(--badge-success-text)';
                     const alertedText = alerted ? 'Yes' : 'No';
+                    const countCells = `<td>${escapeHtml(String(pktsTs.toLocaleString()))}</td><td>${escapeHtml(String(pktsTc.toLocaleString()))}</td><td>${escapeHtml(String(bytesTs.toLocaleString()))}</td><td>${escapeHtml(String(bytesTc.toLocaleString()))}</td>`;
+                    // Same columns as getColumnsForType('flow') - see there.
+                    // A flow from tshark (e.shark: a connection row) has
+                    // its protocol where Suricata's has state and alerts.
+                    const tsharkFlow = !!e.shark;
                     colSpan = 12;
-                    row = rowPrefixCells(e) + `<td>${escapeHtml(String(pktsTs.toLocaleString()))}</td><td>${escapeHtml(String(pktsTc.toLocaleString()))}</td><td>${escapeHtml(String(bytesTs.toLocaleString()))}</td><td>${escapeHtml(String(bytesTc.toLocaleString()))}</td><td>${escapeHtml(state)}</td><td>${valueDotSpan(alertedColor)}${escapeHtml(alertedText)}</td></tr>`;
+                    row = tsharkFlow
+                        ? rowPrefixCells(e) + `<td class="mono">${escapeHtml(e.app_proto || '')}</td>` + answeredCell(e.shark.answered) + countCells + '</tr>'
+                        : rowPrefixCells(e) + countCells + `<td>${escapeHtml(state)}</td><td>${valueDotSpan(alertedColor)}${escapeHtml(alertedText)}</td></tr>`;
                     break;
                 case 'fileinfo':
                     const filename = e.fileinfo?.filename || '';
@@ -7397,6 +8409,52 @@
                     const mdQuery = md.queries?.[0] || {};
                     colSpan = 8;
                     row = rowPrefixCells(e) + `<td class="mono">${escapeHtml(mdQuery.rrname || '')}</td><td>${valueDotSpan(DOT_COLORS.DNS_TYPE[(mdQuery.rrtype || '').toUpperCase()])}${escapeHtml(mdQuery.rrtype || '')}</td></tr>`;
+                    break;
+                }
+                case 'llmnr': {
+                    const lq = e.llmnr?.queries?.[0] || {};
+                    colSpan = 8;
+                    row = rowPrefixCells(e) + `<td class="mono">${escapeHtml(lq.rrname || '')}</td><td>${valueDotSpan(DOT_COLORS.DNS_TYPE[(lq.rrtype || '').toUpperCase()])}${escapeHtml(lq.rrtype || '')}</td></tr>`;
+                    break;
+                }
+                case 's7comm':
+                case 'ssdp':
+                case 'telnet':
+                case 'iec104':
+                case 'iec104_point':
+                case 'bacnet':
+                case 'bacnet_property':
+                case 'bacnet_device':
+                case 'opcua':
+                case 'opcua_action':
+                case 'goose':
+                case 'browser':
+                case 'lldp':
+                case 'cdp':
+                case 'dhcpv6':
+                case 'syslog':
+                case 'dtls':
+                case 'tls_failure':
+                case 'rpc':
+                case 'socks':
+                case 'radius':
+                case 'stun':
+                case 'coap':
+                case 'slp':
+                case 'ipmi':
+                case 'l2tp':
+                case 'rip':
+                case 'tunnel':
+                case 'xdmcp': {
+                    const cols = getColumnsForType(etype).slice(6);
+                    colSpan = cols.length + 6;
+                    row = rowPrefixCells(e) + cols.map(col => `<td${['Search Target', 'Location', 'User', 'Password', 'Chassis ID', 'Port ID', 'Device ID', 'Management IP', 'Hostname', 'Client MAC', 'Assigned IP', 'Host', 'Program', 'Message', 'SNI / Host', 'Subject', 'JA4', 'Machine Name', 'Destination', 'Destination Port', 'Calling Station', 'Mapped Address', 'Relayed Address', 'URI', 'Query', 'Service Type', 'Scopes', 'URL', 'Client Host', 'Firmware', 'Server Host', 'Route', 'Inner Host', 'Display Address', 'Issuer'].includes(col) ? ' class="mono"' : ''}>${escapeHtml(extractValue(e, col))}</td>`).join('') + '</tr>';
+                    break;
+                }
+                case 'nbns': {
+                    colSpan = 10;
+                    row = rowPrefixCells(e) + ['Opcode', 'NetBIOS Name', 'Service', 'Address']
+                        .map((col, i) => `<td${i === 1 || i === 3 ? ' class="mono"' : ''}>${escapeHtml(extractValue(e, col))}</td>`).join('') + '</tr>';
                     break;
                 }
                 case 'ldap': {
@@ -7999,7 +9057,7 @@
         // to cut off.
         const DNS_HEURISTICS_MIN_ENTROPY_PREFIX_LENGTH = 10;
         const DNS_HEURISTICS_ENTROPY_THRESHOLD = 3.5;
-        // Below random-uniform-lowercase's own expected ~19% (5/26) and
+        // Just above random-uniform-lowercase's own expected ~19% (5/26) and
         // comfortably below ordinary English's ~30-40% - see
         // vowelRatio's own comment for why this, not a digit-presence
         // check, is what actually separates "furtheringthemagic" (0.33)
@@ -8296,6 +9354,231 @@
             const events = tabDataCache['dns'] || [];
             const items = computeDnsHeuristics(events);
             buildDnsHeuristicsSectionContent('section-dns_heuristics', items);
+        }
+
+        // Findings: what the protocol records show is worth a look - a
+        // weakness, a control action, a probe - from every protocol in one
+        // list (see findings.py, which holds the rules). A rule's matches
+        // come grouped: the same detail on the same server is one row,
+        // with how many records and source hosts it covers. Like DNS
+        // Heuristics, a derived view: its rows come from /api/findings, not
+        // /api/events, and are kept in tabDataCache.findings so a column
+        // sort (sortCurrentTable's ensureCappedBatch) finds them already
+        // there. A row of one record expands to its details; a row of
+        // several, to a list of its records (loadFindingMembers), each of
+        // which expands to its own.
+        const FINDING_COLUMNS = ['Severity', 'Finding', 'Detail', 'Type', 'Source', 'Destination', 'Records', 'Time'];
+        const FINDING_SEVERITY_RANK = { high: 0, medium: 1, low: 2 };
+        const FINDING_SEVERITY_COLORS = { high: 'var(--badge-danger-text)', medium: 'var(--badge-warning-text)', low: 'var(--text-muted)' };
+        let findingsRules = [];
+
+        function findingEndpoint(ip, port) {
+            if (!ip) return '';
+            if (!port) return ip;
+            return ip.includes(':') ? `[${ip}]:${port}` : `${ip}:${port}`;
+        }
+
+        function extractFindingValue(item, col) {
+            const e = item.event;
+            switch (col) {
+                // The rank, so a sort puts high before medium before low
+                case 'Severity': return FINDING_SEVERITY_RANK[item.severity];
+                case 'Finding': return item.title;
+                case 'Detail': return item.detail;
+                case 'Type': return eventTypeLabel(e.event_type || '');
+                case 'Source': return findingSource(item);
+                case 'Destination': return findingEndpoint(e.dest_ip, e.dest_port);
+                case 'Records': return item.count || 1;
+                case 'Time': return (item.first || e.timestamp || '').slice(0, 19);
+                default: return '';
+            }
+        }
+
+        // A group's source: its one host (and, for one record, its port),
+        // or how many hosts
+        function findingSource(item) {
+            const e = item.event;
+            if ((item.sources || 1) > 1) return `${item.sources} hosts`;
+            return (item.count || 1) > 1 ? (e.src_ip || '') : findingEndpoint(e.src_ip, e.src_port);
+        }
+
+        function findingTimeSpan(item) {
+            const first = (item.first || '').slice(0, 19);
+            const last = (item.last || '').slice(0, 19);
+            return last && last !== first ? `${first} to ${last}` : first;
+        }
+
+        // A group's records, listed in its expanded row once it's opened
+        function findingMembersHtml(item) {
+            const e = item.event;
+            const attrs = [['rule', item.rule], ['detail', item.detail], ['dest-ip', e.dest_ip || ''],
+                           ['dest-port', e.dest_port === undefined || e.dest_port === null ? '' : String(e.dest_port)]]
+                .map(([k, v]) => ` data-${k}="${escapeHtml(v)}"`).join('');
+            const sources = (item.sources || 1) > 1 ? `, from ${Number(item.sources).toLocaleString()} source hosts` : '';
+            return `<div class="finding-members"${attrs}>
+                <div class="finding-members-summary">${item.count.toLocaleString()} records${sources}, ${escapeHtml(findingTimeSpan(item))}</div>
+                <div class="finding-members-list"></div>
+            </div>`;
+        }
+
+        function findingMemberRowHtml(f) {
+            const e = f.event;
+            const communityIdAttr = e.community_id ? ` data-community-id="${escapeHtml(e.community_id)}"` : '';
+            return `<tr data-id="${escapeHtml(String(e.id))}" data-event-type="${escapeHtml(e.event_type || '')}"${communityIdAttr} data-action="toggle-row">` +
+                `<td class="timestamp">${escapeHtml((e.timestamp || '').slice(0, 19))}</td>` +
+                `<td class="mono-fixed">${escapeHtml(findingEndpoint(e.src_ip, e.src_port))}</td>` +
+                `<td class="mono-fixed">${escapeHtml(findingEndpoint(e.dest_ip, e.dest_port))}</td>` +
+                rowNoteIconHtml('events', e.id, e.row_note) +
+                `</tr><tr class="detail-row"><td colspan="4"><div class="detail-content">${formatEvent(e)}</div></td></tr>`;
+        }
+
+        function loadFindingMembersIfPresent(detailRow) {
+            const box = detailRow.querySelector(':scope > td > .detail-content > .finding-members');
+            if (box && !box.dataset.loaded) loadFindingMembers(box);
+        }
+
+        async function loadFindingMembers(box) {
+            box.dataset.loaded = '1';
+            const list = box.querySelector('.finding-members-list');
+            list.innerHTML = '<div class="finding-members-note">Loading...</div>';
+            const md5 = currentMd5;
+            const d = box.dataset;
+            let data = null;
+            try {
+                const resp = await fetch(`/api/findings?md5=${encodeURIComponent(md5)}&rule=${encodeURIComponent(d.rule)}` +
+                    `&detail=${encodeURIComponent(d.detail)}&dest_ip=${encodeURIComponent(d.destIp)}` +
+                    `&dest_port=${encodeURIComponent(d.destPort)}${buildSearchQuery()}&t=${Date.now()}`);
+                data = await resp.json();
+            } catch (err) {
+                data = null;
+            }
+            if (currentMd5 !== md5) return;
+            const members = data && Array.isArray(data.findings) ? data.findings : null;
+            if (!members) {
+                delete box.dataset.loaded;
+                list.innerHTML = '<div class="finding-members-note">Couldn\'t load the records - collapse and expand to try again.</div>';
+                return;
+            }
+            const total = data.rules && data.rules[0] ? data.rules[0].count : members.length;
+            const more = total > members.length ? `<div class="finding-members-note">The first ${members.length.toLocaleString()} of ${total.toLocaleString()} shown.</div>` : '';
+            list.innerHTML = `<table class="finding-members-table"><thead><tr><th>Time</th><th>Source</th><th>Destination</th><th></th></tr></thead>` +
+                `<tbody>${members.map(findingMemberRowHtml).join('')}</tbody></table>${more}`;
+        }
+
+        function findingRowHtml(item) {
+            const e = item.event;
+            const etype = e.event_type || '';
+            // data-event-type and data-community-id as on every event row,
+            // for the detail panel's pivots (see the data-detail-pivot
+            // click handler) - Include/Exclude/Only there open the record's
+            // own tab, filtered (applyFilters); no data-pivot, so a click
+            // anywhere in the row just expands it.
+            const communityIdAttr = e.community_id ? ` data-community-id="${escapeHtml(e.community_id)}"` : '';
+            return `<tr data-id="${escapeHtml(String(e.id))}" data-event-type="${escapeHtml(etype)}"${communityIdAttr} data-action="toggle-row">` +
+                `<td>${valueDotSpan(FINDING_SEVERITY_COLORS[item.severity])}${escapeHtml(item.severity)}</td>` +
+                `<td>${escapeHtml(item.title)}</td>` +
+                `<td class="mono">${escapeHtml(item.detail)}</td>` +
+                `<td>${valueDotSpan(COLORS.EVENT[etype])}${escapeHtml(eventTypeLabel(etype))}</td>` +
+                `<td class="mono-fixed">${escapeHtml(findingSource(item))}</td>` +
+                `<td class="mono-fixed">${escapeHtml(findingEndpoint(e.dest_ip, e.dest_port))}</td>` +
+                `<td>${(item.count || 1).toLocaleString()}</td>` +
+                `<td class="timestamp" title="${escapeHtml(findingTimeSpan(item))}">${escapeHtml((item.first || e.timestamp || '').slice(0, 19))}</td>` +
+                rowNoteIconHtml('events', e.id, e.row_note) +
+                `</tr><tr class="detail-row"><td colspan="${FINDING_COLUMNS.length + 1}"><div class="detail-content">${(item.count || 1) > 1 ? findingMembersHtml(item) : formatEvent(e)}</div></td></tr>`;
+        }
+
+        const FINDINGS_INFO_COLLAPSED_KEY = 'socrates_findingsInfoCollapsed';
+
+        // What each rule that matched looks for, and how many it found -
+        // the rules come from the server, so this card lists only the ones
+        // this capture tripped. Collapsible, like DNS Heuristics' card.
+        function findingsInfoCardHtml(rules) {
+            const collapsed = safeStorageGet(localStorage, FINDINGS_INFO_COLLAPSED_KEY) === 'true';
+            const arrow = collapsed ? '▸' : '▾';
+            const display = collapsed ? 'none' : 'block';
+            const groupsOf = r => r.groups === undefined ? r.count : r.groups;
+            const shown = rules.reduce((n, r) => n + Math.min(groupsOf(r), FINDINGS_MAX_PER_RULE), 0);
+            const total = rules.reduce((n, r) => n + groupsOf(r), 0);
+            const counted = r => {
+                const groups = groupsOf(r);
+                const records = `${r.count.toLocaleString()} ${r.count === 1 ? 'record' : 'records'}`;
+                return groups === r.count ? records : `${records} in ${groups.toLocaleString()} ${groups === 1 ? 'row' : 'rows'}`;
+            };
+            const items = rules.map(r => `<li>${valueDotSpan(FINDING_SEVERITY_COLORS[r.severity])}<strong>${escapeHtml(r.title)}</strong> (${escapeHtml(eventTypeLabel(r.event_type))}, ${counted(r)}${groupsOf(r) > FINDINGS_MAX_PER_RULE ? `, the first ${FINDINGS_MAX_PER_RULE} rows shown` : ''}) - ${escapeHtml(r.why)}</li>`).join('');
+            return `<div class="agg-panel" style="margin-bottom: 15px;">
+                <div class="section-toggle-bar findings-info-toggle" data-action="toggle-findings-info">${arrow} About Findings</div>
+                <div class="findings-info-body" style="display:${display}; padding: 16px 20px; color: var(--text-muted); font-size: 0.85rem; line-height: 1.7;">
+                    <p style="margin:0 0 10px 0;">What the protocol records in this capture show is worth a look - a weakness a host exposes, a control action on industrial equipment, a probe - gathered from every protocol into one list, most severe first. Each one is a lead to check, not a verdict: a PLC write is routine to its engineering workstation and alarming from anywhere else. Suricata's own alerts stay on their own tab.</p>
+                    ${items ? `<p style="margin:0 0 6px 0; color: var(--text-bright);">In this capture${total > shown ? ` (${shown.toLocaleString()} of ${total.toLocaleString()} rows shown)` : ''}:</p><ul style="margin:0 0 10px 0; padding-left: 20px;">${items}</ul>` : ''}
+                    <p style="margin:0;">The same finding on the same server is one row, with how many records it covers: click it for the list, and a record for its details. No password is shown in this list, even where the record keeps one - a record's own details show what it keeps.</p>
+                </div>
+            </div>`;
+        }
+
+        // Matches findings.py's MAX_PER_RULE
+        const FINDINGS_MAX_PER_RULE = 500;
+
+        function toggleFindingsInfo(bar) {
+            const body = bar.nextElementSibling;
+            const collapsed = body.style.display === 'none';
+            body.style.display = collapsed ? 'block' : 'none';
+            bar.textContent = (collapsed ? '▾' : '▸') + ' About Findings';
+            if (collapsed) {
+                safeStorageRemove(localStorage, FINDINGS_INFO_COLLAPSED_KEY);
+            } else {
+                safeStorageSet(localStorage, FINDINGS_INFO_COLLAPSED_KEY, 'true');
+            }
+        }
+
+        function buildFindingsSectionContent(sectionId, items) {
+            const container = document.getElementById(sectionId);
+            if (!container) return;
+            let html = '<div class="section-content">';
+            html += findingsInfoCardHtml(findingsRules);
+            if (items.length === 0) {
+                html += `<div class="no-matches">No findings${currentSearch.length > 0 ? ' for the current search' : ''}</div>`;
+            } else {
+                html += renderPaginatedTable({
+                    sectionKey: sectionId,
+                    columns: FINDING_COLUMNS,
+                    items,
+                    extractFn: extractFindingValue,
+                    rowRenderer: findingRowHtml,
+                    rerender: () => buildFindingsSectionContent(sectionId, items),
+                });
+            }
+            html += '</div>';
+            container.innerHTML = html;
+        }
+
+        // null when it didn't work (an error reply, a network failure)
+        async function fetchFindings(md5, countsOnly) {
+            try {
+                const resp = await fetch(`/api/findings?md5=${encodeURIComponent(md5)}${countsOnly ? '&counts=1' : ''}${buildSearchQuery()}&t=${Date.now()}`);
+                const data = await resp.json();
+                return data && Array.isArray(data.rules) ? data : null;
+            } catch (err) {
+                return null;
+            }
+        }
+
+        async function buildFindingsSection() {
+            if (!tabDataCache.findings) {
+                // A reply for another analysis or an earlier search is
+                // dropped: the refresh that replaced it fetches its own
+                const md5 = currentMd5, query = buildSearchQuery();
+                const data = await fetchFindings(md5, false);
+                if (currentMd5 !== md5 || buildSearchQuery() !== query) return;
+                if (!data) {
+                    // not cached as "no findings" - opening the tab again retries
+                    const container = document.getElementById('section-findings');
+                    if (container) container.innerHTML = '<div class="section-content"><div class="no-matches">Couldn\'t load the findings - open the tab again to retry</div></div>';
+                    return;
+                }
+                findingsRules = data.rules;
+                tabDataCache.findings = data.findings;
+            }
+            buildFindingsSectionContent('section-findings', tabDataCache.findings);
         }
 
         function buildLogSectionContent(sectionId, events) {
@@ -8829,10 +10112,12 @@
             const sectionId = `section-${eventType}`;
 
             if (canUseServerAggregation(eventType)) {
+                const gen = bumpAggregationFetchGeneration();
                 const [data, totals] = await Promise.all([
                     fetchAggregationData(eventType),
                     fetchAggregationTotals(eventType),
                 ]);
+                if (isStaleAggregationFetch(gen)) return;
                 aggTotalsCache[sectionId] = totals;
                 const countsByColumn = {};
                 for (const [col, entries] of Object.entries(data)) {
@@ -8921,7 +10206,7 @@
             }
         }
         
-        let eventStats = {};
+        var eventStats = {};
 
         // The Acknowledged Alerts stat card's count (see buildStats()
         // below) - unlike every other card, this isn't derivable from
@@ -9004,6 +10289,36 @@
                 dnsHeuristicsCountMd5 = md5;
             } catch (e) {
                 dnsHeuristicsCountStale = true;
+                return;
+            }
+            buildStats(await computeFilteredStats());
+        }
+
+        // The Findings card's count - the same lazy refresh as DNS
+        // Heuristics' (see dnsHeuristicsFlaggedCount), from the server's
+        // per-rule counts, which a search narrows like every other card's.
+        let findingsCount = 0;
+        let findingsCountStale = true;
+        let findingsCountMd5 = null;
+
+        async function refreshFindingsCount() {
+            if (isLogAnalysisMode || isEmailAnalysisMode || !currentMd5) {
+                findingsCount = 0;
+                findingsCountMd5 = currentMd5;
+                return;
+            }
+            const md5 = currentMd5, query = buildSearchQuery();
+            try {
+                const data = await fetchFindings(md5, true);
+                if (currentMd5 !== md5 || buildSearchQuery() !== query || !data) {
+                    findingsCountStale = true;
+                    return;
+                }
+                // Rows, as the tab shows them: a rule's records grouped
+                findingsCount = data.rules.reduce((n, r) => n + (r.groups === undefined ? r.count : r.groups), 0);
+                findingsCountMd5 = md5;
+            } catch (e) {
+                findingsCountStale = true;
                 return;
             }
             buildStats(await computeFilteredStats());
@@ -9133,6 +10448,119 @@
             requestAnimationFrame(tick);
         }
 
+        // A PCAP analysis's cards come in three sections, each under a
+        // heading on a row of its own: triage (the alert cards, the views
+        // that pick out what's worth a look, and All Events - the way into
+        // everything), then the protocol records, then the connections -
+        // Suricata's flows and tshark's connection cards, which list
+        // connections the same way. STAT_GROUPS is in that order;
+        // statGroup() says which a card is in.
+        const STAT_GROUPS = [
+            { heading: 'Triage', note: 'alerts, what the records show is worth a look, and every event in one view' },
+            { heading: 'Protocol records', note: 'what Suricata and tshark parsed from the traffic' },
+            { heading: 'Connections', note: "a row per connection, and whether it was answered: Suricata's flows, and the protocols tshark identified by port, payload or link-layer type, with no records parsed" },
+        ];
+        // A section collapses to its heading - a click on the heading, or
+        // Enter on its button. The viewer's choice for each section is
+        // kept (in this browser, for every analysis); until there is one,
+        // Connections starts collapsed past STAT_GROUP_AUTO_COLLAPSE_CARDS
+        // cards, and the rest open. A collapsed section's cards are out
+        // of Left/Right and Up/Down too. The open tab's section is never
+        // collapsed for it: buildStats opens it, as does opening a tab
+        // from elsewhere (revealActiveStatCard) - neither saved.
+        const STAT_GROUPS_COLLAPSED_KEY = 'socrates_statGroupsCollapsed';
+        const STAT_GROUP_AUTO_COLLAPSE_CARDS = 12;
+
+        function statGroupChoices() {
+            try {
+                const choices = JSON.parse(safeStorageGet(localStorage, STAT_GROUPS_COLLAPSED_KEY) || '{}');
+                return choices && typeof choices === 'object' ? choices : {};
+            } catch (e) {
+                return {};
+            }
+        }
+
+        function statGroupCollapsed(group, cardCount) {
+            const choice = statGroupChoices()[group];
+            if (typeof choice === 'boolean') return choice;
+            return group === 2 && cardCount > STAT_GROUP_AUTO_COLLAPSE_CARDS;
+        }
+
+        function statGroupSummary(cardCount) {
+            return `${cardCount.toLocaleString()} card${cardCount === 1 ? '' : 's'}`;
+        }
+
+        // The Protocol records heading also ends with tshark's finished
+        // line, once there is one (see updateTsharkLine)
+        function statGroupHeadingHtml(group, collapsed, cardCount) {
+            const g = STAT_GROUPS[group];
+            return `<div class="stats-grid-heading${collapsed ? ' collapsed' : ''}" data-action="toggle-stat-group" data-group="${group}">`
+                + `<button type="button" class="stats-grid-heading-toggle" aria-expanded="${!collapsed}">`
+                + `<span class="stats-grid-heading-arrow" aria-hidden="true">${collapsed ? '▸' : '▾'}</span>`
+                + `<span class="stats-grid-heading-label">${g.heading}</span></button>`
+                + `<span class="stats-grid-heading-note">${escapeHtml(g.note)}</span>`
+                + `<span class="stats-grid-heading-summary"${collapsed ? '' : ' hidden'}>${statGroupSummary(cardCount)}</span>`
+                + (group === 1 ? '<span id="tsharkHeadingStatus" class="stats-grid-heading-aside" aria-live="polite" hidden></span>' : '')
+                + '</div>';
+        }
+
+        // Shows or hides one section's cards in place - no rebuild, so
+        // nothing re-animates
+        function setStatGroupCollapsed(group, collapsed) {
+            const grid = document.getElementById('statsGrid');
+            const heading = grid && grid.querySelector(`.stats-grid-heading[data-group="${group}"]`);
+            if (!heading) return;
+            const cards = grid.querySelectorAll(`.stat-card[data-stat-group="${group}"]`);
+            cards.forEach(c => c.classList.toggle('stat-card-collapsed', collapsed));
+            heading.classList.toggle('collapsed', collapsed);
+            heading.querySelector('.stats-grid-heading-toggle').setAttribute('aria-expanded', String(!collapsed));
+            heading.querySelector('.stats-grid-heading-arrow').textContent = collapsed ? '▸' : '▾';
+            heading.querySelector('.stats-grid-heading-summary').hidden = !collapsed;
+            if (collapsed) {
+                cards.forEach(c => {
+                    c.classList.remove('keyboard-selected');
+                    if (verticalNavSelection === c) verticalNavSelection = null;
+                });
+            } else {
+                // Labels hidden while collapsed couldn't be measured
+                fitStatLabels(grid);
+            }
+        }
+
+        function toggleStatGroup(heading) {
+            const group = Number(heading.dataset.group);
+            const collapsed = !heading.classList.contains('collapsed');
+            const choices = statGroupChoices();
+            choices[group] = collapsed;
+            safeStorageSet(localStorage, STAT_GROUPS_COLLAPSED_KEY, JSON.stringify(choices));
+            setStatGroupCollapsed(group, collapsed);
+        }
+
+        // Opening a tab whose card is in a collapsed section (a pivot, the
+        // Command Palette, DNS Heuristics' click-through) opens the
+        // section, for now
+        function revealActiveStatCard() {
+            const card = document.querySelector('#statsGrid .stat-card.tab-active.stat-card-collapsed');
+            if (card) setStatGroupCollapsed(Number(card.dataset.statGroup), false);
+        }
+        // The triage cards, in their order - All Events last, as the
+        // bridge into the protocol records below it
+        const LEAD_CARDS = ['alert', 'filealerts', 'protocol_decode', 'anomaly', 'findings', 'dns_heuristics', 'acknowledged', 'all'];
+
+        function statGroup(s) {
+            if (LEAD_CARDS.includes(s.id)) return 0;
+            return s.connection || s.id === 'flow' ? 2 : 1;
+        }
+
+        // A card's place in its section: the triage cards in LEAD_CARDS'
+        // order (All Events last), Flows heading the connections, the rest
+        // in eventTypes' order (index)
+        function statGroupRank(s, index) {
+            if (LEAD_CARDS.includes(s.id)) return LEAD_CARDS.indexOf(s.id);
+            return s.id === 'flow' ? -1 : index;
+        }
+        const PROBED_TITLE = "Every connection of the protocols nothing ever answered - no reply, or only an ICMP error: a scanner's probes of closed ports. Each row has its protocol.";
+
         function buildStats(filteredStats) {
             const grid = document.getElementById('statsGrid');
             const stats = [];
@@ -9140,7 +10568,8 @@
 
             eventTypes.forEach(type => {
                 const filtered = filteredStats ? (filteredStats[type] || 0) : (eventStats[type] || 0);
-                allFiltered += filtered;
+                // A connection type's rows are flows, already in the total.
+                if (!isConnectionType(type)) allFiltered += filtered;
                 // Inserted immediately before the real DNS Queries card
                 // (rather than appended after every other card, with
                 // 'all'/'acknowledged') so it reads as "the DNS-specific
@@ -9165,20 +10594,36 @@
                         color: '#ff9800'
                     });
                 }
+                const connProto = isConnectionType(type) ? type.slice(CONNECTION_TYPE_PREFIX.length) : null;
                 stats.push({
                     id: type,
-                    label: typeLabels[type] || type.toUpperCase(),
+                    label: eventTypeLabel(type),
                     count: filtered,
-                    color: COLORS.EVENT[type] || COLORS.EVENT.tls
+                    color: type === PROBED_CONNECTION_TYPE ? 'var(--text-muted)' : COLORS.EVENT[connProto || type] || (connProto ? COLORS.EVENT.flow : COLORS.EVENT.tls),
+                    notInSuricata: tsharkTypes.has(type),
+                    connection: !!connProto,
+                    title: type === PROBED_CONNECTION_TYPE ? PROBED_TITLE : '',
                 });
             });
 
+            const hasConnections = stats.some(s => s.connection && s.count > 0);
             if (!isLogAnalysisMode && !isEmailAnalysisMode) {
+                // Findings lead the cards that gather other types' records
+                // - zero (no card) until this analysis's own count lands,
+                // as with DNS Heuristics
+                stats.push({
+                    id: 'findings',
+                    label: 'Findings',
+                    count: findingsCountMd5 === currentMd5 ? findingsCount : 0,
+                    color: 'var(--badge-danger-text)',
+                    title: 'Weaknesses, control actions and probes the protocol records show, from every protocol',
+                });
                 stats.push({
                     id: 'all',
                     label: 'All Events',
                     count: allFiltered,
-                    color: 'var(--text-bright)'
+                    color: 'var(--text-bright)',
+                    title: hasConnections ? "Every record except tshark's connection rows, which list connections by protocol the way Flows does" : '',
                 });
                 // Not filtered by the current search/filter bar the way
                 // every other card above is (filteredStats has no entry
@@ -9192,6 +10637,12 @@
                     count: acknowledgedAlertsCountMd5 === currentMd5 ? acknowledgedAlertsCount : 0,
                     color: 'var(--text-muted)'
                 });
+            }
+            // A PCAP analysis's cards in their sections (see STAT_GROUPS)
+            const grouped = !isLogAnalysisMode && !isEmailAnalysisMode;
+            if (grouped) {
+                stats.forEach((s, i) => { s.group = statGroup(s); s.rank = statGroupRank(s, i); });
+                stats.sort((a, b) => a.group - b.group || a.rank - b.rank);
             }
 
             const visibleSection = document.querySelector('.section:not(.section-hidden):not(.agg-section)');
@@ -9212,7 +10663,25 @@
             // dropped rather than shown disabled, so a heavily-filtered
             // large sample (20+ event types, most zeroed out) doesn't turn
             // into a wall of grayed-out cards.
-            grid.innerHTML = stats.filter(s => s.count > 0).map(s => {
+            // Headings only when the cards fill more than one section - a
+            // small capture's handful of cards needs none. All Events
+            // alone, which every capture has, doesn't make a section.
+            const visibleStats = stats.filter(s => s.count > 0);
+            const showHeadings = grouped && new Set(visibleStats.filter(s => s.id !== 'all').map(s => s.group)).size > 1;
+            // Each section's card count, and which are collapsed - never
+            // the open tab's (see statGroupCollapsed)
+            const groupCards = {};
+            visibleStats.forEach(s => { groupCards[s.group] = (groupCards[s.group] || 0) + 1; });
+            const activeGroup = (visibleStats.find(s => s.id === activeType) || {}).group;
+            const collapsedGroups = new Set(showHeadings
+                ? Object.keys(groupCards).map(Number).filter(g => g !== activeGroup && statGroupCollapsed(g, groupCards[g]))
+                : []);
+            let lastGroup = null;
+            grid.innerHTML = visibleStats.map(s => {
+                const heading = showHeadings && s.group !== lastGroup ? statGroupHeadingHtml(s.group, collapsedGroups.has(s.group), groupCards[s.group]) : '';
+                lastGroup = s.group;
+                const collapsedClass = collapsedGroups.has(s.group) ? ' stat-card-collapsed' : '';
+                const groupAttr = s.group !== undefined ? ` data-stat-group="${s.group}"` : '';
                 // Filtered/searched-down counts show as just the filtered
                 // number, not "filtered / total" - the filter bar's own
                 // chips already signal that a filter is active, and a
@@ -9226,15 +10695,19 @@
                 // by animateStatNumber() below - aria-label carries the
                 // real final value immediately so assistive tech isn't
                 // stuck reading "0" or a mid-animation number.
-                return `
-                    <div class="stat-card${activeClass}" data-action="show-tab" data-section="section-${s.id}">
+                return heading + `
+                    <div class="stat-card${activeClass}${s.connection ? ' stat-card-connection' : ''}${collapsedClass}" data-action="show-tab" data-section="section-${escapeHtml(s.id)}"${groupAttr}${s.title ? ` title="${escapeHtml(s.title)}"` : ''}>
                         <div class="stat-number" style="color: ${s.color}" aria-label="${countDisplay}">0</div>
-                        <div class="stat-label">${s.label}</div>
+                        <div class="stat-label">${escapeHtml(s.label)}</div>${s.notInSuricata ? '<span class="stat-badge" title="From tshark: Suricata doesn\'t parse this protocol"><span class="sr-only">from tshark</span></span>' : ''}
                     </div>
                 `;
             }).join('');
             const numberEls = grid.querySelectorAll('.stat-number');
-            stats.filter(s => s.count > 0).forEach((s, i) => animateStatNumber(numberEls[i], s.count));
+            visibleStats.forEach((s, i) => animateStatNumber(numberEls[i], s.count));
+            // The new Protocol records heading takes tshark's finished line
+            updateTsharkLine();
+            fitStatLabels(grid);
+            watchStatLabels(grid);
 
             // Lazy self-refresh for the Acknowledged Alerts card - see
             // acknowledgedAlertsCountStale's own comment for why this
@@ -9253,6 +10726,12 @@
                 dnsHeuristicsCountStale = false;
                 refreshDnsHeuristicsCount();
             }
+
+            // And for the Findings card
+            if (findingsCountStale) {
+                findingsCountStale = false;
+                refreshFindingsCount();
+            }
         }
 
         function buildSections() {
@@ -9260,13 +10739,14 @@
             let html = '';
             
             eventTypes.forEach((type, i) => {
-                const label = typeLabels[type] || type.toUpperCase();
-                html += `<div class="section${i > 0 ? ' section-hidden' : ''}" id="section-${type}"><div class="section-header">${label}</div><div class="loading">Loading...</div></div>`;
+                const label = eventTypeLabel(type);
+                html += `<div class="section${i > 0 ? ' section-hidden' : ''}" id="section-${escapeHtml(type)}"><div class="section-header">${escapeHtml(label)}</div><div class="loading">Loading...</div></div>`;
             });
             
             html += '<div class="section section-hidden" id="section-all"><div class="section-header">All Events</div><div class="loading">Loading...</div></div>';
             html += '<div class="section section-hidden" id="section-acknowledged"><div class="section-header">Acknowledged Alerts</div><div class="loading">Loading...</div></div>';
             html += '<div class="section section-hidden" id="section-dns_heuristics"><div class="section-header">DNS Heuristics</div><div class="loading">Loading...</div></div>';
+            html += '<div class="section section-hidden" id="section-findings"><div class="section-header">Findings</div><div class="loading">Loading...</div></div>';
             sectionsEl.innerHTML = html;
             
         }
@@ -9461,10 +10941,12 @@
             const sectionId = 'section-all';
 
             if (canUseServerAggregation('all')) {
+                const gen = bumpAggregationFetchGeneration();
                 const [data, totals] = await Promise.all([
                     fetchAggregationData('all'),
                     fetchAggregationTotals('all'),
                 ]);
+                if (isStaleAggregationFetch(gen)) return;
                 aggTotalsCache[sectionId] = totals;
                 const countsByColumn = {};
                 for (const [col, entries] of Object.entries(data)) {
@@ -9538,45 +11020,186 @@
                 case 'Source Port': return String(e.src_port || '');
                 case 'Dest IP': return e.dest_ip || '';
                 case 'Dest Port': return String(e.dest_port || '');
-                case 'Alert': return e.alert?.signature || '';
+                case 'Alert': return e.tls_failure ? e.tls_failure.alert || '' : e.alert?.signature || '';
+                case 'Sent By': return e.tls_failure?.sent_by || '';
                 case 'Category': {
                     if (e.event_type === 'modbus') return e.modbus?.request?.category || '';
                     return e.alert?.category || '';
                 }
-                case 'Severity': return 'Sev ' + (e.alert?.severity || 0);
+                case 'Severity': return e.syslog ? e.syslog.severity || '' : 'Sev ' + (e.alert?.severity || 0);
                 case 'Ruleset': return classifyRuleset(e.alert?.signature_id);
                 case 'Type': {
+                    if (e.coap) return e.coap.type || '';
+                    if (e.event_type === 'iec104_point') return e.iec104_point?.type || '';
                     if (e.event_type === 'dnp3') return e.dnp3?.type || '';
+                    if (e.event_type === 's7comm') return e.s7comm?.type || '';
                     if (e.event_type === 'anomaly') return e.anomaly?.type || '';
                     if (e.event_type === 'mdns') return e.mdns?.queries?.[0]?.rrtype || '';
+                    if (e.event_type === 'llmnr') return e.llmnr?.queries?.[0]?.rrtype || '';
                     // See the 'Query' case above for why both the old flat
                     // field and the new Suricata 8 V3 queries[0] path are
                     // read here.
                     return e.dns?.rrtype || e.dns?.queries?.[0]?.rrtype || '';
                 }
-                case 'Method': return e.http?.http_method || '';
-                case 'Host': return e.http?.hostname || '';
+                // An SSDP response has no method - its status stands in for it.
+                case 'Method': {
+                    if (e.stun) return e.stun.method || '';
+                    if (e.coap) return e.coap.method || '';
+                    return e.event_type === 'ssdp' ? (e.ssdp?.method || (e.ssdp?.status ? String(e.ssdp.status) : '')) : (e.http?.http_method || '');
+                }
+                case 'Search Target': return e.ssdp?.search_target || e.ssdp?.notification_type || '';
+                case 'Location': return e.ssdp?.location || '';
+                case 'Server': return e.ssdp?.server || '';
+                case 'Banner': return e.telnet?.banner || '';
+                // IEC 104: a control action's, or a monitored point's
+                case 'Station': { const r = e.iec104 || e.iec104_point; return r?.station !== undefined ? String(r.station) : ''; }
+                case 'IOA': { const r = e.iec104 || e.iec104_point; return r?.ioa !== undefined ? String(r.ioa) : ''; }
+                case 'Value': {
+                    const r = e.iec104 || e.bacnet || e.opcua_action;
+                    if (r?.value !== undefined) return String(r.value);
+                    return e.opcua_action?.arguments ? e.opcua_action.arguments.join(', ') : '';
+                }
+                case 'Result': return e.iec104?.result || e.bacnet?.result || e.opcua_action?.result || e.dhcpv6?.status || e.radius?.result || e.stun?.result || e.ipmi?.result || e.l2tp?.stop_result || e.l2tp?.call_result || e.xdmcp?.result || '';
+                case 'Updates': return e.iec104_point?.updates !== undefined ? String(e.iec104_point.updates) : '';
+                case 'Last Value': { const r = e.iec104_point || e.bacnet_property; return r?.last_value !== undefined ? String(r.last_value) : ''; }
+                // BACnet: an action's, a read/notification summary's, a device's
+                case 'Object': return e.bacnet?.object || e.bacnet_property?.object || '';
+                case 'Property': return e.bacnet?.property || e.bacnet_property?.property || '';
+                case 'Count': { const r = e.bacnet_property || e.browser || e.lldp || e.cdp; return r?.count !== undefined ? String(r.count) : ''; }
+                // LLDP and CDP: a neighbor's announcements
+                case 'System Name': return e.lldp?.system_name || '';
+                case 'Chassis ID': return e.lldp?.chassis_id || '';
+                case 'Device ID': return e.cdp?.device_id || '';
+                case 'Port ID': { const n = e.lldp || e.cdp; return n?.port_id || ''; }
+                case 'Platform': return e.cdp?.platform || '';
+                case 'Capabilities': { const n = e.lldp || e.cdp; return (n?.capabilities || []).join(', '); }
+                case 'Management IP': return (e.lldp?.management_addresses || e.cdp?.addresses || []).join(', ');
+                case 'VLAN': return e.lldp?.vlan !== undefined ? String(e.lldp.vlan) : '';
+                case 'Native VLAN': return e.cdp?.native_vlan !== undefined ? String(e.cdp.native_vlan) : '';
+                // Windows Browser: a host's announcements, elections...
+                case 'Message': return e.browser?.message || e.dhcpv6?.message || e.syslog?.message || e.radius?.message || '';
+                // Syslog: a message's
+                case 'Facility': return e.syslog?.facility || '';
+                case 'Program': return e.syslog?.program || e.rpc?.program || '';
+                // ONC RPC: a call's
+                case 'Machine Name': return e.rpc?.machine_name || '';
+                case 'Workgroup': return e.browser?.destination_name || '';
+                case 'Windows': return e.browser?.os_version || '';
+                case 'Roles': return (e.browser?.roles || []).join(', ');
+                case 'Errors': return e.bacnet_property?.errors !== undefined ? String(e.bacnet_property.errors) : '';
+                case 'Device': return e.bacnet_device?.device !== undefined ? String(e.bacnet_device.device) : '';
+                case 'Vendor': {
+                    if (e.l2tp) return e.l2tp.client_vendor || '';
+                    const d = e.bacnet_device;
+                    return d?.vendor || (d?.vendor_id !== undefined ? String(d.vendor_id) : '');
+                }
+                case 'Announcements': return e.bacnet_device?.announcements !== undefined ? String(e.bacnet_device.announcements) : '';
+                case 'User': return e.telnet?.username || e.opcua?.username || e.socks?.user || e.radius?.user || e.stun?.username || '';
+                // GOOSE: a state change's
+                case 'Control Block': return e.goose?.gocb_ref || '';
+                case 'Dataset': return e.goose?.dataset || '';
+                case 'stNum': return e.goose?.stnum !== undefined ? String(e.goose.stnum) : '';
+                case 'Repeats': return e.goose?.repeats !== undefined ? String(e.goose.repeats) : '';
+                case 'Anomaly': return e.goose?.anomaly || '';
+                // OPC UA: a connection's, an action's
+                case 'Endpoint': return e.opcua?.endpoint || '';
+                case 'Security': return e.opcua?.security_policy || '';
+                case 'Application': return e.opcua?.client_application || '';
+                case 'Activation': return e.opcua?.activation || '';
+                case 'Node': return e.opcua_action?.node || '';
+                case 'Password': return e.telnet?.password || e.bacnet?.password || e.opcua?.password || '';
+                case 'Login': return e.telnet?.login || '';
+                case 'Area': return e.s7comm?.items?.[0]?.area || '';
+                case 'Error': return e.s7comm?.response?.error_class || '';
+                case 'Host': return e.http?.hostname || e.syslog?.hostname || '';
                 case 'URL': {
+                    if (e.slp) return e.slp.url || (e.slp.urls || [])[0] || '';
                     if (e.event_type === 'link') return e.link?.url || '';
                     return e.http?.url || '';
                 }
                 case 'Status': {
                     if (e.event_type === 'enip') return e.enip?.response?.status || e.enip?.request?.status || '';
                     if (e.event_type === 'pop3') return e.pop3?.response?.status || '';
+                    if (e.socks) return e.socks.status || '';
+                    if (e.slp) return e.slp.status || '';
                     return String(e.http?.status || '');
                 }
                 case 'User-Agent': return (e.http?.http_user_agent || '').slice(0, CONFIG.USER_AGENT_MAX_LENGTH);
-                case 'SNI / Host': return e.tls?.sni || '-';
+                case 'SNI / Host': return e.dtls ? e.dtls.sni || '' : e.tls_failure ? e.tls_failure.sni || '' : e.tls?.sni || '-';
+                // DTLS: how far the handshake got, and the client's fingerprint
+                case 'Handshake': return e.dtls?.handshake || '';
+                case 'JA4': return e.dtls?.ja4 || '';
+                // SOCKS: where the proxy was asked to connect, and what came through it
+                case 'Destination': return e.socks?.request_name || e.socks?.request_host || '';
+                case 'Destination Port': return e.socks?.request_port !== undefined ? String(e.socks.request_port) : '';
+                case 'Tunneled': return e.socks?.tunneled || '';
+                // RADIUS: a login's, an accounting message's
+                case 'Calling Station': return e.radius?.calling_station || '';
+                case 'NAS': return e.radius?.nas_identifier || e.radius?.nas_ip || '';
+                case 'EAP Method': return (e.radius?.eap_methods || [])[0] || '';
+                case 'Reply Message': return e.radius?.reply_message || '';
+                // STUN: a flow's exchanges of one method
+                case 'Requests': {
+                    if (e.ipmi) return (e.ipmi.requests || []).join(', ');
+                    return e.stun?.requests !== undefined ? String(e.stun.requests) : '';
+                }
+                case 'Mapped Address': return (e.stun?.mapped_addresses || [])[0] || '';
+                case 'Relayed Address': return (e.stun?.relayed_addresses || [])[0] || '';
+                case 'Software': return e.stun?.client_software || e.stun?.server_software || '';
+                // CoAP: a request's and its response's
+                case 'Response Code': return e.coap?.response_code || '';
+                case 'Content Format': return e.coap?.response_content_format || e.coap?.request_content_format || '';
+                // SLP: what a request asked about, and what answered it
+                case 'Service Type': return e.slp?.service_type || (e.slp?.service_types || [])[0] || '';
+                case 'Scopes': return e.slp?.scopes || '';
+                case 'Response': return e.slp?.response || '';
+                // IPMI: what a management controller offers before any login
+                case 'IPMI Versions': return (e.ipmi?.ipmi_versions || []).join(', ');
+                case 'Auth Types': return (e.ipmi?.auth_types || []).join(', ');
+                case 'Privilege': return e.ipmi?.requested_privilege || '';
+                case 'Cipher': return e.ipmi?.cipher_accepted?.authentication || e.ipmi?.cipher_requested?.authentication || '';
+                case 'Weaknesses': return (e.ipmi?.weaknesses || []).join(', ');
+                // L2TP: who each end of a control connection said it was
+                case 'Client Host': return e.l2tp?.client_host_name || '';
+                case 'Firmware': return e.l2tp?.client_firmware || '';
+                case 'Server Host': return e.l2tp?.server_host_name || e.xdmcp?.server_host_name || '';
+                case 'Calls': return e.l2tp?.calls ? String(e.l2tp.calls) : '';
+                // RIP: the routes a sender announced
+                case 'Route Count': return e.rip?.route_count ? String(e.rip.route_count) : '';
+                case 'Route': return e.rip?.whole_table ? 'whole table' : (e.rip?.routes || e.rip?.requested || [])[0] || '';
+                case 'Withdrawn': return e.rip?.withdrawn ? String(e.rip.withdrawn) : '';
+                case 'Metric Changes': return e.rip?.metric_changes ? String(e.rip.metric_changes) : '';
+                case 'Authentication': return e.rip?.authentication || (e.xdmcp?.authentication_names || []).join(', ');
+                // Tunnels: what carried packets inside others, and what crossed it
+                case 'Tunnel Type': return e.tunnel?.type || '';
+                case 'Tunnel Packets →': return e.tunnel ? String(e.tunnel.packets_toserver || 0) : '';
+                case 'Tunnel Packets ←': return e.tunnel ? String(e.tunnel.packets_toclient || 0) : '';
+                case 'Inner Flows': return e.tunnel?.inner_flows !== undefined ? String(e.tunnel.inner_flows) : '';
+                case 'Inner Host': return (e.tunnel?.inner_hosts || [])[0] || '';
+                case 'Returns to Sender': return e.tunnel?.returns_to_sender ? 'yes' : '';
+                // XDMCP: a login manager's answer, and the display that asked
+                case 'Server Status': return e.xdmcp?.server_status || '';
+                case 'Messages': return (e.xdmcp?.messages || []).join(', ');
+                case 'Display Address': return (e.xdmcp?.display_addresses || [])[0] || '';
+                case 'Authorization': return (e.xdmcp?.authorization_names || []).join(', ');
                 case 'Version': {
                     if (e.event_type === 'ntp') return e.ntp?.version !== undefined ? String(e.ntp.version) : '';
+                    if (e.dtls) return e.dtls.version || '';
+                    if (e.rpc) return e.rpc.version !== undefined ? String(e.rpc.version) : '';
+                    if (e.socks) return e.socks.version || '';
+                    if (e.slp) return e.slp.version !== undefined ? String(e.slp.version) : '';
+                    if (e.rip) return e.rip.version || '';
                     return e.tls?.version || '-';
                 }
-                case 'Issuer': return (e.tls?.issuerdn || '-').slice(0, CONFIG.TLS_SUBJECT_MAX_LENGTH);
+                case 'Issuer': {
+                    if (e.tls_failure) return (e.tls_failure.issuerdn || '').slice(0, CONFIG.TLS_SUBJECT_MAX_LENGTH);
+                    return (e.tls?.issuerdn || '-').slice(0, CONFIG.TLS_SUBJECT_MAX_LENGTH);
+                }
                 case 'Pkts →': return String(e.flow?.pkts_toserver || 0);
                 case 'Pkts ←': return String(e.flow?.pkts_toclient || 0);
                 case 'Bytes →': return String(e.flow?.bytes_toserver || 0);
                 case 'Bytes ←': return String(e.flow?.bytes_toclient || 0);
-                case 'State': return e.flow?.state || '';
+                case 'State': return e.l2tp ? e.l2tp.state || '' : e.flow?.state || '';
                 case 'Alerted': return e.flow?.alerted ? 'Yes' : 'No';
                 case 'Filename': {
                     if (e.event_type === 'smb') return e.smb?.filename || '';
@@ -9590,6 +11213,8 @@
                 case 'To': return (e.email?.to || []).join(', ');
                 case 'Subject': {
                     if (e.event_type === 'email') return e.email?.subject || '';
+                    if (e.dtls) return (e.dtls.subject || '').slice(0, CONFIG.TLS_SUBJECT_MAX_LENGTH);
+                    if (e.tls_failure) return (e.tls_failure.subject || '').slice(0, CONFIG.TLS_SUBJECT_MAX_LENGTH);
                     return (e.tls?.subject || '-').slice(0, CONFIG.TLS_SUBJECT_MAX_LENGTH);
                 }
                 case 'SPF': return e.email?.spf || '';
@@ -9608,7 +11233,9 @@
                 case 'Tags': return (e.filealerts?.tags || []).join(', ');
                 case 'Author': return e.filealerts?.author || '';
                 case 'Function': {
+                    if (e.slp) return e.slp.function || '';
                     if (e.event_type === 'modbus') return e.modbus?.request?.function_code || '';
+                    if (e.event_type === 's7comm') return e.s7comm?.function || e.s7comm?.function_group || '';
                     if (e.event_type === 'dnp3') {
                         return e.dnp3?.application?.function_code !== undefined ? String(e.dnp3.application.function_code) :
                                (e.dnp3?.request?.application?.function_code !== undefined ? String(e.dnp3.request.application.function_code) :
@@ -9622,8 +11249,10 @@
                 case 'Source Addr': return e.dnp3?.src !== undefined ? String(e.dnp3.src) : (e.dnp3?.request?.src !== undefined ? String(e.dnp3.request.src) : '');
                 case 'Dest Addr': return e.dnp3?.dst !== undefined ? String(e.dnp3.dst) : (e.dnp3?.request?.dst !== undefined ? String(e.dnp3.request.dst) : '');
                 case 'Query': {
+                    if (e.coap) return e.coap.query || '';
                     if (e.event_type === 'pgsql') return e.pgsql?.request?.simple_query || '';
                     if (e.event_type === 'mdns') return e.mdns?.queries?.[0]?.rrname || '';
+                    if (e.event_type === 'llmnr') return e.llmnr?.queries?.[0]?.rrname || '';
                     // dns.rrname/rrtype are the pre-Suricata-8 flat shortcut
                     // fields for "the query this transaction is about". As
                     // of Suricata 8's V3 DNS logging format (the new
@@ -9638,9 +11267,12 @@
                     return e.dns?.rrname || e.dns?.queries?.[0]?.rrname || '';
                 }
                 case 'Command': {
+                    if (e.rip) return e.rip.command || '';
+                    if (e.event_type === 'iec104') return e.iec104?.action || e.iec104?.type || '';
                     if (e.event_type === 'pgsql') return e.pgsql?.response?.command_completed || '';
                     if (e.event_type === 'enip') return e.enip?.request?.command || e.enip?.response?.command || '';
                     if (e.event_type === 'pop3') return e.pop3?.request?.command || '';
+                    if (e.socks) return e.socks.command || '';
                     return e.ftp?.command || '';
                 }
                 case 'Rows': return e.pgsql?.response?.data_rows !== undefined ? String(e.pgsql.response.data_rows) : '';
@@ -9650,9 +11282,11 @@
                 case 'JA3': return e.quic?.ja3?.hash || '';
                 case 'JA3S': return e.quic?.ja3s?.hash || '';
                 case 'DHCP Type': return e.dhcp?.dhcp_type || e.dhcp?.type || '';
-                case 'Client MAC': return e.dhcp?.client_mac || '';
-                case 'Assigned IP': return e.dhcp?.assigned_ip || '';
-                case 'Hostname': return e.dhcp?.hostname || '';
+                case 'Client MAC': return e.dhcp?.client_mac || e.dhcpv6?.client_mac || '';
+                // DHCPv6: its addresses, or the prefixes it delegated
+                case 'Assigned IP': return e.dhcp?.assigned_ip || (e.dhcpv6?.assigned_addresses || e.dhcpv6?.prefixes || []).join(', ');
+                case 'Hostname': return e.dhcp?.hostname || e.dhcpv6?.hostname || '';
+                case 'Vendor Class': return e.dhcpv6?.vendor_class || '';
                 case 'FTP Command': return e.ftp_data?.command || '';
                 case 'SMB Command': return e.smb?.command || '';
                 case 'Share': return e.smb?.share || '';
@@ -9672,11 +11306,21 @@
                     return e.ssh?.server?.software_version || '';
                 }
                 case 'Client': return e.krb5?.cname || '';
-                case 'Service': return e.krb5?.sname || '';
+                case 'Service': {
+                    if (e.event_type === 'nbns') return e.nbns?.service || '';
+                    if (e.event_type === 'bacnet') return e.bacnet?.service || '';
+                    if (e.event_type === 'bacnet_property') return e.bacnet_property?.service || '';
+                    if (e.event_type === 'opcua_action') return e.opcua_action?.service || '';
+                    return e.krb5?.sname || '';
+                }
+                // The name alone, as the server aggregates it - the <suffix> is
+                // in the detail panel, and Service says what it means.
+                case 'NetBIOS Name': return e.nbns?.name || e.browser?.source_name || '';
+                case 'Address': return e.nbns?.address || '';
                 case 'Realm': return e.krb5?.realm || '';
                 case 'Error Code': return e.krb5?.error_code || '';
                 case 'SIP Method': return e.sip?.method || '';
-                case 'URI': return e.sip?.uri || '';
+                case 'URI': return e.sip?.uri || e.coap?.uri || '';
                 case 'SIP Code': return String(e.sip?.code || '');
                 case 'Reason': return e.sip?.reason || '';
                 case 'SNMP Version': return String(e.snmp?.version || '');
@@ -9707,7 +11351,7 @@
                 case 'Exchange Type': return e.ike?.exchange_type || '';
                 case 'IKE Version': return e.ike?.version_major !== undefined ? `${e.ike.version_major}.${e.ike.version_minor || 0}` : '';
                 case 'Init SPI': return e.ike?.init_spi || '';
-                case 'Procedure': return e.nfs?.procedure || '';
+                case 'Procedure': return e.nfs?.procedure || e.rpc?.procedure || '';
                 case 'Security Type': return String(e.rfb?.authentication?.security_type ?? '');
                 case 'Request Type': return e.bittorrent_dht?.request_type || e.bittorrent_dht?.request?.request_type || '';
                 case 'Info Hash': return e.bittorrent_dht?.info_hash || e.bittorrent_dht?.request?.info_hash || '';
@@ -9716,14 +11360,20 @@
                 case 'Rcpt To': return (e.smtp?.rcpt_to || []).join(', ');
                 case 'Command Data': return e.ftp?.command_data || '';
                 case 'Completion Code': return (e.ftp?.completion_code || []).join(', ');
-                case 'Reply': return (e.ftp?.reply || []).join(' | ');
+                case 'Reply': {
+                    if (e.dhcpv6) return e.dhcpv6.reply || '';
+                    if (e.rpc) return e.rpc.reply || '';
+                    return (e.ftp?.reply || []).join(' | ');
+                }
                 case 'Event': return e.anomaly?.event || '';
                 case 'Layer': return e.anomaly?.layer || '';
-                case 'App Proto': return e.anomaly?.app_proto || '';
+                case 'Answered': return e.shark?.answered || '';
+                case 'App Proto': return e.event_type === 'anomaly' ? (e.anomaly?.app_proto || '') : (e.app_proto || '');
                 case 'Stratum': return e.ntp?.stratum !== undefined ? String(e.ntp.stratum) : '';
                 case 'Reference ID': return e.ntp?.reference_id || '';
                 case 'Opcode': {
                     if (e.event_type === 'arp') return e.arp?.opcode || '';
+                    if (e.event_type === 'nbns') return e.nbns?.opcode || '';
                     return e.websocket?.opcode || '';
                 }
                 case 'Src MAC': return e.arp?.src_mac || '';
@@ -9821,7 +11471,7 @@
             return buildAggregationTablesCore(events, getColumnsForType(eventType), 'section-' + eventType, extractValue);
         }
         
-        let allEvents = [];
+        var allEvents = [];
         let baseAllEvents = [];
         // Tracks which eventTypes' currently-cached tabDataCache/allEvents data is
         // known to be a partial (capped) result - i.e. the real total exceeds
@@ -9831,7 +11481,7 @@
         // object - the JSDOM test harness assigns/reads it via separate
         // script evaluations, same reason as currentFilters/advancedMode below.
         var truncatedTypes = new Set();
-        let eventTypes = [];
+        var eventTypes = [];
         // NOTE: these must stay `var` (not let/const) so they attach to the
         // global object - the JSDOM test harness assigns/reads them via
         // separate script evaluations, same reason as truncatedTypes above
@@ -9882,6 +11532,7 @@
         function bumpFetchGeneration() { return ++fetchGeneration; }
         function isStaleFetch(gen) { return gen !== fetchGeneration; }
 
+
         // Sankey gets its own, separate generation counter rather than
         // sharing fetchGeneration above. REGRESSION (recurring): every
         // unrelated caller of bumpFetchGeneration() (pagination, sort, a
@@ -9899,6 +11550,14 @@
         // place - an isolated counter means only another Sankey render can
         // ever invalidate an in-flight one, so this whole bug class can no
         // longer recur no matter what future code bumps fetchGeneration for.
+        // The aggregation tables' own counter, the same way: bumped by each
+        // render of them and each tab load that resets them, so a slow
+        // fetch for a tab no longer open is dropped rather than drawn under
+        // the new one.
+        let aggregationFetchGeneration = 0;
+        function bumpAggregationFetchGeneration() { return ++aggregationFetchGeneration; }
+        function isStaleAggregationFetch(gen) { return gen !== aggregationFetchGeneration; }
+
         let sankeyFetchGeneration = 0;
         function bumpSankeyFetchGeneration() { return ++sankeyFetchGeneration; }
         function isStaleSankeyFetch(gen) { return gen !== sankeyFetchGeneration; }
@@ -10447,6 +12106,13 @@
                 buildAllEvents();
                 return;
             }
+            // The derived tabs render through their own builders (see
+            // loadTabData) - through the generic one below, a filter chip's
+            // removal there put an empty events table in their place
+            if (eventType === 'findings' || eventType === 'dns_heuristics' || eventType === 'acknowledged') {
+                await loadTabData(eventType);
+                return;
+            }
             const events = tabDataCache[eventType] || [];
             const filtered = getFilteredEvents(sectionId, events, eventType);
             if (advancedMode) {
@@ -10475,7 +12141,15 @@
             const eventType = sectionId.replace('section-', '');
             bumpFetchGeneration();
             await ensureCappedBatch(eventType);
-            await refreshCurrentView(sectionId, eventType);
+            const target = document.getElementById(sectionId);
+            if (target && target.classList.contains('section-hidden')) {
+                // A pivot from a record shown on another tab - a Findings
+                // row's own details, whose filter is its record's type's: open
+                // that tab, filtered, rather than filter one out of sight
+                showTab(sectionId, document.querySelector(`.stat-card[data-section="${sectionId}"]`));
+            } else {
+                await refreshCurrentView(sectionId, eventType);
+            }
             updateFilterBarVisibility();
             buildStats(await computeFilteredStats());
             await updateSankeyDiagram();
@@ -10961,7 +12635,11 @@
             try {
                 const parsed = JSON.parse(raw);
                 if (!Array.isArray(parsed)) return [];
-                return parsed.filter(s => s && typeof s.label === 'string' && typeof s.urlTemplate === 'string');
+                // Checked again here, not only on save: localStorage is
+                // shared with this origin's CyberChef, so an entry could be
+                // planted (a javascript: URL) that was never saved here
+                return parsed.filter(s => s && typeof s.label === 'string' && typeof s.urlTemplate === 'string'
+                    && isSafeLookupUrlTemplate(s.urlTemplate));
             } catch (e) {
                 return [];
             }
@@ -11237,6 +12915,7 @@
             // themselves.
             acknowledgedAlertsCountStale = true;
             dnsHeuristicsCountStale = true;
+            findingsCountStale = true;
             const gen = bumpFetchGeneration();
             showLoading(currentSearch.length > 0 ? 'Searching...' : 'Loading events...');
 
@@ -11248,8 +12927,10 @@
                     fetch('/api/stats?md5=' + encodeURIComponent(currentMd5) + '&t=' + Date.now())
                 ]);
                 const statsCounts = (await statsResp.json()).counts;
-                const baseStatsCounts = (await baseStatsResp.json()).counts;
+                const baseStatsData = await baseStatsResp.json();
+                const baseStatsCounts = baseStatsData.counts;
                 if (isStaleFetch(gen)) return;
+                tsharkTypes = new Set(baseStatsData.tshark_types || []);
                 eventStats = statsCounts;
                 baseEventStats = baseStatsCounts;
 
@@ -11341,28 +13022,30 @@
                 tabDataCache = {};
                 buildSections();
 
-                // Restore active section after rebuild
-                if (activeType && activeType !== eventTypes[0]) {
+                // Restore active section after rebuild - unless that tab is
+                // gone from the new data (a search that matched none of its
+                // type), in which case the first tab opens as on a fresh
+                // load rather than every section staying hidden.
+                const sectionEl = activeType && activeType !== eventTypes[0]
+                    ? document.getElementById('section-' + activeType) : null;
+                if (sectionEl) {
                     document.querySelectorAll('.section').forEach(s => s.classList.add('section-hidden'));
-                    const sectionEl = document.getElementById('section-' + activeType);
-                    if (sectionEl) {
-                        sectionEl.classList.remove('section-hidden');
-                        await loadTabData(activeType, null);
-                        // Un-acknowledging the last remaining row (either
-                        // type) empties the tab the user is currently
-                        // looking at - staying there would just show its
-                        // own "No acknowledged ..." empty state, which
-                        // reads as "did that even work?" rather than the
-                        // clear confirmation of landing back on Network
-                        // Alerts and seeing the row reappear. section-alert
-                        // is guaranteed to exist here: buildSections() above
-                        // already re-ran off the fresh (post-un-acknowledge)
-                        // /api/stats counts, so the row just un-acknowledged
-                        // has already made 'alert' a real eventType again.
-                        if (activeType === 'acknowledged' && acknowledgedAlertsCache.alert.length === 0
-                                && acknowledgedAlertsCache.sigmaalert.length === 0 && document.getElementById('section-alert')) {
-                            showTab('section-alert');
-                        }
+                    sectionEl.classList.remove('section-hidden');
+                    await loadTabData(activeType, null);
+                    // Un-acknowledging the last remaining row (either
+                    // type) empties the tab the user is currently
+                    // looking at - staying there would just show its
+                    // own "No acknowledged ..." empty state, which
+                    // reads as "did that even work?" rather than the
+                    // clear confirmation of landing back on Network
+                    // Alerts and seeing the row reappear. section-alert
+                    // is guaranteed to exist here: buildSections() above
+                    // already re-ran off the fresh (post-un-acknowledge)
+                    // /api/stats counts, so the row just un-acknowledged
+                    // has already made 'alert' a real eventType again.
+                    if (activeType === 'acknowledged' && acknowledgedAlertsCache.alert.length === 0
+                            && acknowledgedAlertsCache.sigmaalert.length === 0 && document.getElementById('section-alert')) {
+                        showTab('section-alert');
                     }
                 } else if (eventTypes[0]) {
                     await loadTabData(eventTypes[0], null);
@@ -11465,6 +13148,188 @@
         }
 
         // Cheap "has notes" signal in the header, without opening the modal.
+        // tshark (PCAP analyses only): it decodes the capture alongside
+        // Suricata (shark_analyzer.py), and once both are done the
+        // protocols Suricata doesn't parse join this analysis's data. The
+        // line under the header says where that stands. sharkStatus is the
+        // last GET /api/shark-status response for currentMd5, polled while
+        // tshark (or the merge) is still working; tsharkTypes are the types
+        // it added (the stats response's tshark_types), marked on their
+        // cards with a dot.
+        var sharkStatus = null;
+        var sharkPollTimer = null;
+        var tsharkTypes = new Set();
+        // While tshark runs, the seconds it's been running tick up on the
+        // line: counted here every second from the 'elapsed' each poll
+        // brings, so it stays in step with the server's clock.
+        var sharkClockTimer = null;
+        var sharkRunStartedAt = null;
+        const SHARK_POLL_MS = 2000;
+        const SHARK_BUSY_STATES = new Set(['queued', 'running', 'waiting']);
+
+        function sharkIsBusy(status) {
+            const st = status && status.status;
+            return SHARK_BUSY_STATES.has(st) || (st === 'ready' && status.merged === false);
+        }
+
+        // The tshark line, between the header and the search box, and the
+        // key to the cards' dot.
+        function tsharkLineHtml() {
+            return `<div class="tshark-line">`
+                + `<span id="tsharkLineStatus" class="tshark-line-status" aria-live="polite"></span>`
+                + `</div>`;
+        }
+
+        // The line's text, as HTML, with a link for the two states that
+        // need a click. Once tshark has added protocols, the line starts
+        // with the dot that marks their cards - it's the key to it.
+        function sharkStatusHtml(status) {
+            const st = status && status.status;
+            const dot = '<span class="stat-badge-dot" aria-hidden="true"></span>';
+            // tshark's rows have joined, but the cards haven't reloaded yet:
+            // held while the analyst is on the cards, or loading now
+            if (st === 'ready' && tsharkRowsPending === 'held') {
+                const n = (status.types || []).length;
+                return n
+                    ? `${dot}tshark parsed ${n} additional protocol${n === 1 ? '' : 's'} \u2013 <a href="#" data-action="show-tshark-rows">Show them</a>`
+                    : 'tshark found no additional protocols \u2013 <a href="#" data-action="show-tshark-rows">Update the cards</a>';
+            }
+            if (st === 'ready' && tsharkRowsPending) return 'tshark is parsing additional protocols\u2026';
+            if (sharkFinished(status)) {
+                // (and when the capture was cut off - a partial upload, a
+                // capture stopped mid-write - that tshark read it up to there)
+                const took = (Number.isFinite(status.seconds) ? ` in ${status.seconds.toLocaleString()}s` : '')
+                    + (status.damaged ? ' \u00b7 the capture is cut off, so its last packet wasn\u2019t read' : '');
+                return tsharkTypes.size
+                    ? `${dot}tshark parsed ${tsharkTypes.size} additional protocol${tsharkTypes.size === 1 ? '' : 's'}${took}`
+                    : `tshark found no additional protocols${took}`;
+            }
+            if (st === 'ready') return 'tshark is parsing additional protocols\u2026';
+            if (st === 'queued') return 'tshark is waiting for another capture to finish';
+            // The ticking count is hidden from screen readers: the status is
+            // a live region, and a number changing every second would be
+            // read out every second.
+            if (st === 'running') return `tshark is parsing additional protocols… <span id="tsharkLineTimer" class="tshark-line-timer" aria-hidden="true">${Math.max(0, status.elapsed || 0)}s</span>`;
+            if (st === 'too_large') return 'This capture has more packets than tshark analyzes automatically – <a href="#" data-action="start-shark">Add tshark protocols</a>';
+            if (st === 'error') return `Couldn't add tshark protocols: ${escapeHtml(status.message || 'tshark analysis failed')} – <a href="#" data-action="start-shark">Try again</a>`;
+            return '';    // waiting (Suricata isn't done), disabled, unavailable
+        }
+
+        // tshark is done and its rows are in the cards - nothing left to
+        // wait for or click
+        function sharkFinished(status) {
+            return !!status && status.status === 'ready' && !tsharkRowsPending && status.merged !== false;
+        }
+
+        // The line under the header, but for tshark's finished line, which
+        // moves to the end of the Protocol records heading when the stats
+        // grid has one (right above tshark's cards, whose dot it starts
+        // with) - so the line goes, once there's nothing to wait for. The
+        // states to wait on or click stay on the line, where they're seen
+        // before any card.
+        function updateTsharkLine() {
+            const statusEl = document.getElementById('tsharkLineStatus');
+            if (!statusEl) return;
+            const html = sharkStatusHtml(sharkStatus);
+            const headingEl = document.getElementById('tsharkHeadingStatus');
+            const inHeading = !!headingEl && sharkFinished(sharkStatus);
+            if (headingEl) {
+                headingEl.innerHTML = inHeading ? html : '';
+                headingEl.hidden = !inHeading;
+                headingEl.title = inHeading && tsharkTypes.size ? 'Every type tshark added, here and under Connections' : '';
+            }
+            statusEl.innerHTML = inHeading ? '' : html;
+            const bar = statusEl.closest('.tshark-line');
+            if (bar) bar.hidden = !statusEl.textContent;
+            syncSharkClock();
+        }
+
+        function tickSharkClock() {
+            const el = document.getElementById('tsharkLineTimer');
+            if (el && sharkRunStartedAt !== null) el.textContent = `${Math.max(0, Math.floor((Date.now() - sharkRunStartedAt) / 1000))}s`;
+        }
+
+        function syncSharkClock() {
+            if (!(sharkStatus && sharkStatus.status === 'running')) {
+                if (sharkClockTimer) clearInterval(sharkClockTimer);
+                sharkClockTimer = sharkRunStartedAt = null;
+                return;
+            }
+            // Re-anchored only when the server's count has drifted from
+            // ours, so a poll's rounding doesn't make the number jump back.
+            const started = Date.now() - (sharkStatus.elapsed || 0) * 1000;
+            if (sharkRunStartedAt === null || Math.abs(started - sharkRunStartedAt) > 1500) sharkRunStartedAt = started;
+            tickSharkClock();
+            if (!sharkClockTimer) sharkClockTimer = setInterval(tickSharkClock, 1000);
+        }
+
+        function stopSharkPolling() {
+            if (sharkPollTimer) clearTimeout(sharkPollTimer);
+            sharkPollTimer = null;
+        }
+
+        // Fetches (or, with start, requests) this analysis's tshark status,
+        // re-polling while tshark or the merge is still working. When its
+        // rows have just joined the analysis's, the page reloads them
+        // (refreshForTsharkRows). md5 pins it to the analysis it was
+        // started for, so a reply or poll for one the user has since left
+        // is dropped.
+        async function refreshSharkStatus(md5, start) {
+            stopSharkPolling();
+            const wasBusy = sharkIsBusy(sharkStatus);
+            let status;
+            try {
+                const resp = start
+                    ? await fetch('/api/shark-start', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({md5: md5})})
+                    : await fetch('/api/shark-status?md5=' + encodeURIComponent(md5) + '&t=' + Date.now());
+                status = await resp.json();
+            } catch (e) {
+                status = {status: 'error', message: 'Could not reach the server'};
+            }
+            if (md5 !== currentMd5) return;
+            sharkStatus = status;
+            updateTsharkLine();
+            if (sharkIsBusy(status)) {
+                sharkPollTimer = setTimeout(() => refreshSharkStatus(md5), SHARK_POLL_MS);
+            } else if (wasBusy && status.status === 'ready') {
+                // Nothing to reload when tshark added nothing, and the page
+                // shows nothing it added before (a rebuild that found the same)
+                const addsNothing = Array.isArray(status.types) && !status.types.length && !tsharkTypes.size;
+                if (!addsNothing) refreshForTsharkRows(md5);
+            }
+        }
+
+        // tshark's rows joined the analysis after the page opened: reload
+        // the cards (and the open table) once - but not while the analyst
+        // is pointing at or tabbing through the cards, where the shift
+        // would move what they're about to click (the line offers a link
+        // meanwhile). The open tab stays open. tsharkRowsPending: false,
+        // 'held' (waiting for the analyst to leave the cards) or 'loading'.
+        var tsharkRowsPending = false;
+        function refreshForTsharkRows(md5, now) {
+            if (md5 !== currentMd5) return;
+            const grid = document.querySelector('.stats-grid');
+            if (!now && grid && (grid.matches(':hover') || grid.contains(document.activeElement))) {
+                if (tsharkRowsPending === 'held') return;
+                tsharkRowsPending = 'held';
+                updateTsharkLine();
+                const later = () => {
+                    grid.removeEventListener('mouseleave', later);
+                    grid.removeEventListener('focusout', later);
+                    setTimeout(() => { if (tsharkRowsPending === 'held') refreshForTsharkRows(md5); }, 200);
+                };
+                grid.addEventListener('mouseleave', later);
+                grid.addEventListener('focusout', later);
+                return;
+            }
+            tsharkRowsPending = 'loading';
+            updateTsharkLine();
+            refreshAnalysisData().finally(() => {
+                tsharkRowsPending = false;
+                if (md5 === currentMd5) updateTsharkLine();
+            });
+        }
+
         function notesIconHtml() {
             const color = currentNotes ? 'var(--accent)' : 'var(--text-muted)';
             const title = currentNotes ? 'View/edit notes' : 'Add notes';
@@ -11638,6 +13503,11 @@
 
                 if (result.success) {
                     currentMd5 = md5;
+                    // tshark's status is fetched below once we know it's a PCAP.
+                    sharkStatus = null;
+                    tsharkRowsPending = false;
+                    tsharkTypes = new Set();
+                    stopSharkPolling();
                     currentFileName = result.file_name || md5;
                     currentNotes = result.notes || '';
                     document.title = 'SO-CRATES - ' + currentFileName;
@@ -11664,6 +13534,7 @@
                     // re-arm makes the right one get computed.
                     acknowledgedAlertsCountStale = true;
                     dnsHeuristicsCountStale = true;
+                    findingsCountStale = true;
                     resetPagination();
                     hiddenAggregations = new Set();
                     aggPage = {}; aggFullCountsCache = {}; aggTotalsCache = {};
@@ -11677,6 +13548,7 @@
                     const statsData = await statsResp.json();
                     if (isStaleFetch(gen)) return;
                     eventStats = statsData.counts;
+                    tsharkTypes = new Set(statsData.tshark_types || []);
                     baseEventStats = {...eventStats};
 
                     const types = sortEventTypes(Object.keys(baseEventStats).filter(t => t !== 'stats' && t !== 'all'));
@@ -11692,6 +13564,7 @@
                     // the mode flags or render over it.
                     if (isStaleFetch(gen)) return;
                     const detectedType = analysisStatus.meta?.detected_type || detectFileType(currentFileName);
+                    showAnalysisWarnings(analysisStatus.warnings);
 
                     const isPcap = detectedType === 'pcap';
                     const isLogFile = detectedType === 'log';
@@ -11716,7 +13589,12 @@
                         ${reanalyzeIconHtml()}
                         ${deleteIconHtml()}
                     `;
+                    document.getElementById('tsharkLineContainer').innerHTML = isPcap ? tsharkLineHtml() : '';
                     document.getElementById('appHeaderMd5').onclick = () => copyMd5ToClipboard(currentMd5);
+                    if (isPcap) {
+                        updateTsharkLine();
+                        refreshSharkStatus(md5);
+                    }
                     document.getElementById('appHeaderRight').innerHTML = renderGearMenu();
                     updateThemeMenu();
                     showAnalysisUI();
@@ -12002,7 +13880,7 @@
         // so tying a specific joke to a specific phase added authoring
         // effort without adding anything the user would notice.
         // getPhaseMessages() below draws independently for each of the
-        // 4 phase slots (so a single load can show a couple of different
+        // phase slots (so a single load can show a couple of different
         // lines as it moves through phases), each draw fixed for that
         // phase's whole duration (not re-rolled every second) so the
         // message never flickers mid-phase.
@@ -12114,7 +13992,7 @@
             
             // Local timer updates elapsed time every 1s without hitting the server
             elapsedInterval = setInterval(() => {
-                const elapsedSec = Math.floor((Date.now() - startTime) / CONFIG.POLLING_INTERVAL_MS);
+                const elapsedSec = Math.floor((Date.now() - startTime) / 1000);
                 const msg = phaseMessages[currentPhase] || 'Analyzing file...';
                 showLoading(`${msg} (${elapsedSec}s)`);
             }, CONFIG.POLLING_INTERVAL_MS);
@@ -12142,7 +14020,7 @@
                         hideLoading();
                         // No fetch-generation guard here: if the user has
                         // since navigated to a different analysis (e.g. via
-                        // notifyIfAdditionalAnalyses' "View Recent Analyses"
+                        // notifyIfAdditionalAnalyses' "View Previous Analyses"
                         // link), this still unconditionally yanks them back
                         // to `md5` once it finishes. Pre-existing gap, not
                         // introduced by multi-pcap-zip support - just more
@@ -12293,6 +14171,17 @@
             }
         }
         
+        // What went wrong without failing the analysis (the server's
+        // storage.add_analysis_warning) - a YARA scan that failed, so its file
+        // alerts may be missing - on a line of its own above the results
+        function showAnalysisWarnings(warnings) {
+            const el = document.getElementById('analysisWarnings');
+            if (!el) return;
+            const list = Array.isArray(warnings) ? warnings.filter(w => typeof w === 'string') : [];
+            el.innerHTML = list.map(w => `<div class="analysis-warning">${escapeHtml(w)}</div>`).join('');
+            el.hidden = list.length === 0;
+        }
+
         async function openReanalyzeModal(md5, name) {
             let phase = 'files';
             let hasRowNotes = false;
@@ -12513,6 +14402,8 @@
             },
             'view-dns-heuristic-domain': (el) => viewDnsHeuristicDomain(el.dataset.id),
             'toggle-dns-heuristics-info': (el) => toggleDnsHeuristicsInfo(el),
+            'toggle-findings-info': (el) => toggleFindingsInfo(el),
+            'toggle-stat-group': (el) => toggleStatGroup(el),
 
             // Sankey / Aggregation panels.
             'toggle-diagram': () => toggleDiagram(),
@@ -12534,6 +14425,8 @@
             // Analysis header icons - all read the current-analysis
             // globals at click time, same as the old inline handlers did.
             'show-notes-modal': () => showNotesModal(),
+            'start-shark': () => { if (currentMd5) refreshSharkStatus(currentMd5, true); },
+            'show-tshark-rows': () => { if (currentMd5) refreshForTsharkRows(currentMd5, true); },
             'open-reanalyze-modal': () => openReanalyzeModal(currentMd5, currentFileName),
             'open-delete-analysis': () => openDeleteAnalysis(currentMd5, currentFileName),
         };

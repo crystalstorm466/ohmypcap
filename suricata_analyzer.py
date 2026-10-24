@@ -10,6 +10,7 @@ import time
 
 import config
 from db import create_sqlite_db
+import shark_analyzer
 from validators import is_host_reachable, is_epoch_stale, gunzip_atomically
 from yara_analyzer import run_yara_pipeline
 
@@ -227,6 +228,29 @@ def _enable_ja3_ja4_fingerprints(config_content):
     return config_content
 
 
+def _set_mpm_cache_path(config_content, cache_dir):
+    """Point Suricata's compiled-rule cache (sgh-mpm-caching-path) at
+    cache_dir.
+
+    The shipped config already turns the cache on (`sgh-mpm-caching:
+    yes`), but at /var/lib/suricata/cache/sgh - a directory that doesn't
+    exist in the image, under a parent owned by root while Suricata runs
+    unprivileged. So the cache was never written, and every run rebuilt
+    every Hyperscan database: 16.5s of rule loading on a tiny pcap,
+    against 7.3s once a writable cache is warm (measured on the image's
+    53k-rule default set). The first run after a rule change still
+    rebuilds, and Suricata prunes entries unused for 7 days by default.
+
+    Rewrites whatever path is set rather than matching the shipped
+    default, so it also moves an already-processed config.
+    """
+    return re.sub(
+        r'(?m)^(\s+sgh-mpm-caching-path:\s*).*$',
+        lambda m: m.group(1) + cache_dir,
+        config_content
+    )
+
+
 def _enable_community_id(config_content):
     """Enable Suricata's community-id output, which ships disabled by
     default (`community-id: false`).
@@ -234,8 +258,9 @@ def _enable_community_id(config_content):
     Unlike the arp eve-log entry (a real volume/signal tradeoff, kept
     opt-in - see _enable_eve_log_arp), community-id adds a single
     deterministic `community_id` field to flow/alert records rather than
-    new events, so it's forced on unconditionally like the other five
-    file-store tweaks below rather than gated behind a parameter. It lets
+    new events, so it's forced on unconditionally like the file-store
+    tweaks setup_suricata_config() makes, rather than gated behind a
+    parameter. It lets
     so-crates' output correlate against Zeek/other community-id-aware
     tools without a user ever discovering the setting exists.
 
@@ -705,6 +730,12 @@ def setup_suricata_config(data_dir=None, enable_arp=False, on_progress=print, ne
         config_content = _enable_app_layer_protocols(config_content)
         config_content = _enable_eve_log_protocol_types(config_content)
         config_content = _enable_community_id(config_content)
+        mpm_cache_dir = os.path.join(suricata_dir, 'cache', 'sgh')
+        try:
+            os.makedirs(mpm_cache_dir, exist_ok=True)
+            config_content = _set_mpm_cache_path(config_content, mpm_cache_dir)
+        except OSError as e:
+            on_progress(f'Warning: could not create the rule cache directory {mpm_cache_dir}: {e}')
         config_content = _enable_ja3_ja4_fingerprints(config_content)
         if enable_arp:
             config_content = _enable_eve_log_arp(config_content)
@@ -856,8 +887,14 @@ def spawn_suricata(dir_path, pcap_path, suricata_config_path=None, data_dir=None
 
     _clear_error(dir_path)
     _set_phase(dir_path, 'network')
+    # tshark starts alongside Suricata (in its own low-priority process, see
+    # shark_analyzer), so the protocols it adds are usually ready as soon as
+    # Suricata's results are - if it's on and the capture is small enough
+    # to run unasked.
+    if shark_analyzer.enabled(data_dir) and shark_analyzer.background_eligible(pcap_path):
+        shark_analyzer.enqueue(dir_path, pcap_path)
 
-    def on_suricata_done():
+    def on_suricata_done(returncode=0):
         # Phase 2: Run YARA scan on extracted files
         _set_phase(dir_path, 'files')
         try:
@@ -873,8 +910,27 @@ def spawn_suricata(dir_path, pcap_path, suricata_config_path=None, data_dir=None
                 create_sqlite_db(db_file, eve_file)
             except Exception as e:
                 _set_error(dir_path, f'Database creation failed: {e}')
+            else:
+                # events.db has every event in full now and nothing reads
+                # eve.json again - it would only double the analysis's size
+                # (a failed import keeps it, to see what went wrong)
+                try:
+                    os.unlink(eve_file)
+                except OSError:
+                    pass
+        elif not os.path.exists(db_file):
+            # Nothing to import: without an error, the analysis would read
+            # as still processing forever (a bad config or rule file, a
+            # pcap Suricata rejects, Suricata killed)
+            _set_error(dir_path, f'Suricata wrote no results (exit code {returncode})')
         # Clear phase only after DB (with YARA matches) is ready
         _clear_phase(dir_path)
+        # If tshark finished first, its rows join Suricata's now (otherwise
+        # its own finish does this - see shark_analyzer.merge)
+        try:
+            shark_analyzer.merge(dir_path)
+        except Exception as e:
+            _set_error(dir_path, f'Adding tshark protocols failed: {e}')
 
     try:
         proc = subprocess.Popen(
@@ -898,7 +954,7 @@ def spawn_suricata(dir_path, pcap_path, suricata_config_path=None, data_dir=None
                     _set_error(dir_path, f'Suricata timed out after {config.SURICATA_RUN_TIMEOUT}s')
                     _clear_phase(dir_path)
                     return
-                on_suricata_done()
+                on_suricata_done(proc.returncode)
             except Exception as e:
                 # This runs in a daemon thread, where an uncaught exception
                 # is silently swallowed (never surfaced to the user or to

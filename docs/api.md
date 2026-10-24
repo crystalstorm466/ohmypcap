@@ -37,7 +37,7 @@ Redirects to `/socrates.html`.
 
 Returns the running SO-CRATES version.
 
-**Response:** `{"version": "4.4.0"}`
+**Response:** `{"version": "5.0.0"}`
 
 ---
 
@@ -67,7 +67,7 @@ Tells the frontend whether the "Sync theme to OhMyDebn theme" toggle could ever 
 
 ### `GET /api/events`
 
-Returns event data from Suricata's eve.json (via SQLite index or direct JSON parse).
+Returns event data from the analysis's events.db (Suricata's eve.json events, imported).
 
 **Query Parameters:**
 
@@ -108,12 +108,13 @@ Returns event-type counts for the current or specified analysis.
 | `md5` | Yes | - | MD5 hash of a historical analysis |
 | `q` | No | none | Full-text search query (counts only matching events). Multiple `q` params AND together. |
 
-**Response:** `{"counts": <event type to count map>, "date_range": {"min": <timestamp or null>, "max": <timestamp or null>}}`
+**Response:** `{"counts": <event type to count map>, "date_range": {"min": <timestamp or null>, "max": <timestamp or null>}, "tshark_types": [<event type>, ...]}` - `tshark_types` lists the types tshark added to a PCAP analysis (protocols Suricata doesn't parse: records like `s7comm`, and connection types like `conn_openvpn`), empty until it has
 
 **Example:**
 ```json
-{"counts": {"alert": 42, "dns": 1500, "http": 380, "tls": 95, "flow": 2200},
- "date_range": {"min": "2026-02-03T11:13:50.123456+0000", "max": "2026-02-03T11:16:02.654321+0000"}}
+{"counts": {"alert": 42, "dns": 1500, "http": 380, "tls": 95, "flow": 2200, "s7comm": 310, "conn_openvpn": 2},
+ "date_range": {"min": "2026-02-03T11:13:50.123456+0000", "max": "2026-02-03T11:16:02.654321+0000"},
+ "tshark_types": ["conn_openvpn", "s7comm"]}
 ```
 
 ---
@@ -132,6 +133,23 @@ Returns total event count, optionally filtered by type or search query.
 | `acknowledged` | No | none | `only` counts *only* acknowledged rows instead of excluding them - see `GET /api/events`'s own `acknowledged` param |
 
 **Response:** `{"count": <number>}`
+
+---
+
+### `GET /api/findings`
+
+Returns the analysis's findings: what its protocol records show is worth a look - a weakness, a control action, a probe - from every protocol, as the **Findings** tab lists them. The rules are in `findings.py`.
+
+**Query Parameters:**
+
+| Parameter | Required | Default | Description |
+|---|---|---|---|
+| `md5` | Yes | - | MD5 hash of a historical analysis |
+| `q` | No | none | Full-text search query (only matching records). Multiple `q` params AND together. |
+| `counts` | No | none | `1` returns only each rule's `count` and `groups`, with an empty `findings` list |
+| `rule`, `detail`, `dest_ip`, `dest_port` | No | none | One finding's own records instead: its rule id, detail line and server, as the finding gives them (an empty `dest_port` for a record without one) |
+
+**Response:** `{"rules": [{"id", "title", "severity", "event_type", "why", "count", "groups"}], "findings": [{"rule", "severity", "title", "detail", "event", "count", "sources", "first", "last"}]}` - only the rules that matched. A rule's matches are grouped: the records with the same `detail` on the same server (`dest_ip` and `dest_port`) are one finding, whose `event` is the first of them, `count` how many there are, `sources` how many source hosts they came from, and `first` and `last` their earliest and latest times. `severity` is `high`, `medium` or `low`; `findings` are in the rules' order (most severe first), then by time, at most 500 per rule. A rule's `count` (its records) is always the full number, and `groups` the number of findings it makes - of its first 100,000 records, for a rule with more. Given `rule` (and the rest), `findings` holds that finding's records instead, one each with a `count` of 1, oldest first, at most 500, and the rule's `count` says how many there are. `event` is a record as `GET /api/events` returns it. A `detail` never has a password in it, even when the record does.
 
 ---
 
@@ -365,7 +383,7 @@ Loads a historical analysis by MD5.
 {"success": true, "md5": "<hash>", "file_name": "<filename>", "notes": "<notes text or empty string>"}
 ```
 
-**Errors:** `400` if MD5 is invalid or path is unsafe. `404` if analysis not found. `400` if eve.json exceeds size limit.
+**Errors:** `400` if MD5 is invalid or path is unsafe. `404` if analysis not found. `400` if a not-yet-imported eve.json exceeds the size limit.
 
 ---
 
@@ -408,11 +426,37 @@ or, if analysis (Suricata/YARA/Zircolite/email parsing) failed:
 
 `meta` is present whenever `.meta` exists for the analysis (written after the file type is detected) and is omitted otherwise; it's absent entirely from the `error` response.
 
+A `ready` analysis can also have `warnings`, a list of what went wrong without failing it - for now, a YARA scan that failed or timed out, so its File Alerts may be missing (`"The YARA scan of extracted files failed - File Alerts may be missing: <reason>"`). Omitted when there are none.
+
 `hasRowNotes` is `true` if the analysis has at least one row-level note, and always `false` while it isn't ready (see `POST /api/row-note`) - used by the reanalyze confirmation dialog to conditionally warn that reanalyzing deletes them. This field is added only on this GET route, not on the identically-shaped `POST /api/check-status` response below - that endpoint is polled every 2 seconds during active processing, and the extra lookup has no reason to run that often.
 
 **Errors:** `400` for invalid or malformed MD5. There is no `404` for a well-formed MD5 that doesn't correspond to an existing analysis directory - the directory's absence just reads the same as "not ready yet" (`{"status": "processing", "phase": ""}`), since this endpoint never separately checks for the directory's existence.
 
 ---
+
+### `GET /api/shark-status`
+
+Where tshark stands for a PCAP analysis. Alongside Suricata, tshark decodes the capture (captures up to `SHARK_BACKGROUND_MAX_PACKETS`, 3 million packets by default; bigger ones only on request - see `POST /api/shark-start`. A run whose processes pass `SHARK_MAX_MEMORY_BYTES`, 4 GB by default, is stopped with an error), and once both are done, what Suricata lacks - records of protocols it doesn't parse, and connection rows (`conn_<protocol>`) - joins Suricata's in the analysis's `events.db`, so every data endpoint returns it (`GET /api/stats`'s `tshark_types` lists those types). Rows from tshark carry `"source": "tshark"`. An analysis that has never been queued (one from before tshark ran alongside Suricata, or whose queued run was lost to a server restart) is queued by its first status request, if it's under the packet limit. While tshark is switched off (`POST /api/shark-settings`), every status is `disabled` and nothing runs.
+
+**Query Parameters:**
+
+| Parameter | Required | Description |
+|---|---|---|
+| `md5` | Yes | MD5 hash of the analysis (`400` if invalid, `404` if it doesn't exist) |
+
+**Response:** `{"status": "<status>"}`, where status is one of:
+
+| Status | Meaning |
+|---|---|
+| `ready` | Done. Adds `seconds` (how long the run took - absent for a `shark.db` built before runs recorded it) and `merged` (whether its rows have joined Suricata's in the analysis's `events.db`; a status request that finds them not yet merged starts the merge) - and, once merged, `types`: the event types tshark added, as `GET /api/stats`'s `tshark_types` lists them (`[]` when it added nothing) |
+| `queued` | Waiting for another analysis's run to finish. Adds `position` (1 = next) |
+| `running` | tshark is analyzing the capture. Adds `elapsed` (whole seconds since the run started) |
+| `waiting` | Suricata hasn't finished yet (tshark, which starts alongside it, has finished or not started); while both run, the status is tshark's own - `queued` or `running` |
+| `too_large` | Over the background size limit - start it with `POST /api/shark-start` |
+| `error` | The last run failed. Adds `message` |
+| `not_started` | Not queued yet |
+| `unavailable` | Not a PCAP analysis |
+| `disabled` | tshark is switched off in Settings |
 
 ### `GET /api/sigma-alerts`
 
@@ -557,12 +601,12 @@ If the upload was a ZIP archive containing more than one supported file, every e
 **Processing flow:**
 1. Detects file type (PCAP magic bytes, log content, or ZIP `PK` magic bytes - except files with Office extensions like `.docx`/`.xlsx`, which are ZIPs internally but analyzed as regular files)
 2. Computes MD5 hash
-3. If already analyzed (`eve.json` for PCAPs, `events.db` for non-PCAPs), returns `ready`
+3. If already analyzed (`eve.json` or `events.db` for PCAPs, `events.db` for non-PCAPs), returns `ready`
 4. For PCAPs: saves file, spawns Suricata in background thread, returns `processing` with `phase: "network"`
 5. For log files: saves the file and imports it into `events.db` in the background, returns `processing` with `phase: "logs"`
 6. For email messages: saves the message, then in the background parses it into `email`/`link` events and stores and YARA-scans the message and each decoded attachment (in the analysis's `filestore/`, the same layout Suricata uses), returns `processing` with `phase: "email"`
 7. For other files: saves file, runs YARA/EXIF scans in the background, returns `processing` with `phase: "files"`
-8. When analysis finishes, results are available in `events.db` (or `eve.json` for PCAPs)
+8. When analysis finishes, results are available in `events.db` (a PCAP's `eve.json` is removed once imported)
 
 **Special handling:** Password-protected zips are auto-decrypted using the common `infected` password; if the filename contains a `YYYY-MM-DD` date, the MTA-style dated password (`infected_YYYYMMDD`) is also tried.
 
@@ -654,6 +698,16 @@ Only `md5` is read from the request body - the response's `phase` is determined 
 **Errors:** `400` for invalid MD5 or unsafe path. `404` if the analysis doesn't exist or contains no analyzable file. `409` if analysis is already in progress. `500` if Suricata fails to start (the failure reason from the analysis's `.error` file, e.g. Suricata missing or a permissions problem - distinguished from the `409` case by whether `.error` was written).
 
 ---
+
+### `POST /api/shark-start`
+
+Runs tshark for a PCAP analysis on request, whatever its size - for a capture over the background packet limit, or to retry after an error. Returns the same response as `GET /api/shark-status`.
+
+**Request Body:** `{"md5": "<md5>"}` (`400` if invalid, `404` if the analysis doesn't exist)
+
+### `GET /api/shark-settings` / `POST /api/shark-settings`
+
+Whether tshark runs at all, for every analysis on the server - on by default. `GET` returns `{"enabled": true}`; `POST` with `{"enabled": false}` (or `true`) changes it and returns the new value (`400` unless `enabled` is a boolean). Turning it off stops new runs (one already running finishes); analyses keep the protocols already added. Kept in the data directory's `shark_settings.json`.
 
 ### `POST /api/delete-analysis`
 

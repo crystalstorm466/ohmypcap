@@ -6,6 +6,7 @@ Arrow keys navigate rather than scroll the page, and adapt to what's on screen:
 
 - **Left/Right** - on the main screen, moves between the sample-file cards; on an analysis page, moves a highlight between stat-card tabs (Enter switches to the highlighted one), or between Aggregation Tables (or, once on a table's Prev/Next stop, toggles between the two) when the keyboard highlight is inside that section
 - **Up/Down** - on the main screen, moves between rows in Previous Analyses; on an analysis page, steps through everything on screen in order - filter chips, stat cards, the section toggles, Aggregation Tables, data-table rows, and an expanded row's own controls. Inside the Aggregation Tables section, Down walks a table's own rows and then its Prev/Next stop before continuing into the next visual row of tables (or the Data Table if there isn't one) - Up retraces the same path in reverse
+- A collapsed section of stat cards (see [Exploring Results](exploring-results.md#navigate-results)) is skipped by both: its cards aren't stops until it's opened. Its heading isn't an arrow stop either - Tab reaches the heading's button, and Enter there opens or collapses the section
 - **Enter** - activates whatever's currently highlighted (opens a sample or previous analysis, or expands/collapses a table row) - the same as clicking it
 - **Escape** - closes whatever's open (a modal, the gear menu, a pivot menu) one level at a time, then returns to the main screen once nothing else is open
 - **`?`** - opens Help
@@ -38,7 +39,7 @@ Typing any letter or digit outside a text field opens a command palette, pre-fil
 The gear icon in the upper-right corner opens a menu with five entries:
 
 - **Help** - the welcome/help modal, including a link to this documentation site
-- **Settings** - upload size, query result limit, custom lookup sites, and a Danger Zone section to permanently delete every previous analysis at once (with a live count of how many exist)
+- **Settings** - upload size, query result limit, whether tshark adds the protocols Suricata doesn't parse, custom lookup sites, and a Danger Zone section to permanently delete every previous analysis at once (with a live count of how many exist)
 - **Themes** - browse and apply themes; see [Themes](../themes.md)
 - **Rules** - check the current rule count and last-updated time for Suricata, YARA, and Sigma, and trigger an update for one ruleset (or all three) with live progress. Rule updates are not run automatically at startup - this modal is the only way to refresh them after the initial install. The Suricata section also has a "Show protocol-anomaly noise alerts" toggle (off by default) for Suricata's own built-in decoder alerts (e.g. excessive retransmissions) - see [Decoder Alerts](exploring-results.md#navigate-results) - and a "Notify me when detection rules are stale after N days" option that shows a reminder on the main screen
 - **About** - current version, links to this documentation site and the GitHub repo, and an opt-in "Check GitHub for newer releases" setting with a manual "Check Now" button

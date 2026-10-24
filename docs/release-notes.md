@@ -1,5 +1,275 @@
 # Release Notes
 
+## 5.0.0
+
+### Protocols from tshark
+
+Suricata doesn't parse every protocol on a network. Every PCAP analysis now
+also runs tshark (Wireshark's command-line engine), alongside Suricata, and
+the protocols Suricata doesn't parse join the analysis's results - same
+tabs, tables, aggregations, Sankey diagram, search, pivots and row notes,
+each card marked with a dot.
+
+**Industrial and IoT**
+
+- **S7comm** (Siemens PLCs) - one record per request and response: reads,
+  writes and control
+- **IEC 104** (power grid telecontrol) - a record for each control action
+  (command, set point, interrogation, clock sync, file transfer) with
+  whether the substation confirmed, refused or finished it, and one for
+  each monitored point: how often it updated, why, and its last value
+- **BACnet** (building automation) - a record for each action (a write,
+  a file write, a reinitialize or communication control with the password
+  it carried, a subscription) with the device's reply, one for each
+  object and property polled or reported (how often, errors, last value),
+  and one for each device announcing itself, with its vendor
+- **OPC UA** (industrial automation) - a record for each connection: the
+  endpoint, security policy, client application, the user it logged in as
+  (and the password, when it was sent unencrypted) and the services it
+  called; and one for each change - a node written, a method called, a
+  node added or deleted - with that operation's result
+- **GOOSE** (IEC 61850 substation messaging) - a record for each state
+  change a protection relay publishes: its values and which ones changed,
+  how many times it was repeated, and a jump or reset in its state number,
+  which is what a forged message looks like
+- **CoAP** (HTTP for IoT devices, over UDP 5683) - a record for each
+  request and its response, like Suricata's HTTP records: method, URI,
+  response code and content format - and, for a device's discovery
+  (`/.well-known/core`), the resources it listed
+
+**Logins, remote access and management**
+
+- **Telnet** (Suricata recognizes it but logs nothing about it) - one
+  record per session: the device's banner, the user name and password
+  typed at its login, whether the login failed, and the commands typed
+- **RADIUS** (how Wi-Fi, VPNs and network devices check logins) - a
+  record for each login, its rounds of challenges and the final accept or
+  reject: the user name, the device that asked, the client's MAC, the EAP
+  method, the address given and the server's reply message; and one for
+  each accounting Start, Stop or update, with the session's length and
+  bytes
+- **SOCKS** (proxies on port 1080) - a record for each connection through
+  the proxy: the host and port the client asked it to reach (the flow
+  shows only the proxy), the proxy's answer, the login method and user
+  name, and the protocol tunneled through it afterwards
+- **IPMI** (server management controllers - iDRAC, iLO, Supermicro - over
+  RMCP, UDP 623) - a record for each flow to a controller, of what it says
+  before any login: whether it answered a presence ping, the IPMI versions
+  and login methods it offers, whether it allows anonymous logins or null
+  user names, and the cipher an IPMI 2.0 session asked for and was given -
+  with the weaknesses those show, such as cipher zero (CVE-2013-4782)
+- **L2TP** (the tunnel of L2TP/IPsec VPNs, UDP 1701) - a record for each
+  control connection, which seen at all is outside IPsec: the messages
+  exchanged, each end's host name, vendor and firmware (scanners name
+  themselves - masscan, Censys, Xpanse), how far it got and how it ended,
+  the calls placed and how many data messages crossed it
+- **XDMCP** (X display login managers, UDP 177) - a record for each client
+  and login manager: whether the server offered its graphical login
+  screen, its host name and status (often its OS and load), the
+  authentication and authorization methods named, and the display that
+  asked for a session; a broadcast query lists every server that answered
+
+The only passwords kept are the ones typed or sent in the clear where
+they're what an investigator is after: Telnet's login, OPC UA's
+unencrypted login and BACnet's device password. No other secret is ever
+read - not a RADIUS or SOCKS password, the password hash an IPMI 2.0
+controller sends, L2TP's CHAP exchange or the PPP login inside it,
+RIPv2's password or keyed digest, the arguments of an OPC UA
+user-management call (ChangePassword, AddUser), a PIN or enable password
+typed in a Telnet session after its login, or the X authorization cookie
+XDMCP hands a session.
+
+**Network services and routing**
+
+- **DHCPv6** (Suricata parses DHCP for IPv4 only) - a record for each
+  transaction, the client's message paired with the server's reply: the
+  client's hostname, MAC address and vendor class, and the addresses or
+  prefixes, DNS servers and search domains it was given
+- **Syslog** - a record for each message a device sent its log
+  collector: severity, facility, host, program and PID, and the message,
+  in either format (RFC 3164 or RFC 5424, with its structured data)
+- **DTLS** (TLS over UDP - Suricata parses TLS over TCP only) - a record
+  for each handshake, named like Suricata's TLS records: SNI, version,
+  the certificate, JA3/JA3S/JA4, the cipher suite, WebRTC's SRTP
+  profile, and how far the handshake got
+- **ONC RPC** (Suricata parses NFS, not the services around it) - a
+  record for each call and its reply: program, version, procedure and
+  result, the AUTH_UNIX machine name and uid; the portmapper's list of
+  the RPC services a host runs, and mountd's exports and mounts
+- **STUN** (NAT discovery and TURN relays, for WebRTC, VoIP and games -
+  and malware finding its public address) - a record for each flow's
+  exchanges of one kind: the public address and port the server
+  reported, a TURN relay's address, errors, the client's and server's
+  software and a TURN login's user name
+- **RIP and RIPng** (routing, UDP 520 and 521) - a record for each sender
+  and kind of message: the routes it announced (prefix, next hop, metric,
+  tag), the ones it withdrew, the metric changes between its updates, and
+  what a request asked for - a map of the networks and the routers
+  reaching them, a host that isn't a router announcing a default route,
+  and scanners asking a router for its whole table
+- **Tunnels** (Suricata decodes them but logs none) - a record for each
+  tunnel, like Zeek's tunnel.log: its type (GRE, VXLAN, Geneve, Teredo,
+  AYIYA, GTP-U, IP in IP, 6in4...), its outer endpoints, packets and
+  bytes each way, how long it lasted, and the inner flows and hosts that
+  crossed it - and whether its inner packet goes back to whoever sent
+  it, which is a scanner testing whether a host unwraps tunnels from
+  anyone. A tunneled packet's flows are Suricata's: the inner flow from
+  the inner packet on, and the tunnel's outer flow beside it
+- **TLS Failures** (Suricata logs TLS handshakes but none of their
+  alerts) - a record for each TLS connection over TCP that sent an alert
+  while it could still be read: a client refusing the server's
+  certificate (Unknown CA, Certificate Expired, Bad Certificate...) or a
+  server turning a client away (Handshake Failure, Protocol Version),
+  with the certificate, SNI and version from Suricata's TLS record of the
+  same connection. Every TLS 1.2 refusal can be read; in TLS 1.3, which
+  encrypts the certificate, only some clients' (OpenSSL's) can
+
+**Discovery and inventory**
+
+- **NBNS, LLMNR and SSDP** - one record per transaction: Windows name
+  resolution and registration, and UPnP device discovery
+- **SLP** (Service Location Protocol, UDP and TCP 427) - a record for
+  each request and its replies: the service type, scope and URL asked
+  about, the URLs, service types and attributes returned (an ESXi host's
+  product and build), the status and every host that answered a
+  multicast request. Internet scanners hunt ESXi hosts with SLP and
+  register services with exposed hosts for the CVE-2023-29552
+  amplification attack; their registrations and unanswered probes are
+  records too
+- **Windows Browser** (NetBIOS datagrams) - a passive inventory of the
+  Windows machines on the network: each one's name, workgroup or domain,
+  Windows version and roles (domain controller, SQL server, master
+  browser...), with browser elections and announcement requests counted
+- **LLDP and CDP** (link-layer discovery) - a passive inventory of the
+  switches, routers, phones, PLCs and PCs on the captured link: each
+  device's name, the port it announced from, what it is, its management
+  address and VLAN, its platform and software (CDP) or maker, model and
+  serial number (LLDP-MED)
+
+**Everything else**
+
+- **A card for every other protocol tshark recognizes** - OpenVPN, PRP,
+  HART-IP, MongoDB and so on - listing its connections, each marked with
+  whether the server answered (yes, no, or only with an ICMP error - a
+  scanner's probe of a closed port); the protocols nothing ever answered
+  share one card, **Probed Only**, so a week of scans hitting an
+  internet-facing server shows a few cards there instead of dozens
+- **Suricata stays in charge** of everything it parses: nothing from tshark
+  is added on a connection Suricata identified, so a scanner's HTTP request
+  to an rsh port stays HTTP, the way Suricata logged it
+- **Not the same as Security Onion's metadata** - Security Onion logs
+  protocol metadata with Zeek; SO-CRATES shows Suricata's protocol records
+  plus tshark's, so its fields and record counts won't match Security
+  Onion's Zeek logs for the same capture
+- **A cut-off capture still counts** - one that ends mid-packet (a partial
+  upload, a capture stopped mid-write) is read up to there, as Suricata
+  reads it, and the heading says so
+- **Nothing waits on tshark** - Suricata's results show as soon as they're
+  ready, and tshark's protocols join them when it finishes (usually first);
+  a line under the header counts the seconds while it works
+
+tshark runs at low priority with a 4 GB memory limit (a 210 MB, 2.3
+million-packet capture takes about 80 seconds); captures of more
+than 3 million packets wait until you click **Add tshark protocols**, and
+Settings can turn tshark off.
+
+### Findings
+
+A new **Findings** tab gathers what the protocol records show is worth a
+look, from every protocol, into one list ranked by severity - one row for
+each finding, with a detail line and the records' own details a click
+away:
+
+- **High** - IPMI controllers that accept cipher zero, anonymous logins
+  or no authentication; OPC UA passwords sent unencrypted; Telnet logins;
+  a Siemens PLC started, stopped or sent a program; a BACnet device
+  restarted or silenced; a GOOSE state number that jumped or reset (a
+  forged or replayed message); an SLP host accepting registrations
+  (CVE-2023-29552)
+- **Medium** - S7 writes, IEC 104 commands and set points, OPC UA writes
+  and method calls, TLS certificates refused by the other end, self-signed
+  TLS certificates (in malware captures, mostly command-and-control
+  servers'), open SOCKS proxies, XDMCP login screens offered, RIP default
+  routes and cleartext RIPv2 passwords, tunnel probes addressed back to
+  their sender, NFS exports listed, critical syslog messages
+- **Low** - TLS certificates expired or not yet valid at the time of the
+  connection, and ones that don't name the host the client asked for;
+  RIP tables handed out, RPC service lists, BACnet writes, SLP answers,
+  CoAP resource lists, L2TP without tunnel authentication, rejected
+  RADIUS logins
+
+The same finding on the same server is one row, however many records
+show it - a certificate fetched 200 times, a PLC written all day - with
+how many records and source hosts it covers; it opens to a list of them.
+An **About Findings** card says what each rule that matched looks for. A
+search narrows the list like any other tab. No password is shown, even
+where the record keeps one. Suricata's alerts stay on their own tab.
+
+### Cards in three sections
+
+With tshark's protocols, a capture can have dozens of cards, so a PCAP
+analysis's cards now come in three sections, each under a heading:
+**Triage** (the alerts, Findings, DNS Heuristics, Acknowledged Alerts and
+All Events - the way into everything), **Protocol records** (every type
+of record) and **Connections** (Flows, then tshark's connection cards). A
+capture whose
+cards all fall in one section shows no headings. A click on a heading
+collapses its section to the heading and a count of its cards; the choice
+is remembered, and until there is one, Connections starts collapsed past
+12 cards.
+
+### Suricata 8.0.7 and tshark 4.4.19
+
+Suricata is now 8.0.7, the current release in Debian's `trixie-backports`
+repo (up from 8.0.6), and tshark 4.4.19, from Debian's security updates.
+On the test captures, Suricata 8.0.7 logs the same records 8.0.6 did.
+
+### Faster PCAP analyses
+
+Loading Suricata's output into the analysis's database is about a quarter
+faster (90 seconds to 69 for a capture's 1.2 million events), and tshark's
+run about a third faster (121 seconds to 78 for the same capture) - with
+the same results.
+
+### Less disk for each PCAP analysis
+
+Suricata's `eve.json` is removed once its events are in the analysis's
+database, which keeps every one of them - nothing read it after that. It
+was about a fifth of a PCAP analysis's size (820 MB of 3.8 GB for a 209 MB
+capture). The first start of 5.0.0 removes it from existing analyses too;
+reanalyzing still works, since it runs Suricata again.
+
+### Fixes
+
+- tshark's connections: a host whose address ends in .255 (a public one,
+  or one in a /23 or larger) is no longer taken for a broadcast address -
+  one that answers is a host - and a broadcast is known by its frames'
+  Ethernet broadcast destination, whatever its last octet; and an ICMP
+  error about a tunneled packet (quoting it whole, tunnel and all) is
+  counted on the tunnel's outer flow, as Suricata counts it, not on the
+  packet inside's - or, for Teredo, on a flow made up of both
+- tshark's records: a TLS failure takes the certificate only from
+  Suricata's record of the same connection, not one of a reused port
+  long after; S7comm PDUs sharing a packet each get their own error and
+  function group; NBNS and DHCPv6 requests that reuse an answered
+  transaction ID are new transactions, not retransmissions
+- A YARA scan that fails or times out no longer looks like a clean one:
+  the analysis opens as usual, with a line above its results saying File
+  Alerts may be missing, and why
+- The container image no longer includes curl (used only to fetch rules
+  while building it), and its Zircolite environment is read-only to the
+  user SO-CRATES runs as
+- When a refresh's data no longer has the open tab's type of event (a
+  search that matched none of them), the first tab now opens instead of
+  every section staying hidden
+- Suricata now caches its compiled rules between analyses, so a PCAP
+  analysis no longer spends about 16 seconds rebuilding them every time -
+  after the first analysis, the built-in Sample PCAP file takes about 9
+  seconds instead of 19. The cache was always turned on in Suricata's
+  config, but pointed at a directory Suricata couldn't create; it's now
+  kept under `/data/suricata/cache`. The first analysis after a rule
+  update still rebuilds it.
+
 ## 4.4.0
 
 ### Email analysis

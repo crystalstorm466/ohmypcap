@@ -1303,6 +1303,16 @@
         .app-header-filename-input:focus { outline: none; border-color: var(--interactive-highlight, var(--accent)); }
         .app-header-right { display: flex; align-items: center; gap: 15px; flex-wrap: wrap; justify-content: flex-end; }
         .app-header-meta { display: flex; align-items: center; gap: 15px; margin-left: 15px; }
+        /* The tshark line (PCAP analyses), between the header and the search box: what tshark is adding - its dot is the key to the cards' */
+        .tshark-line { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; border-bottom: 1px solid var(--border-color); margin-bottom: 15px; }
+        .tshark-line[hidden] { display: none; }
+        .analysis-warnings { border-bottom: 1px solid var(--border-color); margin-bottom: 15px; padding: 8px 0; }
+        .analysis-warnings[hidden] { display: none; }
+        .analysis-warning { color: var(--badge-warning-text); font-size: 0.8rem; }
+        .tshark-line-status { color: var(--text-muted); font-size: 0.8rem; padding: 8px 0; }
+        .tshark-line-status a { color: var(--accent); font-weight: 600; }
+        .tshark-line-status .stat-badge-dot { margin-right: 6px; vertical-align: 1px; }
+        .tshark-line-timer { font-variant-numeric: tabular-nums; }
         /* Centers in the full header bar (.app-header is position: fixed,
            so it's the containing block here), independent of how wide the
            left-side icon/filename group happens to be - same reasoning as
@@ -1337,6 +1347,32 @@
         header { background: linear-gradient(135deg, var(--bg-secondary) 0%, var(--bg-tertiary) 100%); padding: 30px; border-radius: 12px; margin-bottom: 20px; border: 1px solid var(--border-color); }
         #mainHeader { padding: 0; background: transparent; border: none; }
         .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 15px; margin-bottom: 20px; }
+        /* Its own solid panel, like the cards: the fun themes animate the
+           page background behind the grid, and bare text over it was
+           unreadable (CGA's dithering, Vaporwave's sun). */
+        .stats-grid-heading { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin-top: 10px; padding: 10px 16px; background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 10px; color: var(--text-muted); font-size: 0.8rem; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; }
+        /* the cards' label color (.stat-label): readable on every theme, where
+           --text-primary isn't always (Breadbin Blue's is the dimmer one) */
+        .stats-grid-heading-note { font-weight: normal; text-transform: none; letter-spacing: normal; }
+        .stats-grid-heading { cursor: pointer; user-select: none; }
+        .stats-grid-heading:hover { color: var(--text-bright); }
+        .stats-grid-heading-toggle { all: unset; display: inline-flex; align-items: baseline; gap: 6px; cursor: pointer; font: inherit; color: inherit; text-transform: inherit; letter-spacing: inherit; }
+        .stats-grid-heading-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 3px; }
+        .stats-grid-heading-summary { font-weight: normal; text-transform: none; letter-spacing: normal; color: var(--text-bright); }
+        .stats-grid-heading-summary[hidden] { display: none; }
+
+        /* A Findings group's records, in its expanded row (loadFindingMembers) */
+        .finding-members-summary { color: var(--text-muted); font-size: 0.85rem; margin: 2px 0 10px; }
+        .finding-members-note { color: var(--text-muted); font-size: 0.85rem; padding: 6px 0; }
+        .finding-members-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+        .finding-members-table th { text-align: left; color: var(--text-muted); font-weight: 600; padding: 4px 8px; border-bottom: 1px solid var(--border-color); }
+        .finding-members-table td { padding: 4px 8px; border-bottom: 1px solid var(--border-color); }
+        .finding-members-table tr[data-action] { cursor: pointer; }
+        .finding-members-table tr[data-action]:hover { background: var(--bg-hover); }
+        .stat-card.stat-card-collapsed { display: none; }
+        .stats-grid-heading-aside { margin-left: auto; font-weight: normal; text-transform: none; letter-spacing: normal; }
+        .stats-grid-heading-aside[hidden] { display: none; }
+        .stats-grid-heading-aside .stat-badge-dot { margin-right: 6px; vertical-align: 1px; }
         .stat-card { background: var(--bg-secondary); padding: 20px; border-radius: 10px; border: 1px solid var(--border-color); text-align: center; cursor: pointer; container-type: inline-size; position: relative; }
         .stat-card:hover { border-color: var(--interactive-highlight, var(--accent)); }
         .stat-card.tab-active { border-color: var(--interactive-highlight, var(--accent)); background: var(--bg-tertiary); }
@@ -1394,7 +1430,15 @@
            string - see its own comment), so white-space: nowrap is safe:
            a lone number has no space to wrap on anyway. */
         .stat-number { font-size: clamp(1.15rem, 15cqw, 2.5rem); font-weight: bold; white-space: nowrap; }
+        /* Never breaks inside a word - a word too long for its card is
+           scaled down to fit instead (socrates.js fitStatLabels) */
         .stat-label { color: var(--text-muted); font-size: 0.85rem; text-transform: uppercase; letter-spacing: 1px; word-break: keep-all; overflow-wrap: normal; line-height: 1.2; }
+        /* tshark: a tab for a protocol Suricata doesn't parse - a dot in
+           the card's corner (the tshark line, which starts with the same dot, says what it
+           means), so the card keeps its two lines */
+        .stat-badge, .stat-badge-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+        .stat-badge { position: absolute; top: 10px; right: 10px; }
+        .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
         @media (max-width: 600px) { .stat-card { padding: 15px 10px; } .stat-number { font-size: 1.8rem; } .stat-label { font-size: 0.75rem; letter-spacing: 0.5px; } }
         .section { background: var(--bg-secondary); overflow: hidden; }
         .section-hidden { display: none; }

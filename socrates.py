@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import functools
 import http.server
 import socketserver
 import concurrent.futures
@@ -25,6 +26,7 @@ from db import (
     query_sigma_alerts_sqlite, get_sigma_stats_sqlite,
     get_sigma_alert_count_sqlite, get_event_date_range_sqlite,
     get_sankey_data_sqlite, get_aggregation_data_sqlite, get_aggregation_totals_sqlite,
+    tshark_types,
     AGGREGATION_TOP_N, AGGREGATION_PAGE_SIZE_OPTIONS,
     set_row_note, has_row_notes,
     set_acknowledged, set_acknowledged_bulk,
@@ -37,8 +39,9 @@ from validators import (
 from url_fetch import FileTooLargeError, fetch_url_safely
 from storage import (
     PCAP_EXTENSIONS, PCAP_ANALYSIS_ARTIFACTS, FILE_ANALYSIS_ARTIFACTS,
-    upload_tmp_dir, cleanup_upload_tmp_dir, resolve_upload_size_limit, extract_zip_contents,
+    upload_tmp_dir, cleanup_upload_tmp_dir, remove_imported_eve_files, resolve_upload_size_limit, extract_zip_contents,
     hash_file, hash_file_with_prefix, is_pcap_path, write_meta, read_meta, find_pcap_file,
+    add_analysis_warning, read_analysis_warnings,
 )
 from analysis_cache import (
     SANKEY_CACHE, AGGREGATION_CACHE, AGGREGATION_TOTALS_CACHE, ALL_CACHES, CACHE_LOCK,
@@ -64,6 +67,8 @@ from ohmydebn_colors import (
     derive_theme_colors, derive_theme_colors_from_alacritty, derive_theme_colors_from_named_palette,
 )
 from email_analyzer import analyze_message, remove_filestore
+import shark_analyzer
+from findings import query_findings
 from playbook_lookup import get_playbook
 from samples import SAMPLES
 from ai_summary_lookup import get_ai_summary
@@ -71,7 +76,7 @@ import config
 import cyberchef
 import tomllib
 
-VERSION = '4.4.0'
+VERSION = '5.0.0'
 GITHUB_RELEASES_API = 'https://api.github.com/repos/dougburks/so-crates/releases/latest'
 PORT = int(os.environ.get('PORT', 8000))
 BIND_ADDRESS = os.environ.get('BIND_ADDRESS', '127.0.0.1')
@@ -87,7 +92,9 @@ MAX_TRANSCRIPT_SIZE = config.MAX_TRANSCRIPT_SIZE
 MAX_EVE_SIZE = config.MAX_EVE_SIZE
 SURICATA_DIR = os.path.join(DATA_DIR, 'suricata')
 
-MD5_RE = re.compile(r'^[a-f0-9]{32}$')
+# \A...\Z, not ^...$: in Python $ also matches just before a trailing newline,
+# so "<md5>\n" would slip through - \Z anchors the absolute end of the string.
+MD5_RE = re.compile(r'\A[a-f0-9]{32}\Z')
 # Deliberately permissive rather than an enum of known theme names, so the
 # client's own THEMES allowlist (static/socrates.js) stays the single source
 # of truth; this just bounds what a malformed/oversized file can smuggle
@@ -596,6 +603,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         '/api/events': 'handle_get_events',
         '/api/stats': 'handle_get_stats',
         '/api/count': 'handle_get_count',
+        '/api/findings': 'handle_get_findings',
         '/api/sankey-data': 'handle_get_sankey_data',
         '/api/aggregation-data': 'handle_get_aggregation_data',
         '/api/aggregation-totals': 'handle_get_aggregation_totals',
@@ -616,6 +624,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         '/api/sigma-count': 'handle_get_sigma_count',
         '/api/sigma-stats': 'handle_get_sigma_stats',
         '/api/status': 'handle_get_status',
+        '/api/shark-status': 'handle_get_shark_status',
+        '/api/shark-settings': 'handle_get_shark_settings',
         '/api/rule-update-status': 'handle_get_rule_update_status',
         '/api/rules-info': 'handle_get_rules_info',
         '/api/playbook': 'handle_get_playbook',
@@ -628,6 +638,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         '/api/load-sample': 'handle_post_load_sample',
         '/api/check-status': 'handle_post_check_status',
         '/api/reanalyze': 'handle_post_reanalyze',
+        '/api/shark-start': 'handle_post_shark_start',
+        '/api/shark-settings': 'handle_post_shark_settings',
         '/api/delete-analysis': 'handle_post_delete_analysis',
         '/api/rename-analysis': 'handle_post_rename_analysis',
         '/api/analysis-notes': 'handle_post_analysis_notes',
@@ -844,10 +856,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             try:
                 counts = get_event_types_sqlite(db_file, q)
                 date_range = get_event_date_range_sqlite(db_file, q)
+                tshark = tshark_types(db_file)
             except Exception:
                 self._send_error(500, 'Database error')
                 return
-        self._send_json({'counts': counts, 'date_range': date_range})
+        else:
+            tshark = []
+        # tshark_types: the types tshark added to this analysis (the cards
+        # marked as tshark's)
+        self._send_json({'counts': counts, 'date_range': date_range, 'tshark_types': tshark})
 
     def handle_get_count(self, params):
         md5 = params.get('md5', [''])[0]
@@ -870,6 +887,36 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         else:
             count = 0
         self._send_json({'count': count})
+
+    def handle_get_findings(self, params):
+        md5 = params.get('md5', [''])[0]
+        dir_path, error = self._resolve_md5_dir(md5)
+        if error:
+            self._send_error(400, error)
+            return
+        q = self._parse_search_terms(params)
+        counts_only = params.get('counts', [''])[0] == '1'
+        # One finding's own records: its rule, detail and addresses
+        group = None
+        if params.get('rule', [''])[0]:
+            port = params.get('dest_port', [''])[0]
+            if port and not (port.isascii() and port.isdigit()):
+                self._send_error(400, 'Invalid dest_port')
+                return
+            group = {'rule': params['rule'][0], 'detail': params.get('detail', [''])[0],
+                     'dest_ip': params.get('dest_ip', [''])[0],
+                     'dest_port': int(port) if port else None}
+
+        db_file = os.path.join(dir_path, 'events.db')
+        if not os.path.exists(db_file):
+            self._send_json({'rules': [], 'findings': []})
+            return
+        try:
+            result = query_findings(db_file, q, counts_only, group)
+        except Exception:
+            self._send_error(500, 'Database error')
+            return
+        self._send_json(result)
 
     def handle_get_sankey_data(self, params):
         md5 = params.get('md5', [''])[0]
@@ -1243,7 +1290,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self._send_error(400, error)
             return
         sha256 = params.get('sha256', [''])[0]
-        if not re.match(r'^[a-f0-9]{64}$', sha256):
+        if not re.fullmatch(r'[a-f0-9]{64}', sha256):  # fullmatch: reject a trailing newline that $ would allow
             self._send_error(400, 'Invalid SHA256')
             return
         path = find_extracted_file(dir_path, sha256)
@@ -1349,6 +1396,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self._send_error(*error)
             return
 
+        shark_analyzer.cancel(dir_path)
         shutil.rmtree(dir_path)
         evict_analysis_cache(md5)
         self._send_json({'success': True})
@@ -1508,7 +1556,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         an alert from view (rather than just flagging it) happens entirely
         as a side effect of set_acknowledged() feeding into every read
         query's own WHERE clause (see db.py's _build_where_conditions/
-        _sigma_alert_where) - nothing else needs updating here.
+        _sigma_alert_where) - but the cached unfiltered Sankey and
+        aggregation results were computed with the old set, so they go.
         """
         data = self._read_json_body(config.MAX_REQUEST_BODY_SIZE)
         if data is None:
@@ -1537,6 +1586,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         except (OSError, sqlite3.Error):
             self._send_error(500, 'Could not update acknowledged state')
             return
+        evict_analysis_cache(md5)
         self._send_json({'success': True, 'acknowledged': acknowledged})
 
     def handle_post_acknowledge_alerts_bulk(self):
@@ -1582,6 +1632,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         except (OSError, sqlite3.Error):
             self._send_error(500, 'Could not update acknowledged state')
             return
+        evict_analysis_cache(md5)
         self._send_json({'success': True, 'count': len(row_ids)})
 
     # Dedupe key -> True for CSP violations already logged this run, so a
@@ -1607,6 +1658,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             report = json.loads(body).get('csp-report', {})
         except (json.JSONDecodeError, AttributeError):
             report = {}
+        if not isinstance(report, dict):
+            report = {}      # garbage posted here gets the same 204, not a 500
         if report and not cyberchef.is_expected_csp_violation(report):
             key = (report.get('violated-directive'),
                    report.get('blocked-uri'),
@@ -1642,6 +1695,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     errors.append(md5_dir)
                     continue
                 try:
+                    shark_analyzer.cancel(dir_path)
                     shutil.rmtree(dir_path)
                     deleted += 1
                 except Exception as e:
@@ -1982,7 +2036,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         pcap_path = os.path.join(dir_path, pcap_filename)
 
         deduped = self._commit_file_or_return_ready(
-            dir_path, md5_hash, ('eve.json',),
+            dir_path, md5_hash, ('eve.json', 'events.db'),
             lambda: shutil.move(extracted_pcap_path, pcap_path)
         )
         if not deduped:
@@ -2182,8 +2236,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
                 if rules_file and check_yara_executable():
                     try:
-                        matches, sha256, md5, sha1, metadata = scan_single_file(file_path, rules_file)
+                        failures = []
+                        matches, sha256, md5, sha1, metadata = scan_single_file(file_path, rules_file, failures)
                         create_file_analysis_db(db_file, file_path, matches, md5, sha1, sha256, metadata=metadata)
+                        for reason in failures:
+                            add_analysis_warning(dir_path, f'The YARA scan failed - File Alerts may be missing: {reason}')
                     except Exception as e:
                         _set_error(dir_path, f'YARA scan failed: {e}')
                         create_file_analysis_db(db_file, file_path, [], '', '', '')
@@ -2220,12 +2277,17 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 db_file = os.path.join(dir_path, 'events.db')
                 # network_allowed=False - see _analyze_standalone_file.
                 rules_file = setup_yara_rules(DATA_DIR, network_allowed=False)
-                scan = scan_single_file if (rules_file and check_yara_executable()) else None
+                failures = []
+                scan = functools.partial(scan_single_file, failures=failures) \
+                    if (rules_file and check_yara_executable()) else None
                 try:
                     events = analyze_message(dir_path, file_path, rules_file, scan)
                 except Exception as e:
                     _set_error(dir_path, f'Email analysis failed: {e}')
                     events = []
+                for reason in dict.fromkeys(failures):
+                    add_analysis_warning(dir_path, f'The YARA scan of the message or its attachments failed - '
+                                                   f'File Alerts may be missing: {reason}')
                 create_email_analysis_db(db_file, events)
                 with open(os.path.join(dir_path, 'name.txt'), 'w') as f:
                     f.write(safe_filename)
@@ -2539,6 +2601,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         response = {'status': 'ready' if is_ready else 'processing'}
         if not is_ready:
             response['phase'] = phase
+        else:
+            # What went wrong without failing it (storage.add_analysis_warning)
+            warnings = [_sanitize_error_text(w) for w in read_analysis_warnings(dir_path)]
+            if warnings:
+                response['warnings'] = warnings
         if meta:
             response['meta'] = meta
         return response
@@ -2563,6 +2630,91 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         else:
             response['hasRowNotes'] = False
         self._send_json(response)
+
+    def _shark_status(self, dir_path, start=False):
+        """_shark_status_raw, with an error's message redacted of server
+        paths as Suricata's .error is (tshark's stderr names the capture's
+        full path, editcap's failures their whole command line)."""
+        status = self._shark_status_raw(dir_path, start)
+        if isinstance(status.get('message'), str):
+            status['message'] = _sanitize_error_text(status['message'])
+        return status
+
+    def _shark_status_raw(self, dir_path, start=False):
+        """Where tshark stands for a PCAP analysis (see shark_analyzer.status),
+        with 'merged' once it's ready: whether its rows have joined
+        Suricata's in events.db (if not, the merge is started).
+
+        A capture small enough for the background that has never been
+        queued - analyzed before tshark ran alongside Suricata, or whose
+        queued run was lost to a server restart - is queued here, on the
+        first status request. start=True (the user asked) queues it
+        whatever its size. 'waiting' means Suricata hasn't finished;
+        'unavailable' that this isn't a PCAP analysis; 'disabled' that
+        tshark is switched off in Settings."""
+        pcap_file = find_pcap_file(dir_path)
+        if not pcap_file:
+            return {'status': 'unavailable'}
+        if not shark_analyzer.enabled(DATA_DIR):
+            return {'status': 'disabled'}
+        pcap_path = os.path.join(dir_path, pcap_file)
+        if os.path.exists(os.path.join(dir_path, '.phase')):
+            # Suricata is still working; tshark, started alongside it, may be too
+            status = shark_analyzer.status(dir_path, pcap_path)
+            return {'status': 'waiting'} if status['status'] in ('not_started', 'ready') else status
+        status = shark_analyzer.status(dir_path, pcap_path)
+        if status['status'] == 'not_started' or (start and status['status'] in ('too_large', 'error')):
+            shark_analyzer.enqueue(dir_path, pcap_path)
+            status = shark_analyzer.status(dir_path, pcap_path)
+        if status['status'] == 'ready':
+            status['merged'] = shark_analyzer.merged(dir_path)
+            if not status['merged']:
+                # Built before tshark's rows joined Suricata's in events.db
+                # (or the merge was missed): add them now, in the background
+                shark_analyzer.merge_soon(dir_path)
+            else:
+                # The types it added - so the page knows, before reloading
+                # anything, whether there's anything new to show
+                status['types'] = tshark_types(os.path.join(dir_path, 'events.db'))
+        return status
+
+    def handle_get_shark_status(self, params):
+        dir_path, error = self._resolve_existing_analysis_dir(params.get('md5', [''])[0])
+        if error:
+            self._send_error(*error)
+            return
+        self._send_json(self._shark_status(dir_path))
+
+    def handle_get_shark_settings(self, params):
+        self._send_json({'enabled': shark_analyzer.enabled(DATA_DIR)})
+
+    def handle_post_shark_settings(self):
+        """Turn tshark on or off for every analysis. Off stops new runs (a
+        running one finishes); analyses keep the protocols already added."""
+        data = self._read_json_body(config.MAX_REQUEST_BODY_SIZE)
+        if data is None:
+            return
+        if not isinstance(data.get('enabled'), bool):
+            self._send_error(400, 'enabled must be true or false')
+            return
+        try:
+            shark_analyzer.set_enabled(DATA_DIR, data['enabled'])
+        except OSError:
+            self._send_error(500, 'Could not save the setting')
+            return
+        self._send_json({'enabled': data['enabled']})
+
+    def handle_post_shark_start(self):
+        """Run tshark for an analysis on request - for a capture over the
+        background packet limit, or to retry after an error."""
+        data = self._read_json_body(config.MAX_REQUEST_BODY_SIZE)
+        if data is None:
+            return
+        dir_path, error = self._resolve_existing_analysis_dir(data.get('md5', ''))
+        if error:
+            self._send_error(*error)
+            return
+        self._send_json(self._shark_status(dir_path, start=True))
 
     def handle_post_check_status(self):
         data = self._read_json_body(config.MAX_REQUEST_BODY_SIZE)
@@ -2645,6 +2797,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if pcap_file:
                 pcap_path = os.path.join(dir_path, pcap_file)
 
+                shark_analyzer.cancel(dir_path)
                 self._remove_artifacts(dir_path, PCAP_ANALYSIS_ARTIFACTS)
 
                 # Clean up extracted files from previous analysis
@@ -2728,6 +2881,7 @@ def main():
     os.makedirs(DATA_DIR, exist_ok=True)
     os.makedirs(os.path.join(DATA_DIR, config.UPLOAD_TMP_SUBDIR), exist_ok=True)
     cleanup_upload_tmp_dir(DATA_DIR)
+    remove_imported_eve_files(DATA_DIR)
 
     # Check for required executables
     missing = check_executables()

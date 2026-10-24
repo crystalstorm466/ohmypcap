@@ -448,7 +448,7 @@ class TestCSSLayout(unittest.TestCase):
 
     def test_table_cells_wrap_not_truncate(self):
         """Table cells (including ALERT) must wrap text, not truncate with ellipsis."""
-        td_match = re.search(r'td \{([^}]+)\}', CSS_CONTENT)
+        td_match = re.search(r'(?m)^\s*td \{([^}]+)\}', CSS_CONTENT)   # the global rule, not a table's own
         self.assertIsNotNone(td_match, 'Global td style must exist')
         td_style = td_match.group(1)
         self.assertNotIn('white-space: nowrap', td_style,
@@ -695,13 +695,13 @@ class TestCardOrder(unittest.TestCase):
     def test_sortEventTypes_full_priority_order(self):
         """Network Alerts, File Alerts, Decoder Alerts, Anomalies (in that
         order) take priority over every other pcap-mode tab, which then
-        falls back to alphabetical - e.g. dns/flow/http here, regardless of
-        input order."""
+        falls back to alphabetical - e.g. dns/http here, regardless of
+        input order - with Flows after them, leading the connections."""
         from tests.jsdom_helper import js_expression
         result = js_expression(
             "sortEventTypes(['http', 'anomaly', 'flow', 'protocol_decode', 'dns', 'filealerts', 'alert'])"
         )
-        self.assertEqual(result, ['alert', 'filealerts', 'protocol_decode', 'anomaly', 'dns', 'flow', 'http'])
+        self.assertEqual(result, ['alert', 'filealerts', 'protocol_decode', 'anomaly', 'dns', 'http', 'flow'])
 
     def test_refresh_current_view_calls_both_section_and_aggregation(self):
         """Verify refreshCurrentView builds both section and aggregation when filtering"""
@@ -757,9 +757,9 @@ class TestJavaScriptDataStructures(unittest.TestCase):
             self.assertIn(f"'{etype}'", JS_CONTENT)
 
     def test_has_global_state(self):
-        self.assertIn('let allEvents', JS_CONTENT)
+        self.assertIn('var allEvents', JS_CONTENT)
         self.assertIn('let tabDataCache', JS_CONTENT)
-        self.assertIn('let eventTypes', JS_CONTENT)
+        self.assertIn('var eventTypes', JS_CONTENT)
         self.assertIn('var currentMd5', JS_CONTENT)
 
 
@@ -771,7 +771,7 @@ class TestJavaScriptLogic(unittest.TestCase):
         self.assertIn('&quot;', JS_CONTENT)
 
     def test_error_message_escapes_event_type_label(self):
-        self.assertIn("escapeHtml(typeLabels[eventType] || eventType.toUpperCase())", JS_CONTENT,
+        self.assertIn("escapeHtml(eventTypeLabel(eventType))", JS_CONTENT,
                       'Tab error message must escape the event type label before innerHTML')
 
     def test_sort_table_toggles_direction(self):
@@ -786,7 +786,7 @@ class TestJavaScriptLogic(unittest.TestCase):
     def test_format_event_handles_all_types(self):
         event_types = ['alert', 'dns', 'http', 'tls', 'flow', 'ftp', 'anomaly', 'fileinfo', 'stats']
         # formatEvent now uses EVENT_RENDERERS to dispatch to type-specific renderers
-        self.assertIn('const renderer = EVENT_RENDERERS[e.event_type]', JS_CONTENT,
+        self.assertIn("const renderer = EVENT_RENDERERS[isConnectionType(e.event_type) ? 'flow' : e.event_type]", JS_CONTENT,
                       'formatEvent must use EVENT_RENDERERS for type dispatch')
         for etype in event_types:
             # Keys may be quoted or unquoted in JS object literal
@@ -1363,6 +1363,8 @@ class TestUXFeatures(unittest.TestCase):
         func = JS_CONTENT.split('async function loadAnalysis')[1].split('async function')[0]
         self.assertIn('dnsHeuristicsCountStale = true;', func,
                       'loadAnalysis must re-arm the DNS Heuristics count refresh')
+        self.assertIn('findingsCountStale = true;', func,
+                      'loadAnalysis must re-arm the Findings count refresh')
         self.assertIn('acknowledgedAlertsCountStale = true;', func,
                       'loadAnalysis must re-arm the Acknowledged Alerts count refresh')
 
@@ -1383,8 +1385,12 @@ class TestSecurityInUI(unittest.TestCase):
         self.assertIn('escapeHtml(', JS_CONTENT)
 
     def test_no_hardcoded_credentials(self):
-        content = JS_CONTENT.lower().replace('disclaimer', '').replace('password-protected', '').replace('password protected', '').replace('common passwords', '')
-        self.assertNotIn('password', content)
+        """No credential written into the page: a password (or secret,
+        token, API key) given a literal value. The word itself is fine -
+        Telnet records have a Password column, read from the capture."""
+        literal = re.compile(r'''(password|passwd|secret|api_?key|token)['"]?\s*[:=]\s*['"][^'"]+['"]''', re.I)
+        self.assertEqual(literal.findall(JS_CONTENT), [])
+        self.assertEqual(literal.findall(HTML_CONTENT), [])
 
     def test_uses_https_for_external_resources(self):
         self.assertIn('https://', HTML_CONTENT)
@@ -1662,8 +1668,8 @@ class TestThemeAndMenu(unittest.TestCase):
             var link = document.querySelector('.socrates-toast a');
             window.__jsdom_result = { text: toast ? toast.textContent : null, linkText: link ? link.textContent : null };
         ''')
-        self.assertEqual(result['text'], '2 additional files found in the ZIP are also being analyzedView Recent Analyses')
-        self.assertEqual(result['linkText'], 'View Recent Analyses')
+        self.assertEqual(result['text'], '2 additional files found in the ZIP are also being analyzedView Previous Analyses')
+        self.assertEqual(result['linkText'], 'View Previous Analyses')
 
     def test_notifyIfAdditionalAnalyses_singular_wording(self):
         from tests.jsdom_helper import js_statements
@@ -6787,7 +6793,7 @@ class TestAdvancedModeFilterBar(unittest.TestCase):
         every remaining card is guaranteed clickable once zero-count ones
         are filtered out first."""
         func = JS_CONTENT.split('function buildStats(')[1].split('function buildSections(')[0]
-        self.assertIn('stats.filter(s => s.count > 0).map(s => {', func,
+        self.assertIn('const visibleStats = stats.filter(s => s.count > 0);', func,
                       'buildStats must filter out zero-count cards before rendering')
         self.assertNotIn('stat-disabled', func,
                          'the old disabled-card styling is dead now that zero-count cards are dropped, not disabled')
@@ -6805,7 +6811,7 @@ class TestAdvancedModeFilterBar(unittest.TestCase):
         func = JS_CONTENT.split('function buildStats(')[1].split('function buildSections(')[0]
         self.assertIn('aria-label="${countDisplay}">0<', func,
                       'stat-number must start at 0 with the real value in aria-label')
-        self.assertIn('stats.filter(s => s.count > 0).forEach((s, i) => animateStatNumber(numberEls[i], s.count));', func,
+        self.assertIn('visibleStats.forEach((s, i) => animateStatNumber(numberEls[i], s.count));', func,
                       'buildStats must animate each rendered stat-number up to its real count')
 
     def test_animateStatNumber_counts_up_to_target(self):
@@ -12031,6 +12037,348 @@ class TestDnsHeuristicsScoring(unittest.TestCase):
         self.assertEqual(result['items'][0]['domain'], 'high-score.example')
 
 
+class TestFindingsTab(unittest.TestCase):
+    """The Findings tab: a view of other types' records from
+    /api/findings, wired in like DNS Heuristics - a card of its own, a
+    section, and loadTabData's own branch."""
+
+    FINDINGS = {
+        'rules': [
+            {'id': 'ipmi_cipher_zero', 'title': 'IPMI accepts cipher zero', 'severity': 'high',
+             'event_type': 'ipmi', 'why': 'logs anyone in (CVE-2013-4782).', 'count': 1, 'groups': 1},
+            {'id': 'bacnet_write', 'title': 'BACnet property or file written', 'severity': 'low',
+             'event_type': 'bacnet', 'why': 'Routine in building automation.', 'count': 2400, 'groups': 501},
+        ],
+        'findings': [
+            {'rule': 'ipmi_cipher_zero', 'severity': 'high', 'title': 'IPMI accepts cipher zero',
+             'detail': 'privilege administrator',
+             'event': {'id': 6, 'event_type': 'ipmi', 'timestamp': '2026-01-01T00:00:05.000000+0000',
+                       'src_ip': '10.1.0.38', 'src_port': 50101, 'dest_ip': '10.1.0.59', 'dest_port': 623,
+                       'proto': 'UDP', 'source': 'tshark',
+                       'ipmi': {'weaknesses': ['cipher zero accepted'], 'result': 'answered'}}},
+            {'rule': 'bacnet_write', 'severity': 'low', 'title': 'BACnet property or file written',
+             'detail': 'writeProperty analog-value,0 present-value - ok',
+             'event': {'id': 9, 'event_type': 'bacnet', 'timestamp': '2026-01-01T00:00:01.000000+0000',
+                       'src_ip': 'fe80::1', 'src_port': 47808, 'dest_ip': '10.0.0.9', 'dest_port': 47808,
+                       'proto': 'UDP', 'source': 'tshark',
+                       'bacnet': {'service': 'writeProperty', 'object': 'analog-value,0', 'result': 'ok'}}},
+        ],
+    }
+
+    def _mock_fetch_js(self, data):
+        return '''
+            window.__findingsUrls = [];
+            window.fetch = function(url) {
+                var u = String(url);
+                if (u.indexOf('/api/findings') >= 0) {
+                    window.__findingsUrls.push(u);
+                    return Promise.resolve({ ok: true, json: function() { return Promise.resolve(''' + json.dumps(data) + '''); } });
+                }
+                return Promise.resolve({ ok: true, json: function() { return Promise.resolve([]); } });
+            };
+        '''
+
+    def test_loadTabData_findings_renders_rows_and_rules(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements('''
+            await new Promise(function(r) { setTimeout(r, 100); });
+            document.getElementById('inputBoxes').style.display = 'none';
+            currentMd5 = 'abc123';
+            safeStorageRemove(localStorage, 'socrates_findingsInfoCollapsed');
+            ''' + self._mock_fetch_js(self.FINDINGS) + '''
+            buildSections();
+            await loadTabData('findings');
+            var sectionEl = document.getElementById('section-findings');
+            var rows = Array.from(sectionEl.querySelectorAll('tbody tr[data-id]'));
+            window.__jsdom_result = {
+                html: sectionEl.innerHTML,
+                text: sectionEl.textContent,
+                rows: rows.map(function(r) { return [r.dataset.id, r.dataset.eventType, r.cells[0].textContent, r.cells[4].textContent]; }),
+                detailRows: sectionEl.querySelectorAll('tr.detail-row').length,
+                urls: window.__findingsUrls,
+            };
+        ''')
+        self.assertEqual(result['rows'], [['6', 'ipmi', 'high', '10.1.0.38:50101'],
+                                          ['9', 'bacnet', 'low', '[fe80::1]:47808']])
+        self.assertEqual(result['detailRows'], 2, "each row expands to its record's details")
+        self.assertIn('About Findings', result['text'])
+        self.assertIn('CVE-2013-4782', result['text'], "the card says what each rule that matched looks for")
+        self.assertIn('the first 500 rows shown', result['text'])
+        self.assertIn('2,400 records in 501 rows', result['text'])
+        self.assertIn('IPMI accepts cipher zero (IPMI, 1 record)', result['text'])
+        self.assertIn('privilege administrator', result['text'])
+        self.assertNotIn('counts=1', result['urls'][0])
+
+    GROUP = {'rule': 'tls_self_signed', 'severity': 'low', 'title': 'TLS self-signed certificate',
+             'detail': 'CN=lab.example (for lab.example)', 'count': 3, 'sources': 2,
+             'first': '2026-01-01T00:00:01.000000+0000', 'last': '2026-01-01T00:00:09.000000+0000',
+             'event': {'id': 4, 'event_type': 'tls', 'timestamp': '2026-01-01T00:00:01.000000+0000',
+                       'src_ip': '10.0.0.5', 'src_port': 40001, 'dest_ip': '10.0.0.9', 'dest_port': 443, 'proto': 'TCP',
+                       'tls': {'subject': 'CN=lab.example', 'issuerdn': 'CN=lab.example'}}}
+
+    def test_a_row_of_several_records_lists_them_when_opened(self):
+        """A grouped row: its hosts counted, its records numbered - and,
+        expanded, its own records fetched by rule, detail and server, each
+        expanding to its details."""
+        from tests.jsdom_helper import js_statements
+        member = lambda i, port: {'rule': 'tls_self_signed', 'severity': 'low', 'title': 'TLS self-signed certificate',
+                                  'detail': self.GROUP['detail'], 'count': 1, 'sources': 1,
+                                  'event': dict(self.GROUP['event'], id=i, src_port=port)}
+        members = {'rules': [{'id': 'tls_self_signed', 'count': 3}], 'findings': [member(4, 40001), member(5, 40002), member(6, 40003)]}
+        result = js_statements('''
+            await new Promise(function(r) { setTimeout(r, 100); });
+            document.getElementById('inputBoxes').style.display = 'none';
+            currentMd5 = 'abc123';
+            ''' + self._mock_fetch_js(members) + '''
+            buildSections();
+            document.querySelectorAll('.section').forEach(function(s) { s.classList.add('section-hidden'); });
+            document.getElementById('section-findings').classList.remove('section-hidden');
+            buildFindingsSectionContent('section-findings', [''' + json.dumps(self.GROUP) + ''']);
+            var section = document.getElementById('section-findings');
+            var row = section.querySelector('.section-content tbody > tr[data-id]');
+            var cells = Array.from(row.cells).map(function(c) { return c.textContent; });
+            var before = window.__findingsUrls.length;
+            toggleDetailRow(row);
+            await new Promise(function(r) { setTimeout(r, 50); });
+            var memberRows = Array.from(section.querySelectorAll('.finding-members-table tbody tr[data-id]'));
+            toggleDetailRow(memberRows[1]);
+            var opened = memberRows[1].nextElementSibling;
+            toggleDetailRow(row); toggleDetailRow(row);
+            await new Promise(function(r) { setTimeout(r, 50); });
+            window.__jsdom_result = {
+                cells: cells, before: before, urls: window.__findingsUrls,
+                summary: section.querySelector('.finding-members-summary').textContent,
+                members: memberRows.map(function(r) { return r.cells[1].textContent; }),
+                openedVisible: opened.classList.contains('visible'),
+                openedText: opened.textContent,
+            };
+        ''')
+        self.assertEqual(result['cells'][4:8], ['2 hosts', '10.0.0.9:443', '3', '2026-01-01T00:00:01'])
+        self.assertEqual(result['before'], 0, 'nothing fetched until the row is opened')
+        self.assertEqual(len(result['urls']), 1, 'once - reopening the row reuses the list')
+        url = result['urls'][0]
+        for part in ('rule=tls_self_signed', 'detail=CN%3Dlab.example%20(for%20lab.example)', 'dest_ip=10.0.0.9',
+                     'dest_port=443'):
+            self.assertIn(part, url)
+        self.assertEqual(result['summary'], '3 records, from 2 source hosts, 2026-01-01T00:00:01 to 2026-01-01T00:00:09')
+        self.assertEqual(result['members'], ['10.0.0.5:40001', '10.0.0.5:40002', '10.0.0.5:40003'])
+        self.assertTrue(result['openedVisible'])
+        self.assertIn('CN=lab.example', result['openedText'])
+
+    def test_a_filter_refresh_on_findings_keeps_the_findings_view(self):
+        """REGRESSION: removing a filter chip while on Findings ran the
+        generic events builder for type 'findings' - an empty events table
+        in its place."""
+        from tests.jsdom_helper import js_statements
+        result = js_statements('''
+            await new Promise(function(r) { setTimeout(r, 100); });
+            document.getElementById('inputBoxes').style.display = 'none';
+            currentMd5 = 'abc123';
+            ''' + self._mock_fetch_js(self.FINDINGS) + '''
+            buildSections();
+            await loadTabData('findings');
+            await refreshCurrentView('section-findings', 'findings');
+            var sectionEl = document.getElementById('section-findings');
+            window.__jsdom_result = {
+                rows: sectionEl.querySelectorAll('tbody tr[data-id]').length,
+                about: sectionEl.textContent.indexOf('About Findings') >= 0,
+            };
+        ''')
+        self.assertEqual(result, {'rows': 2, 'about': True})
+
+    def test_a_pivot_from_a_findings_record_opens_its_own_tab_filtered(self):
+        """Findings shows other types' records: Include on one's Source IP
+        filters that record's own type - so its tab opens, filtered,
+        instead of the filter landing on a tab out of sight."""
+        from tests.jsdom_helper import js_statements
+        result = js_statements('''
+            await new Promise(function(r) { setTimeout(r, 100); });
+            document.getElementById('inputBoxes').style.display = 'none';
+            currentMd5 = 'abc123';
+            ''' + self._mock_fetch_js(self.FINDINGS) + '''
+            eventTypes = ['ipmi', 'bacnet'];
+            buildSections();
+            await loadTabData('findings');
+            document.querySelectorAll('.section').forEach(function(s) { s.classList.add('section-hidden'); });
+            document.getElementById('section-findings').classList.remove('section-hidden');
+            await includeFilterValue('section-ipmi', 'Source IP', '10.1.0.38');
+            await new Promise(function(r) { setTimeout(r, 50); });
+            window.__jsdom_result = {
+                ipmiShown: !document.getElementById('section-ipmi').classList.contains('section-hidden'),
+                findingsShown: !document.getElementById('section-findings').classList.contains('section-hidden'),
+                filters: Object.keys(currentFilters),
+            };
+        ''')
+        self.assertEqual(result, {'ipmiShown': True, 'findingsShown': False, 'filters': ['Source IP']})
+
+    def test_findings_empty_state(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements('''
+            await new Promise(function(r) { setTimeout(r, 100); });
+            document.getElementById('inputBoxes').style.display = 'none';
+            currentMd5 = 'abc123';
+            ''' + self._mock_fetch_js({'rules': [], 'findings': []}) + '''
+            buildSections();
+            await loadTabData('findings');
+            window.__jsdom_result = { text: document.getElementById('section-findings').textContent };
+        ''')
+        self.assertIn('No findings', result['text'])
+
+    def test_severity_sorts_by_rank(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements('''
+            var items = [{severity: 'low'}, {severity: 'high'}, {severity: 'medium'}].map(function(f) { f.event = {}; return f; });
+            var sorted = sortItemsByColumn(items, ['Severity'], extractFindingValue, 0, true);
+            window.__jsdom_result = sorted.map(function(f) { return f.severity; });
+        ''')
+        self.assertEqual(result, ['high', 'medium', 'low'])
+
+    def test_findings_card_counts_and_sits_before_all_events(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements('''
+            await new Promise(function(r) { setTimeout(r, 100); });
+            currentMd5 = 'abc123';
+            ''' + self._mock_fetch_js(self.FINDINGS) + '''
+            eventTypes = ['ipmi', 'bacnet'];
+            eventStats = {ipmi: 1, bacnet: 3};
+            findingsCountStale = true;
+            buildStats();
+            await new Promise(function(r) { setTimeout(r, 50); });
+            var labels = Array.from(document.querySelectorAll('#statsGrid .stat-card')).map(function(c) {
+                return [c.querySelector('.stat-label').textContent, c.querySelector('.stat-number').getAttribute('aria-label')];
+            });
+            window.__jsdom_result = { labels: labels, urls: window.__findingsUrls };
+        ''')
+        labels = [label for label, _ in result['labels']]
+        self.assertEqual(labels.index('Findings') + 1, labels.index('All Events'))
+        self.assertIn(['Findings', '502'], result['labels'], 'rows, not records')
+        self.assertIn('counts=1', result['urls'][0], 'the card needs only the counts')
+
+    def test_findings_rows_are_keyboard_navigable(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements('''
+            buildSections();
+            document.querySelectorAll('.section').forEach(function(s) { s.classList.add('section-hidden'); });
+            document.getElementById('section-findings').classList.remove('section-hidden');
+            findingsRules = [];
+            buildFindingsSectionContent('section-findings', ''' + json.dumps(self.FINDINGS['findings']) + ''');
+            var ids = [];
+            for (var i = 0; i < 6 && ids.length < 2; i++) {
+                navigateVertical(1);
+                var sel = document.querySelector('.keyboard-selected');
+                if (sel && sel.tagName === 'TR') ids.push(sel.dataset.id);
+            }
+            window.__jsdom_result = ids;
+        ''')
+        self.assertEqual(result, ['6', '9'])
+
+
+class TestReviewRegressions(unittest.TestCase):
+    """Bugs the 5.0.0 source review found in the page's own logic."""
+
+    def test_html_row_text_shows_a_zero(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements('''
+            var text = function(v) { var d = document.createElement('div'); d.innerHTML = htmlRowText('Write Data', v); return d.textContent; };
+            window.__jsdom_result = [text(0), text('0'), text(''), text(null), text(undefined), text(false), text(7)];
+        ''')
+        self.assertEqual(result, ['Write Data0', 'Write Data0', 'Write Data', 'Write Data', 'Write Data', 'Write Data',
+                                  'Write Data7'])
+
+    def test_a_planted_custom_lookup_url_is_never_used(self):
+        """Custom lookup sites are re-checked when read: localStorage is
+        shared with the same origin's CyberChef, so a javascript: entry
+        could be there without ever passing the save-time check."""
+        from tests.jsdom_helper import js_statements
+        result = js_statements('''
+            safeStorageSet(localStorage, 'socrates_customLookupSites', JSON.stringify([
+                {label: 'Good', urlTemplate: 'https://lookup.example/?q={value}'},
+                {label: 'Planted', urlTemplate: 'javascript:alert(1)//{value}'}]));
+            window.__jsdom_result = getCustomLookupSites().map(function(s) { return s.label; });
+        ''')
+        self.assertEqual(result, ['Good'])
+
+    def test_analysis_warnings_show_above_the_results_escaped(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements('''
+            var el = document.getElementById('analysisWarnings');
+            showAnalysisWarnings(['The YARA scan failed - File Alerts may be missing: <b>x</b>']);
+            var shown = {hidden: el.hidden, text: el.textContent, bold: !!el.querySelector('b')};
+            showAnalysisWarnings(undefined);
+            window.__jsdom_result = {shown: shown, clearedHidden: el.hidden, clearedText: el.textContent};
+        ''')
+        self.assertEqual(result, {'shown': {'hidden': False, 'bold': False,
+                                            'text': 'The YARA scan failed - File Alerts may be missing: <b>x</b>'},
+                                  'clearedHidden': True, 'clearedText': ''})
+
+    def test_a_failed_post_says_so_instead_of_carrying_on(self):
+        """An acknowledge or rule update the server refused showed nothing
+        - the row just stayed put. Now a toast says why, and the caller
+        stops."""
+        from tests.jsdom_helper import js_statements
+        result = js_statements('''
+            window.fetch = function() {
+                return Promise.resolve({ ok: false, status: 409,
+                    json: function() { return Promise.resolve({ error: 'An update is already running' }); } });
+            };
+            var ok = await postJsonOrToast('/api/update-rules', {ruleset: 'all'}, 'Starting the rules update');
+            var toast = document.querySelector('.socrates-toast');
+            window.fetch = function() { return Promise.reject(new TypeError('Failed to fetch')); };
+            var offline = await postJsonOrToast('/api/acknowledge-alert', {}, 'Acknowledging the alert');
+            var toasts = Array.from(document.querySelectorAll('.socrates-toast')).map(function(t) { return t.textContent; });
+            window.__jsdom_result = {ok: ok, offline: offline, first: toast ? toast.textContent : null, all: toasts};
+        ''')
+        self.assertFalse(result['ok'])
+        self.assertFalse(result['offline'])
+        self.assertIn('Starting the rules update failed: An update is already running', result['first'])
+        self.assertTrue(any("Acknowledging the alert failed: SO-CRATES couldn't be reached" in t for t in result['all']))
+
+    def test_findings_that_fail_to_load_say_so_and_arent_cached_as_none(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements('''
+            await new Promise(function(r) { setTimeout(r, 100); });
+            document.getElementById('inputBoxes').style.display = 'none';
+            currentMd5 = 'abc123';
+            window.fetch = function(url) {
+                if (String(url).indexOf('/api/findings') >= 0) return Promise.reject(new TypeError('Failed to fetch'));
+                return Promise.resolve({ ok: true, json: function() { return Promise.resolve([]); } });
+            };
+            buildSections();
+            await loadTabData('findings');
+            var failed = document.getElementById('section-findings').textContent;
+            window.fetch = function(url) {
+                return Promise.resolve({ ok: true, json: function() { return Promise.resolve(
+                    String(url).indexOf('/api/findings') >= 0
+                        ? {rules: [{id: 'x', title: 'T', severity: 'low', event_type: 'tls', why: 'w', count: 1, groups: 1}],
+                           findings: [{rule: 'x', severity: 'low', title: 'T', detail: 'd', count: 1,
+                                       event: {id: 3, event_type: 'tls', timestamp: '2026-01-01T00:00:00'}}]}
+                        : []); } });
+            };
+            await loadTabData('findings');
+            window.__jsdom_result = {
+                failed: failed,
+                retried: document.querySelectorAll('#section-findings tbody tr[data-id]').length,
+            };
+        ''')
+        self.assertIn("Couldn't load the findings - open the tab again to retry", result['failed'])
+        self.assertEqual(result['retried'], 1, 'opening the tab again fetched them - nothing was cached')
+
+    def test_escape_on_the_welcome_screen_keeps_dont_show_help_again(self):
+        """REGRESSION: closeAllModals closed Help unconditionally - which
+        saves the welcome screen's 'show again' checkbox, back at its
+        checked default when Help wasn't shown, so an Escape there undid
+        'don't show this again'."""
+        from tests.jsdom_helper import js_statements
+        result = js_statements('''
+            safeStorageSet(localStorage, 'socrates_hideHelp', 'true');
+            document.getElementById('helpModal').classList.remove('active');
+            document.getElementById('helpShowAgain').checked = true;
+            closeAllModals();
+            window.__jsdom_result = safeStorageGet(localStorage, 'socrates_hideHelp');
+        ''')
+        self.assertEqual(result, 'true')
+
+
 class TestDnsHeuristicsTab(unittest.TestCase):
     """The DNS Heuristics tab's wiring into the sidebar/section system -
     buildStats' synthetic card, buildSections' placeholder, and
@@ -12131,7 +12479,8 @@ class TestDnsHeuristicsTab(unittest.TestCase):
         never .keyboard-selected, so the ring stayed stuck on whichever
         card had it (Network Alerts in the report) even after switching
         to a different tab. Now that Left/Right also only previews, the
-        ring must move to exactly the new card (HTTP) - not stay behind
+        ring must move to exactly the new card (Acknowledged Alerts, the
+        next lead) - not stay behind
         on Network Alerts, and not duplicate onto both."""
         from tests.jsdom_helper import js_statements
         events = [{'event_type': 'alert', 'timestamp': '2026-01-01T00:00:00', 'src_ip': '10.0.0.5',
@@ -12183,7 +12532,7 @@ class TestDnsHeuristicsTab(unittest.TestCase):
             };
         ''')
         self.assertEqual(result['landedLabel'], 'Network Alerts')
-        self.assertEqual(result['ringedCards'], ['HTTP'], 'the ring must move to exactly the newly-previewed card, not stay on Network Alerts or duplicate')
+        self.assertEqual(result['ringedCards'], ['Acknowledged Alerts'], 'the ring must move to exactly the newly-previewed card, not stay on Network Alerts or duplicate')
         self.assertEqual(result['activeLabel'], 'Network Alerts', 'Right must only preview - the active tab must not change until Enter')
 
     # jsdom has no real CSS Grid layout engine, so getComputedStyle(...)
@@ -12202,10 +12551,14 @@ class TestDnsHeuristicsTab(unittest.TestCase):
             window.fetch = function(url) {
                 var u = String(url);
                 if (u.indexOf('/api/stats') >= 0) {
-                    return Promise.resolve({ ok: true, json: function() { return Promise.resolve({ counts: { alert: 1, dns: 1, flow: 1, ftp: 1, http: 1, tls: 1 } }); } });
+                    return Promise.resolve({ ok: true, json: function() { return Promise.resolve({ counts: { alert: 1, dns: 1, flow: 1, ftp: 1, http: 1, smb: 1, ssh: 1, tls: 1 } }); } });
                 }
                 if (u.indexOf('/api/events') >= 0 && u.indexOf('type=''' + active_event_type + '''') >= 0) {
                     return Promise.resolve({ ok: true, json: function() { return Promise.resolve(''' + json.dumps(events_for_type) + '''); } });
+                }
+                // nothing acknowledged: Network Alerts is the only lead
+                if (u.indexOf('/api/count') >= 0 && u.indexOf('acknowledged=only') >= 0) {
+                    return Promise.resolve({ ok: true, json: function() { return Promise.resolve({ count: 0 }); } });
                 }
                 if (u.indexOf('/api/count') >= 0) {
                     return Promise.resolve({ ok: true, json: function() { return Promise.resolve({ count: 1 }); } });
@@ -12231,14 +12584,13 @@ class TestDnsHeuristicsTab(unittest.TestCase):
         multi-row stat-card grid, Down while sitting on a card must only
         move the keyboard-selection ring (mirroring navigateThemeTiles'
         own preview-then-Enter-to-commit idiom); the active tab must not
-        change until Enter. Cards in DOM order here: alert(0,active),
-        dns(1), flow(2), ftp(3) | http(4), tls(5), All Events(6),
-        Acknowledged Alerts(7) - a 4-column, 2-row grid.
+        change until Enter. Cards here, in a 4-column grid, each section
+        starting a row of its own: Network Alerts (active), All Events |
+        DNS Queries, FTP, HTTP, SMB | SSH, TLS | Flows.
         activeColumnStatCards() (see getVerticalNavItems) puts the active
         tab's own card (column 0, row 1) first in the unified nav list, so
         the first Down merely rings that same already-active card; a
-        second Down is what steps to column 0 of row 2 (index 0+4=4,
-        'http')."""
+        second Down is what steps to column 0 of the records (DNS Queries)."""
         from tests.jsdom_helper import js_statements
         events = [{'event_type': 'alert', 'timestamp': '2026-01-01T00:00:00', 'src_ip': '10.0.0.5',
                    'src_port': 1, 'dest_ip': '10.0.0.6', 'dest_port': 2, 'proto': 'TCP',
@@ -12246,7 +12598,7 @@ class TestDnsHeuristicsTab(unittest.TestCase):
         result = js_statements(self._bootstrap_multi_row_stat_grid_js('alert', events) + '''
             var activeBefore = document.querySelector('.stat-card.tab-active').querySelector('.stat-label').textContent;
             navigateVertical(1); // rings the active card itself (row 1)
-            var handled = navigateVertical(1); // rings row 2
+            var handled = navigateVertical(1); // rings the next card down the column
             window.__jsdom_result = {
                 handled: handled,
                 activeAfter: document.querySelector('.stat-card.tab-active').querySelector('.stat-label').textContent,
@@ -12257,7 +12609,7 @@ class TestDnsHeuristicsTab(unittest.TestCase):
         self.assertTrue(result['handled'])
         self.assertEqual(result['activeBefore'], 'Network Alerts')
         self.assertEqual(result['activeAfter'], 'Network Alerts', 'the active tab must not change from a mere preview')
-        self.assertEqual(result['ringedLabel'], 'HTTP', 'the keyboard-selection ring must move to row 2')
+        self.assertEqual(result['ringedLabel'], 'DNS Queries', 'the keyboard-selection ring must move down the column')
 
     def test_enter_commits_a_previewed_stat_card_row(self):
         from tests.jsdom_helper import js_statements
@@ -12266,7 +12618,7 @@ class TestDnsHeuristicsTab(unittest.TestCase):
                    'alert': {'signature': 'Test', 'category': 'x', 'severity': 1, 'signature_id': 1}}]
         result = js_statements(self._bootstrap_multi_row_stat_grid_js('alert', events) + '''
             navigateVertical(1); // rings the active card itself (row 1)
-            navigateVertical(1); // preview HTTP (row 2)
+            navigateVertical(1); // preview DNS Queries (down the column)
             var committed = activateKeyboardSelection(); // Enter
             await new Promise(function(r) { setTimeout(r, 30); });
             window.__jsdom_result = {
@@ -12275,7 +12627,7 @@ class TestDnsHeuristicsTab(unittest.TestCase):
             };
         ''')
         self.assertTrue(result['committed'])
-        self.assertEqual(result['activeAfterEnter'], 'HTTP')
+        self.assertEqual(result['activeAfterEnter'], 'DNS Queries')
 
     def test_left_right_previews_without_switching_tabs(self):
         """REGRESSION GUARD: navigateStatTabs (Left/Right) used to
@@ -12300,7 +12652,7 @@ class TestDnsHeuristicsTab(unittest.TestCase):
         self.assertTrue(result['handled'])
         self.assertEqual(result['activeBefore'], 'Network Alerts')
         self.assertEqual(result['activeAfter'], 'Network Alerts', 'the active tab must not change from a mere Right preview')
-        self.assertEqual(result['ringedLabel'], 'DNS Queries', 'the ring must move to the next card in DOM order')
+        self.assertEqual(result['ringedLabel'], 'All Events', 'the ring must move to the next card in DOM order')
 
     def test_enter_commits_a_left_right_previewed_card(self):
         from tests.jsdom_helper import js_statements
@@ -12308,7 +12660,7 @@ class TestDnsHeuristicsTab(unittest.TestCase):
                    'src_port': 1, 'dest_ip': '10.0.0.6', 'dest_port': 2, 'proto': 'TCP',
                    'alert': {'signature': 'Test', 'category': 'x', 'severity': 1, 'signature_id': 1}}]
         result = js_statements(self._bootstrap_multi_row_stat_grid_js('alert', events) + '''
-            navigateStatTabs(1); // preview DNS Queries
+            navigateStatTabs(1); // preview All Events
             var committed = activateKeyboardSelection(); // Enter
             await new Promise(function(r) { setTimeout(r, 30); });
             window.__jsdom_result = {
@@ -12317,12 +12669,13 @@ class TestDnsHeuristicsTab(unittest.TestCase):
             };
         ''')
         self.assertTrue(result['committed'])
-        self.assertEqual(result['activeAfterEnter'], 'DNS Queries')
+        self.assertEqual(result['activeAfterEnter'], 'All Events')
 
     def test_falling_through_to_data_table_clears_a_previewed_stat_card_ring(self):
-        """REGRESSION GUARD: after previewing row 2 (without committing),
-        a third Down exhausts the grid column and moves on to the data
-        table - clearing the still-ringed row-2 preview card, since
+        """REGRESSION GUARD: after previewing the column's last card
+        (Flows - without committing), the next Down exhausts the grid
+        column and moves on to the data table - clearing the still-ringed
+        preview card, since
         navigateVertical() clears every candidate in its own flat list
         (which includes the whole grid column, not just the active card)
         before selecting the next one."""
@@ -12332,7 +12685,9 @@ class TestDnsHeuristicsTab(unittest.TestCase):
                    'alert': {'signature': 'Test', 'category': 'x', 'severity': 1, 'signature_id': 1}}]
         result = js_statements(self._bootstrap_multi_row_stat_grid_js('alert', events) + '''
             navigateVertical(1); // rings the active card itself (row 1)
-            navigateVertical(1); // preview HTTP (row 2)
+            navigateVertical(1); // preview DNS Queries
+            navigateVertical(1); // preview SSH
+            navigateVertical(1); // preview Flows
             var handled = navigateVertical(1); // grid column exhausted -> moves into the data table
             window.__jsdom_result = {
                 handled: handled,
@@ -12361,7 +12716,9 @@ class TestDnsHeuristicsTab(unittest.TestCase):
                    'alert': {'signature': 'Test', 'category': 'x', 'severity': 1, 'signature_id': 1}}]
         result = js_statements(self._bootstrap_multi_row_stat_grid_js('alert', events) + '''
             navigateVertical(1); // rings the active card itself (row 1)
-            navigateVertical(1); // preview HTTP (row 2)
+            navigateVertical(1); // preview DNS Queries
+            navigateVertical(1); // preview SSH
+            navigateVertical(1); // preview Flows
             navigateVertical(1); // exhausted -> falls into the data table
 
             var up1Handled = navigateVertical(-1);
@@ -12379,17 +12736,17 @@ class TestDnsHeuristicsTab(unittest.TestCase):
             };
         ''')
         self.assertTrue(result['up1Handled'])
-        self.assertEqual(result['ring1Label'], 'HTTP', 'the first Up must retrace back to row 2, not skip it')
+        self.assertEqual(result['ring1Label'], 'Flows', "the first Up must retrace back to the column's last card, not skip it")
         self.assertEqual(result['activeAfterUp1'], 'Network Alerts', 'Up must only preview - the active tab must not change')
         self.assertTrue(result['up2Handled'])
-        self.assertEqual(result['ring2Label'], 'Network Alerts', 'a second Up from row 2 must continue on to the active row')
+        self.assertEqual(result['ring2Label'], 'SSH', 'a second Up must continue on up the column')
 
     def test_down_after_right_preview_continues_down_the_previewed_column(self):
         """REGRESSION GUARD (real bug report): with a multi-row stat-card
         grid, Right previews a card in a DIFFERENT column than the active
-        tab's own (e.g. DNS Queries, column 1, still row 1), and Down
-        must then continue straight down THAT column (to TLS, column 1
-        row 2) - not jump back to the still-active tab's own column
+        tab's own (e.g. All Events, column 1), and Down must then
+        continue straight down THAT column (to FTP, column 1 of the
+        records) - not jump back to the still-active tab's own column
         (Network Alerts, column 0), which read as Down having gone
         backwards/left instead of down. activeColumnStatCards() now uses
         whichever stat card is currently ringed (verticalNavSelection) as
@@ -12400,17 +12757,17 @@ class TestDnsHeuristicsTab(unittest.TestCase):
                    'src_port': 1, 'dest_ip': '10.0.0.6', 'dest_port': 2, 'proto': 'TCP',
                    'alert': {'signature': 'Test', 'category': 'x', 'severity': 1, 'signature_id': 1}}]
         result = js_statements(self._bootstrap_multi_row_stat_grid_js('alert', events) + '''
-            navigateStatTabs(1); // Right -> DNS Queries (column 1, row 1)
+            navigateStatTabs(1); // Right -> All Events (column 1)
             var afterRight = document.querySelector('.keyboard-selected').querySelector('.stat-label').textContent;
 
-            navigateVertical(1); // Down -> should continue down column 1, to TLS (row 2)
+            navigateVertical(1); // Down -> should continue down column 1, to FTP
             var afterDown = document.querySelector('.keyboard-selected').querySelector('.stat-label').textContent;
             var activeAfterDown = document.querySelector('.stat-card.tab-active').querySelector('.stat-label').textContent;
 
             window.__jsdom_result = { afterRight: afterRight, afterDown: afterDown, activeAfterDown: activeAfterDown };
         ''')
-        self.assertEqual(result['afterRight'], 'DNS Queries')
-        self.assertEqual(result['afterDown'], 'TLS', 'Down must continue down the previewed column, not jump back to the active column')
+        self.assertEqual(result['afterRight'], 'All Events')
+        self.assertEqual(result['afterDown'], 'FTP', 'Down must continue down the previewed column, not jump back to the active column')
         self.assertEqual(result['activeAfterDown'], 'Network Alerts', 'Down must only preview - the active tab must not change')
 
     def test_clicking_a_different_card_clears_a_stray_keyboard_ring(self):
@@ -12509,14 +12866,14 @@ class TestDnsHeuristicsTab(unittest.TestCase):
             }
 
             var seq = [];
-            for (var i = 0; i < 4; i++) {
+            for (var i = 0; i < 5; i++) {
                 navigateVertical(1);
                 seq.push(desc(document.querySelector('.keyboard-selected')));
             }
             window.__jsdom_result = { seq: seq };
         ''')
-        self.assertEqual(result['seq'], ['CARD:Network Alerts', 'TR', 'CHIP', 'CARD:Network Alerts'],
-                          'Down must move past the already-focused chip straight to the stat card and table row, wrapping back to the chip - never stepping onto Clear All')
+        self.assertEqual(result['seq'], ['CARD:Network Alerts', 'CARD:HTTP', 'TR', 'CHIP', 'CARD:Network Alerts'],
+                          'Down must move past the already-focused chip straight down the stat cards (HTTP beneath, in the next section) and to the table row, wrapping back to the chip - never stepping onto Clear All')
 
     def test_left_right_cycles_filter_chips_and_clear_all(self):
         """REGRESSION GUARD (real bug report): "moving between an active
@@ -12717,12 +13074,13 @@ class TestDnsHeuristicsTab(unittest.TestCase):
             window.__jsdom_result = {
                 activeBeforeLabel: activeBefore ? activeBefore.querySelector('.stat-label').textContent : null,
                 ringedBefore: !!ringedBefore,
-                afterDownIsRow: afterDown ? afterDown.tagName === 'TR' : false,
+                afterDownLabel: afterDown && afterDown.classList.contains('stat-card') ? afterDown.querySelector('.stat-label').textContent : null,
             };
         ''')
         self.assertEqual(result['activeBeforeLabel'], 'Network Alerts', 'setup check: the default tab must actually be active before any key press')
         self.assertFalse(result['ringedBefore'], 'no visible ring should appear before the user has pressed any arrow key')
-        self.assertTrue(result['afterDownIsRow'], 'the first Down must move past the default tab card to the row beneath it, not land on the card itself')
+        self.assertEqual(result['afterDownLabel'], 'HTTP',
+                         'the first Down must move past the default tab card to the card beneath it (in the next section), not land on the card itself')
 
     def test_first_down_after_applying_a_filter_moves_past_the_new_chip(self):
         """REGRESSION GUARD (real user report, two rounds): applying a
@@ -13273,7 +13631,7 @@ class TestDnsHeuristicsTab(unittest.TestCase):
         there - and because that landing is on a stat card,
         navigateVertical() hands control back to Left/Right immediately
         (not require a second Up/Down first). Right itself only previews
-        - Enter is what actually switches to DNS Queries."""
+        - Enter is what actually switches to All Events, the next card."""
         from tests.jsdom_helper import js_statements
         events = [{'event_type': 'dns', 'timestamp': '2026-01-01T00:00:00', 'src_ip': '10.0.0.5',
                    'dns': {'rrname': '08kcbghk807qtl9.top', 'rrtype': 'A'}}]
@@ -13289,6 +13647,10 @@ class TestDnsHeuristicsTab(unittest.TestCase):
                 }
                 if (u.indexOf('/api/events') >= 0 && u.indexOf('type=dns') >= 0) {
                     return Promise.resolve({ ok: true, json: function() { return Promise.resolve(''' + json.dumps(events) + '''); } });
+                }
+                // nothing acknowledged: DNS Heuristics is the only lead
+                if (u.indexOf('/api/count') >= 0 && u.indexOf('acknowledged=only') >= 0) {
+                    return Promise.resolve({ ok: true, json: function() { return Promise.resolve({ count: 0 }); } });
                 }
                 if (u.indexOf('/api/count') >= 0) {
                     return Promise.resolve({ ok: true, json: function() { return Promise.resolve({ count: 1 }); } });
@@ -13317,6 +13679,7 @@ class TestDnsHeuristicsTab(unittest.TestCase):
             });
 
             navigateVertical(1); // rings the DNS Heuristics card itself
+            navigateVertical(1); // All Events, beneath it in the Protocol records section
             navigateVertical(1); // the one flagged row
             navigateVertical(1); // wraps -> DNS Heuristics stat card
             var wrapped = document.querySelector('.keyboard-selected');
@@ -13341,9 +13704,9 @@ class TestDnsHeuristicsTab(unittest.TestCase):
         ''')
         self.assertTrue(result['wrappedIsStatCard'], 'Down from the last item must wrap back onto a stat card')
         self.assertEqual(result['wrappedLabel'], 'DNS Heuristics')
-        self.assertEqual(result['ringedAfterRightLabel'], 'DNS Queries', 'ArrowRight must move the ring to the next card, with no second Up/Down press needed first')
+        self.assertEqual(result['ringedAfterRightLabel'], 'All Events', 'ArrowRight must move the ring to the next card, with no second Up/Down press needed first')
         self.assertEqual(result['activeAfterRightLabel'], 'DNS Heuristics', 'ArrowRight alone must only preview, not switch tabs')
-        self.assertEqual(result['activeAfterEnterLabel'], 'DNS Queries', 'Enter must commit the previewed tab')
+        self.assertEqual(result['activeAfterEnterLabel'], 'All Events', 'Enter must commit the previewed tab')
 
     def test_loadTabData_dns_heuristics_empty_state(self):
         from tests.jsdom_helper import js_statements
@@ -13501,6 +13864,7 @@ class TestDnsHeuristicsTab(unittest.TestCase):
                    'dns': {'rrname': '08kcbghk807qtl9.top', 'rrtype': 'A'}}]
         result = js_statements(self._dns_heuristics_bootstrap_js(events) + '''
             navigateVertical(1); // rings the DNS Heuristics stat card itself first
+            navigateVertical(1); // then All Events, beneath it in the Protocol records section
             navigateVertical(1); // the toggle bar renders before the table
             var sel = document.querySelector('.keyboard-selected');
             var selIsToggle = sel === infoToggle;
@@ -13525,6 +13889,7 @@ class TestDnsHeuristicsTab(unittest.TestCase):
                    'dns': {'rrname': '08kcbghk807qtl9.top', 'rrtype': 'A'}}]
         result = js_statements(self._dns_heuristics_bootstrap_js(events) + '''
             navigateVertical(1); // rings the DNS Heuristics stat card itself first
+            navigateVertical(1); // then All Events, beneath it in the Protocol records section
             navigateVertical(1); // toggle bar
             navigateVertical(1); // first row
             var sel = document.querySelector('.keyboard-selected');
@@ -13545,6 +13910,7 @@ class TestDnsHeuristicsTab(unittest.TestCase):
                    'dns': {'rrname': '08kcbghk807qtl9.top', 'rrtype': 'A'}}]
         result = js_statements(self._dns_heuristics_bootstrap_js(events) + '''
             navigateVertical(1); // rings the DNS Heuristics stat card itself first
+            navigateVertical(1); // then All Events, beneath it in the Protocol records section
             navigateVertical(1);
             var originalBar = document.querySelector('.keyboard-selected') === infoToggle;
 
@@ -13945,13 +14311,9 @@ class TestDnsHeuristicsTab(unittest.TestCase):
         self.assertTrue(result['cardFound'], 'DNS Heuristics card must still show after clicking a flagged row and clearing the filter')
         self.assertEqual(result['ariaLabel'], '1')
 
-    def test_dns_heuristics_card_sits_immediately_before_dns_queries_card(self):
-        """DNS Heuristics is inserted into the eventTypes loop right when
-        'dns' is reached, not appended after every other card with
-        'all'/'acknowledged' - it must render directly before DNS Queries
-        regardless of which other event types (and how many) are also
-        present, since eventTypes' own order is otherwise alphabetical
-        (see sortEventTypes) and DNS could land anywhere in it."""
+    def test_dns_heuristics_card_is_a_lead(self):
+        """DNS Heuristics is one of the leads - after the alerts and
+        Findings, ahead of every record type, DNS Queries among them."""
         from tests.jsdom_helper import js_statements
         events = [{'event_type': 'dns', 'timestamp': '2026-01-01T00:00:00', 'src_ip': '10.0.0.5',
                    'dns': {'rrname': '08kcbghk807qtl9.top', 'rrtype': 'A'}}]
@@ -13964,10 +14326,8 @@ class TestDnsHeuristicsTab(unittest.TestCase):
         labels = result['labels']
         self.assertIn('DNS Heuristics', labels)
         self.assertIn('DNS Queries', labels)
-        heuristics_idx = labels.index('DNS Heuristics')
-        dns_idx = labels.index('DNS Queries')
-        self.assertEqual(dns_idx, heuristics_idx + 1,
-                          'DNS Heuristics must render immediately before DNS Queries, not at the end with All Events/Acknowledged Alerts')
+        self.assertLess(labels.index('DNS Heuristics'), labels.index('All Events'))
+        self.assertEqual(labels[labels.index('All Events'):], ['All Events', 'DHCP', 'DNS Queries', 'FTP', 'HTTP'])
 
     def test_getVisibleEventType_maps_dns_heuristics_to_dns_for_truncation(self):
         """REGRESSION GUARD: DNS Heuristics is a derived view over the same
@@ -14954,7 +15314,7 @@ class TestSearchUI(unittest.TestCase):
                       'refreshAnalysisData must query visible section before rebuild')
         self.assertIn("const activeType = visibleSection ? visibleSection.id.replace('section-', '') : ''", func,
                       'refreshAnalysisData must extract active type from visible section')
-        self.assertIn("if (activeType && activeType !== eventTypes[0])", func,
+        self.assertIn("const sectionEl = activeType && activeType !== eventTypes[0]", func,
                       'refreshAnalysisData must conditionally restore non-default active type')
         self.assertIn("sectionEl.classList.remove('section-hidden')", func,
                       'refreshAnalysisData must unhide the restored section')
@@ -18128,8 +18488,11 @@ class TestUserConfigurableQueryLimit(unittest.TestCase):
         eval calls in the JSDOM test harness (unlike the var-scoped globals),
         so this is verified via source inspection rather than execution."""
         func = JS_CONTENT.split('async function saveSettings()')[1].split('function showAnalysisUI')[0]
-        self.assertIn('if (currentMd5)', func,
-                      'saveSettings must only refresh the loaded analysis when one is actually loaded')
+        self.assertIn('if (currentMd5 && !isWelcomeScreen())', func,
+                      'saveSettings must only refresh an analysis that is loaded and on screen - from the welcome '
+                      "screen, currentMd5 is still set and the refresh drew the last analysis's cards over it")
+        self.assertIn("getUserQueryLimit() !== previousQueryLimit", func,
+                      'and only when the query limit actually changed')
         self.assertIn('await refreshAnalysisData()', func)
 
     def test_saveSettings_disables_save_button_around_refresh(self):
@@ -21128,6 +21491,8 @@ class TestAcknowledgeAlerts(unittest.TestCase):
 
             eventTypes = ['dns'];
             buildSections();
+            // Opened the way a click on its card opens it.
+            showTab('section-acknowledged');
             await loadTabData('acknowledged');
             var row = document.getElementById('section-acknowledged').querySelector('tr[data-id="1"]');
             var pairs = JSON.parse(decodeURIComponent(row.dataset.pivot));
@@ -21418,6 +21783,818 @@ class TestEmailAnalysisUI(unittest.TestCase):
         self.assertIn('Attachment', result['file'])
         self.assertEqual(result['cyberchef'], 1)
         self.assertNotIn('Source', result['pcapLabels'], 'no blank Source row for a pcap file')
+
+class TestTsharkUI(unittest.TestCase):
+    """What tshark adds to a PCAP analysis: the tshark line and its states,
+    the cards it adds (and their dot and order), and its rows."""
+
+    def test_no_data_request_names_a_view(self):
+        """REGRESSION GUARD: there's one view - every request reads the
+        analysis's events.db, tshark's rows included."""
+        self.assertNotIn('viewParam', JS_CONTENT)
+        self.assertNotIn('view=shark', JS_CONTENT)
+        self.assertNotIn('currentView', JS_CONTENT)
+
+    def test_status_text_spells_out_each_state_with_a_link_when_it_needs_a_click(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""
+            document.getElementById('tsharkLineContainer').innerHTML = tsharkLineHtml();
+            function shown(status, types) {
+                tsharkTypes = new Set(types || []);
+                sharkStatus = status;
+                updateTsharkLine();
+                var el = document.getElementById('tsharkLineStatus');
+                var link = el.querySelector('a');
+                return {text: el.textContent, link: link ? link.dataset.action : null,
+                        barHidden: el.closest('.tshark-line').hidden, dot: !!el.querySelector('.stat-badge-dot')};
+            }
+            window.__jsdom_result = {
+                added: shown({status: 'ready', merged: true, seconds: 24}, ['s7comm', 'conn_rsh']),
+                one: shown({status: 'ready', merged: true}, ['nbns']),
+                damaged: shown({status: 'ready', merged: true, seconds: 9, damaged: true}, ['nbns']),
+                none: shown({status: 'ready', merged: true, seconds: 3}),
+                merging: shown({status: 'ready', merged: false}),
+                running: shown({status: 'running', elapsed: 5}),
+                queued: shown({status: 'queued', position: 1}),
+                tooLarge: shown({status: 'too_large'}),
+                error: shown({status: 'error', message: '<b>boom</b>'}),
+                disabled: shown({status: 'disabled'}),
+            };
+        """)
+        self.assertEqual(result['added']['text'], 'tshark parsed 2 additional protocols in 24s')
+        self.assertEqual(result['added']['dot'], True, "it starts with the dot that marks tshark's cards - the key to them")
+        self.assertEqual(result['one']['text'], 'tshark parsed 1 additional protocol')
+        self.assertEqual(result['damaged']['text'],
+                         'tshark parsed 1 additional protocol in 9s \u00b7 the capture is cut off, so its last packet wasn\u2019t read')
+        self.assertEqual((result['none']['text'], result['none']['dot']), ('tshark found no additional protocols in 3s', False))
+        self.assertEqual(result['merging']['text'], 'tshark is parsing additional protocols\u2026')
+        self.assertEqual((result['running']['text'], result['running']['dot']), ('tshark is parsing additional protocols\u2026 5s', False))
+        self.assertIn('waiting for another capture', result['queued']['text'])
+        self.assertIn('more packets than tshark analyzes automatically', result['tooLarge']['text'])
+        self.assertEqual(result['tooLarge']['link'], 'start-shark', 'Add tshark protocols starts it')
+        self.assertEqual(result['error']['text'], "Couldn't add tshark protocols: <b>boom</b> \u2013 Try again", 'escaped')
+        self.assertEqual(result['error']['link'], 'start-shark')
+        self.assertEqual((result['disabled']['text'], result['disabled']['barHidden']), ('', True), 'off: nothing to say')
+
+    def test_rows_that_arrive_while_the_analyst_is_on_the_cards_wait_with_a_link(self):
+        """The cards reload once when tshark's rows join - but not under
+        the analyst's pointer or keyboard focus, where they'd shift; the
+        line offers to show them meanwhile."""
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""
+            document.getElementById('tsharkLineContainer').innerHTML = tsharkLineHtml();
+            var refreshed = 0;
+            refreshAnalysisData = async function() { refreshed++; tsharkTypes = new Set(['s7comm']); };
+            currentMd5 = 'a'.repeat(32);
+            var grid = document.querySelector('.stats-grid');
+            var card = document.createElement('button'); grid.appendChild(card);
+            card.focus();
+            sharkStatus = {status: 'ready', merged: true, types: ['s7comm']};
+            refreshForTsharkRows(currentMd5);
+            var held = {refreshed: refreshed, text: document.getElementById('tsharkLineStatus').textContent,
+                        link: document.querySelector('#tsharkLineStatus a').dataset.action};
+            refreshForTsharkRows(currentMd5, true);
+            await new Promise(r => setTimeout(r, 0));
+            // (read through sharkStatusHtml: the test page's own start-up
+            // clears the bar once timers run)
+            var d = document.createElement('div'); d.innerHTML = sharkStatusHtml(sharkStatus);
+            window.__jsdom_result = {held: held, refreshed: refreshed, pending: tsharkRowsPending, text: d.textContent};
+        """)
+        self.assertEqual(result['held'], {'refreshed': 0, 'text': 'tshark parsed 1 additional protocol \u2013 Show them',
+                                          'link': 'show-tshark-rows'})
+        self.assertEqual((result['refreshed'], result['pending']), (1, False))
+        self.assertEqual(result['text'], 'tshark parsed 1 additional protocol')
+
+    def test_a_run_that_adds_nothing_reloads_nothing(self):
+        """REGRESSION: a run that found nothing to add, finishing while the
+        analyst was on the cards, said 'tshark parsed additional protocols -
+        Show them' - the page reloaded to find out - and then 'tshark found
+        no additional protocols'. The status says which types it added."""
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""
+            document.getElementById('tsharkLineContainer').innerHTML = tsharkLineHtml();
+            var refreshed = 0;
+            refreshAnalysisData = async function() { refreshed++; };
+            currentMd5 = 'a'.repeat(32);
+            var grid = document.querySelector('.stats-grid');
+            var card = document.createElement('button'); grid.appendChild(card);
+            card.focus();
+            tsharkTypes = new Set();
+            sharkStatus = {status: 'running', elapsed: 1};
+            window.fetch = () => Promise.resolve({json: () => Promise.resolve({status: 'ready', merged: true, seconds: 1, types: []})});
+            await refreshSharkStatus(currentMd5);
+            var d = document.createElement('div'); d.innerHTML = sharkStatusHtml(sharkStatus);
+            window.__jsdom_result = {refreshed: refreshed, pending: tsharkRowsPending, text: d.textContent};
+        """)
+        self.assertEqual(result, {'refreshed': 0, 'pending': False, 'text': 'tshark found no additional protocols in 1s'})
+
+    def test_tshark_line_sits_between_the_header_and_search_and_is_cleared_with_the_page(self):
+        html = HTML_CONTENT
+        self.assertLess(html.index('id="mainHeader"'), html.index('id="tsharkLineContainer"'))
+        self.assertLess(html.index('id="tsharkLineContainer"'), html.index('id="searchBarContainer"'))
+        clear = JS_CONTENT[JS_CONTENT.index('function clearAnalysisContainers()'):]
+        self.assertIn("document.getElementById('tsharkLineContainer').innerHTML = '';", clear[:clear.index('\n        }\n')])
+
+    def test_a_status_reply_for_an_analysis_the_user_left_is_dropped(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""
+            window.fetch = function() { currentMd5 = 'b'.repeat(32); return Promise.resolve({json: () => Promise.resolve({status: 'ready', flows: 1, app_protos: {}})}); };
+            currentMd5 = 'a'.repeat(32);
+            sharkStatus = null;
+            await refreshSharkStatus('a'.repeat(32));
+            window.__jsdom_result = sharkStatus;
+        """)
+        self.assertIsNone(result)
+
+    def test_row_notes_work_on_tshark_rows(self):
+        """tshark's rows live in events.db with Suricata's, so a note on one
+        is kept against that row like any other."""
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""
+            var opened = false;
+            showNotesModal = function() { opened = true; };
+            openRowNoteEditor('events', '5', '');
+            window.__jsdom_result = {detail: rowNoteDetailHtml('events', 5, ''), opened: opened};
+        """)
+        self.assertIn('Add Note', result['detail'])
+        self.assertTrue(result['opened'])
+
+    def test_tshark_line_only_on_pcap_analyses(self):
+        load = JS_CONTENT[JS_CONTENT.index('async function loadAnalysis(md5)'):]
+        load = load[:load.index('\n        }\n')]
+        self.assertIn("document.getElementById('tsharkLineContainer').innerHTML = isPcap ? tsharkLineHtml() : '';", load)
+
+    def test_the_pivot_menu_has_no_other_view(self):
+        """REGRESSION GUARD: there is one view now - no "View in tshark"."""
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""
+            document.getElementById('tsharkLineContainer').innerHTML = tsharkLineHtml();
+            sharkStatus = {status: 'ready', merged: true, flows: 1, app_protos: {}};
+            showPivotMenu({clientX: 1, clientY: 1}, null, 'Dest IP', '10.0.0.2', false, null, '1:abc=');
+            window.__jsdom_result = [...document.querySelectorAll('.pivot-menu .pivot-menu-item')].map(b => b.textContent.trim());
+        """)
+        self.assertIn('Correlate', result)
+        self.assertFalse([i for i in result if i.startswith('View in')])
+
+    def test_connection_tabs_label_sort_and_use_tsharks_flow_columns(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""
+            window.__jsdom_result = {
+                labels: [eventTypeLabel('conn_ftp-data'), eventTypeLabel('conn_openvpn'), eventTypeLabel('dns')],
+                order: sortEventTypes(['conn_s7comm', 'tls', 'conn_ftp', 'alert', 'dns']),
+                columns: getColumnsForType('conn_s7comm'),
+                flowColumns: getColumnsForType('flow'),
+            };
+        """)
+        self.assertEqual(result['labels'], ['FTP Data', 'OPENVPN', 'DNS Queries'], "a known type's label, else its name in capitals")
+        self.assertEqual(result['order'], ['alert', 'dns', 'tls', 'conn_ftp', 'conn_s7comm'], 'after every record type')
+        self.assertIn('App Proto', result['columns'])
+        self.assertNotIn('State', result['columns'])
+        self.assertIn('State', result['flowColumns'], "Suricata's own flows keep theirs")
+
+    def test_the_dot_marks_the_types_tshark_added(self):
+        """The server says which types tshark added (stats' tshark_types);
+        nothing else - Suricata's own fileinfo or anomaly - gets a dot."""
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""
+            eventTypes = ['flow', 's7comm', 'nbns', 'dns', 'fileinfo', 'anomaly', 'conn_rsh'];
+            eventStats = Object.fromEntries(eventTypes.map(t => [t, 1]));
+            tsharkTypes = new Set(['s7comm', 'nbns', 'conn_rsh']);
+            buildStats(null);
+            window.__jsdom_result = Object.fromEntries([...document.querySelectorAll('.stat-card')].map(c =>
+                [c.dataset.section.replace('section-', ''), !!c.querySelector('.stat-badge')]));
+        """)
+        self.assertEqual({t for t, badge in result.items() if badge}, {'s7comm', 'nbns', 'conn_rsh'})
+
+    def test_the_status_counts_seconds_while_tshark_runs_and_gives_the_total_once_ready(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""
+            document.getElementById('tsharkLineContainer').innerHTML = tsharkLineHtml();
+            var realNow = Date.now(), now = realNow;
+            Date.now = function() { return now; };
+            sharkStatus = {status: 'running', elapsed: 12};
+            updateTsharkLine();
+            var timer = document.getElementById('tsharkLineTimer');
+            var first = document.getElementById('tsharkLineStatus').textContent;
+            now += 3400; tickSharkClock();
+            var later = timer.textContent;
+            var ticking = sharkClockTimer !== null;
+            tsharkTypes = new Set(['s7comm', 'nbns']);
+            sharkStatus = {status: 'ready', merged: true, seconds: 48};
+            updateTsharkLine();
+            window.__jsdom_result = {first: first, later: later, ticking: ticking, hidden: timer.getAttribute('aria-hidden'),
+                stoppedAfter: sharkClockTimer === null, ready: document.getElementById('tsharkLineStatus').textContent};
+        """)
+        self.assertEqual(result['first'], 'tshark is parsing additional protocols\u2026 12s')
+        self.assertEqual(result['later'], '15s')
+        self.assertTrue(result['ticking'])
+        self.assertEqual(result['hidden'], 'true', 'not read out every second from the live region')
+        self.assertTrue(result['stoppedAfter'])
+        self.assertEqual(result['ready'], 'tshark parsed 2 additional protocols in 48s')
+
+    def test_the_badge_is_a_corner_dot_with_a_key_and_hidden_text(self):
+        """The badge keeps the card at two lines: a dot - the tshark line
+        starts with the same one - with a tooltip, and readable text only for
+        screen readers. There's no separate key."""
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""
+            document.getElementById('tsharkLineContainer').innerHTML = tsharkLineHtml();
+            eventTypes = ['flow', 's7comm'];
+            eventStats = {flow: 1, s7comm: 1};
+            tsharkTypes = new Set(['s7comm']);
+            buildStats(null);
+            var badge = document.querySelector('.stat-badge');
+            window.__jsdom_result = {text: badge.textContent, visibleText: [...badge.childNodes].filter(n => n.nodeType === 3).length,
+                srOnly: !!badge.querySelector('.sr-only'), title: badge.title, key: !!document.getElementById('tsharkLineKey')};
+        """)
+        self.assertEqual(result['text'], 'from tshark')
+        self.assertTrue(result['srOnly'])
+        self.assertEqual(result['visibleText'], 0)
+        self.assertFalse(result['key'])
+        self.assertEqual(result['title'], "From tshark: Suricata doesn't parse this protocol")
+        self.assertIn('.stat-badge { position: absolute;', CSS_CONTENT)
+
+    def test_cards_come_in_sections_under_headings_of_their_own(self):
+        """A PCAP analysis's cards come in three sections - triage, the
+        protocol records, the connections (Flows, then tshark's connection
+        cards) - each under a heading on a row of its own. (REGRESSION: the
+        connection cards' alphabetical run (BFD...) after the record
+        types' (...TLS) read as the cards sorted wrong.)"""
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""
+            await new Promise(function(r) { setTimeout(r, 100); });
+            currentMd5 = 'abc123';
+            isLogAnalysisMode = false; isEmailAnalysisMode = false;
+            var reply = function(v) { return Promise.resolve({ ok: true, json: function() { return Promise.resolve(v); } }); };
+            window.fetch = function(url) {
+                var u = String(url);
+                if (u.indexOf('/api/findings') >= 0) return reply({rules: [{id: 'x', count: 4}], findings: []});
+                if (u.indexOf('/api/events') >= 0 && u.indexOf('type=dns') >= 0) {
+                    return reply([{event_type: 'dns', timestamp: '2026-01-01T00:00:00', dns: {rrname: '08kcbghk807qtl9.top', rrtype: 'A'}}]);
+                }
+                if (u.indexOf('/api/count') >= 0 && u.indexOf('acknowledged=only') >= 0) return reply({count: 1});
+                if (u.indexOf('/api/sigma-count') >= 0) return reply({count: 0});
+                return reply({counts: eventStats});
+            };
+            eventTypes = sortEventTypes(['tls', 'conn__probed', 'conn_xdmcp', 'flow', 'alert', 'conn_bfd', 'http', 'dns', 'anomaly']);
+            eventStats = {tls: 2, conn__probed: 1640, conn_xdmcp: 73, flow: 40, alert: 1, conn_bfd: 10, http: 5, dns: 3, anomaly: 2};
+            buildStats();
+            await new Promise(function(r) { setTimeout(r, 200); });
+            buildStats();
+            var grid = document.getElementById('statsGrid');
+            var order = [...grid.children].map(el => el.classList.contains('stats-grid-heading') ? 'HEADING ' + el.querySelector('.stats-grid-heading-label').textContent
+                : el.querySelector('.stat-label').textContent);
+            // a 3-column grid: each section starts a row of its own
+            window.statsGridColumnCount = function() { return 3; };
+            // (the active card - a test can't set verticalNavSelection)
+            var column = function(label) {
+                grid.querySelectorAll('.stat-card').forEach(c => c.classList.toggle('tab-active', c.querySelector('.stat-label').textContent === label));
+                return activeColumnStatCards().map(c => c.querySelector('.stat-label').textContent);
+            };
+            var columns = {bfd: column('BFD'), flows: column('Flows'), dns: column('DNS Queries')};
+            var all = grid.querySelector('[data-section="section-all"]');
+            var notes = [...grid.querySelectorAll('.stats-grid-heading')].map(h => h.textContent);
+            var probedTitle = grid.querySelector('[data-section="section-conn__probed"]').title;
+            buildStats({tls: 2, alert: 1, http: 5, flow: 40});      // a filter that leaves no connection rows
+            window.__jsdom_result = {order: order, columns: columns, notes: notes, probedTitle: probedTitle,
+                                     allTitle: all.title, allTitleWithoutConnections: grid.querySelector('[data-section="section-all"]').title};
+        """)
+        self.assertEqual(result['order'], [
+            'HEADING Triage', 'Network Alerts', 'Anomalies', 'Findings', 'DNS Heuristics', 'Acknowledged Alerts', 'All Events',
+            'HEADING Protocol records', 'DNS Queries', 'HTTP', 'TLS',
+            'HEADING Connections', 'Flows', 'BFD', 'XDMCP', 'Probed Only'])
+        self.assertEqual(result['columns']['flows'], ['Network Alerts', 'DNS Heuristics', 'DNS Queries', 'Flows', 'Probed Only'],
+                         "each section's columns count from its own first card")
+        self.assertEqual(result['columns']['bfd'], ['Anomalies', 'Acknowledged Alerts', 'HTTP', 'BFD'])
+        self.assertIn('worth a look', result['notes'][0])
+        self.assertIn("Suricata's flows", result['notes'][2])
+        self.assertEqual(result['allTitle'], "Every record except tshark's connection rows, which list connections by protocol the way Flows does")
+        self.assertIn('nothing ever answered', result['probedTitle'])
+        self.assertEqual(result['allTitleWithoutConnections'], '', 'nothing to explain with no connection cards')
+
+    def test_tshark_finished_line_moves_to_the_protocol_records_heading(self):
+        """Once tshark is done, its line ends the Protocol records heading,
+        right above its cards, and the line under the header goes; what
+        there is to wait on or click stays on that line - as does the
+        finished line when the grid has no headings."""
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""
+            await new Promise(function(r) { setTimeout(r, 100); });
+            currentMd5 = 'abc123';
+            isLogAnalysisMode = false; isEmailAnalysisMode = false;
+            window.fetch = function() { return Promise.resolve({ ok: true, json: function() { return Promise.resolve({rules: [], findings: [], count: 0, counts: {}}); } }); };
+            document.getElementById('tsharkLineContainer').innerHTML = tsharkLineHtml();
+            var state = function() {
+                var h = document.getElementById('tsharkHeadingStatus');
+                return {line: document.getElementById('tsharkLineStatus').textContent,
+                        lineHidden: document.querySelector('.tshark-line').hidden,
+                        heading: h ? h.textContent : null, headingHidden: h ? h.hidden : null,
+                        headingParent: h ? h.closest('.stats-grid-heading').querySelector('.stats-grid-heading-label').textContent : null,
+                        title: h ? h.title : null};
+            };
+            tsharkTypes = new Set(['s7comm', 'conn_rsh']);
+            eventTypes = sortEventTypes(['alert', 's7comm', 'flow', 'conn_rsh']);
+            eventStats = {alert: 1, s7comm: 4, flow: 9, conn_rsh: 2};
+            sharkStatus = {status: 'running', elapsed: 3};
+            buildStats();
+            var running = state();
+            sharkStatus = {status: 'ready', merged: true, seconds: 9, types: ['s7comm', 'conn_rsh']};
+            updateTsharkLine();
+            var done = state();
+            buildStats();           // a rebuilt grid keeps it
+            var rebuilt = state();
+            eventTypes = ['flow']; eventStats = {flow: 9}; tsharkTypes = new Set();
+            buildStats();           // one section: no headings
+            var noHeadings = state();
+            window.__jsdom_result = {running: running, done: done, rebuilt: rebuilt, noHeadings: noHeadings};
+        """)
+        self.assertIn('tshark is parsing', result['running']['line'])
+        self.assertTrue(result['running']['headingHidden'])
+        self.assertEqual(result['done']['heading'], 'tshark parsed 2 additional protocols in 9s')
+        self.assertEqual(result['done']['headingParent'], 'Protocol records')
+        self.assertFalse(result['done']['headingHidden'])
+        self.assertEqual((result['done']['line'], result['done']['lineHidden']), ('', True))
+        self.assertIn('under Connections', result['done']['title'])
+        self.assertEqual(result['rebuilt']['heading'], result['done']['heading'])
+        self.assertIsNone(result['noHeadings']['heading'])
+        self.assertEqual(result['noHeadings']['line'], 'tshark found no additional protocols in 9s')
+        self.assertFalse(result['noHeadings']['lineHidden'])
+
+    # A grid with every section: three triage cards (All Events among
+    # them), two record cards and Flows plus the given number of
+    # connection cards - built with the given collapsed choices stored
+    def _sections_grid_js(self, connection_cards, choices=None):
+        conns = ['conn_p%02d' % i for i in range(connection_cards)]
+        types = ['alert', 'anomaly', 'dns', 'http', 'flow'] + conns
+        counts = dict({t: 1 for t in types}, flow=5)
+        return """
+            await new Promise(function(r) { setTimeout(r, 100); });
+            currentMd5 = 'abc123';
+            isLogAnalysisMode = false; isEmailAnalysisMode = false;
+            window.fetch = function() { return Promise.resolve({ ok: true, json: function() { return Promise.resolve({rules: [], findings: [], count: 0, counts: {}}); } }); };
+            safeStorageRemove(localStorage, 'socrates_statGroupsCollapsed');
+            """ + ("safeStorageSet(localStorage, 'socrates_statGroupsCollapsed', '%s');" % json.dumps(choices) if choices else '') + """
+            eventTypes = sortEventTypes(""" + json.dumps(types) + """);
+            eventStats = """ + json.dumps(counts) + """;
+            buildStats();
+            var grid = document.getElementById('statsGrid');
+            var shown = function() {
+                return [...grid.querySelectorAll('.stat-card:not(.stat-card-collapsed)')].map(c => c.querySelector('.stat-label').textContent);
+            };
+            var headings = function() {
+                return [...grid.querySelectorAll('.stats-grid-heading')].map(h => [h.querySelector('.stats-grid-heading-label').textContent,
+                    h.querySelector('.stats-grid-heading-toggle').getAttribute('aria-expanded'),
+                    h.querySelector('.stats-grid-heading-summary').hidden ? '' : h.querySelector('.stats-grid-heading-summary').textContent]);
+            };
+        """
+
+    def test_connections_collapse_by_default_past_the_threshold(self):
+        from tests.jsdom_helper import js_statements
+        few = js_statements(self._sections_grid_js(11) + "window.__jsdom_result = {headings: headings(), shown: shown().length};")
+        many = js_statements(self._sections_grid_js(12) + "window.__jsdom_result = {headings: headings(), shown: shown()};")
+        self.assertEqual(few['headings'][2], ['Connections', 'true', ''], '12 connection cards, Flows among them, stay open')
+        self.assertEqual(few['shown'], 3 + 2 + 12)
+        self.assertEqual(many['headings'], [['Triage', 'true', ''], ['Protocol records', 'true', ''],
+                                            ['Connections', 'false', '13 cards']])
+        self.assertEqual(many['shown'], ['Network Alerts', 'Anomalies', 'All Events', 'DNS Queries', 'HTTP'])
+
+    def test_toggling_a_section_hides_its_cards_and_is_remembered(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements(self._sections_grid_js(2) + """
+            grid.querySelector('.stats-grid-heading[data-group="1"] .stats-grid-heading-toggle').click();
+            var afterClick = {headings: headings(), shown: shown(), stored: safeStorageGet(localStorage, 'socrates_statGroupsCollapsed')};
+            buildStats();      // a rebuild keeps it
+            var afterRebuild = shown();
+            grid.querySelector('.stats-grid-heading[data-group="1"]').click();   // anywhere on the heading
+            window.__jsdom_result = {afterClick: afterClick, afterRebuild: afterRebuild, reopened: shown(),
+                                     stored: safeStorageGet(localStorage, 'socrates_statGroupsCollapsed')};
+        """)
+        self.assertEqual(result['afterClick']['headings'][1], ['Protocol records', 'false', '2 cards'])
+        self.assertEqual(result['afterClick']['shown'], ['Network Alerts', 'Anomalies', 'All Events', 'Flows', 'P00', 'P01'])
+        self.assertEqual(json.loads(result['afterClick']['stored']), {'1': True})
+        self.assertEqual(result['afterRebuild'], result['afterClick']['shown'])
+        self.assertEqual(len(result['reopened']), 3 + 2 + 3)
+        self.assertEqual(json.loads(result['stored']), {'1': False})
+
+    def test_a_viewer_choice_beats_the_threshold(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements(self._sections_grid_js(20, {'2': False, '0': True}) + "window.__jsdom_result = headings();")
+        self.assertEqual([h[1] for h in result], ['true', 'true', 'true'],
+                         "Triage holds the open tab, so it stays open; Connections was opened by the viewer")
+
+    def test_the_open_tabs_section_is_never_hidden(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements(self._sections_grid_js(2, {'1': True, '2': True}) + """
+            var before = headings();
+            // opening a tab from elsewhere (a pivot, the Command Palette)
+            await loadTabData('dns');
+            window.__jsdom_result = {before: before, after: headings(), stored: safeStorageGet(localStorage, 'socrates_statGroupsCollapsed'),
+                                     dnsShown: shown().indexOf('DNS Queries') >= 0};
+        """)
+        self.assertEqual([h[1] for h in result['before']], ['true', 'false', 'false'])
+        self.assertTrue(result['dnsShown'])
+        self.assertEqual([h[1] for h in result['after']], ['true', 'true', 'false'])
+        self.assertEqual(json.loads(result['stored']), {'1': True, '2': True}, 'opened for now, not saved')
+
+    def test_left_right_skip_a_collapsed_sections_cards(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements(self._sections_grid_js(2, {'1': True}) + """
+            window.statsGridColumnCount = function() { return 4; };
+            var seen = [];
+            for (var i = 0; i < 5; i++) {
+                navigateStatTabs(1);
+                seen.push(grid.querySelector('.stat-card.keyboard-selected').querySelector('.stat-label').textContent);
+            }
+            window.__jsdom_result = {seen: seen};
+        """)
+        self.assertEqual(result['seen'], ['Anomalies', 'All Events', 'Flows', 'P00', 'P01'])
+
+    def test_enter_on_a_section_button_is_the_buttons_own(self):
+        keydown = JS_CONTENT.split("if (e.key === 'Enter' && (isNavigableKeyContext(e) || isAutocompleteModalActive())")[1][:200]
+        self.assertIn(".stats-grid-heading-toggle", keydown,
+                      "Enter on a focused heading button must toggle the section, not activate the arrow keys' selection")
+
+    def test_no_headings_when_the_cards_fill_one_section(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""
+            currentMd5 = 'abc123';
+            isLogAnalysisMode = false; isEmailAnalysisMode = false;
+            eventTypes = sortEventTypes(['flow']);
+            eventStats = {flow: 3};
+            buildStats();
+            var pcap = document.querySelectorAll('#statsGrid .stats-grid-heading').length;
+            isLogAnalysisMode = true;
+            eventTypes = ['sigmaalert', 'log'];
+            eventStats = {sigmaalert: 2, log: 9};
+            buildStats();
+            var log = [...document.getElementById('statsGrid').children].map(el => el.classList.contains('stats-grid-heading') ? 'HEADING'
+                : el.querySelector('.stat-label').textContent);
+            window.__jsdom_result = {pcap: pcap, log: log};
+        """)
+        self.assertEqual(result['pcap'], 0)
+        self.assertNotIn('HEADING', result['log'], 'a log analysis keeps its cards as they were')
+
+    def test_flows_follow_the_record_types(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""
+            window.__jsdom_result = sortEventTypes(['conn_bfd', 'flow', 'http', 'alert', 'conn__probed', 'dns']);
+        """)
+        self.assertEqual(result, ['alert', 'dns', 'http', 'flow', 'conn_bfd', 'conn__probed'])
+
+    def test_tshark_connection_rows_show_its_flow_columns_and_say_so(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""
+            var e = {id: 1, event_type: 'conn_rsh', source: 'tshark', proto: 'TCP', app_proto: 'rsh', src_ip: '10.0.0.1',
+                     dest_ip: '10.0.0.2', src_port: 51877, dest_port: 514, timestamp: '2015-10-21T10:09:22',
+                     flow: {pkts_toserver: 6, pkts_toclient: 3, bytes_toserver: 100, bytes_toclient: 200, age: 0},
+                     shark: {protocols: {rsh: 2}, answered: 'yes'}};
+            var tb = document.createElement('tbody');
+            tb.innerHTML = buildRowForEvent(e);
+            var d = document.createElement('div'); d.innerHTML = formatEvent(e);
+            window.__jsdom_result = {cols: getColumnsForType('conn_rsh'), cells: [...tb.querySelector('tr').children].map(td => td.textContent),
+                                     detail: d.textContent};
+        """)
+        self.assertEqual(result['cols'][6:9], ['App Proto', 'Answered', 'Pkts \u2192'])
+        self.assertNotIn('State', result['cols'])
+        self.assertEqual(result['cells'][6:9], ['rsh', 'yes', '6'])
+        self.assertEqual(len(result['cells']), len(result['cols']) + 1, 'a cell per column, and the note cell')
+        self.assertIn('Answeredyes', result['detail'])
+        self.assertIn('Decoded bytshark', result['detail'])
+        self.assertIn('rsh (2 packets)', result['detail'])
+
+    def test_an_unknown_protocols_underscores_become_spaces_so_its_label_can_wrap(self):
+        """REGRESSION: STEAM_IHS_DISCOVERY had nowhere to wrap and ran out
+        of its card."""
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""window.__jsdom_result = [eventTypeLabel('conn_steam_ihs_discovery'),
+            eventTypeLabel('some_new_type'), eventTypeLabel('conn_bt-tracker'), eventTypeLabel('ftp_data')];""")
+        self.assertEqual(result, ['STEAM IHS DISCOVERY', 'SOME NEW TYPE', 'BT-TRACKER', 'FTP Data'])
+
+    def test_a_label_word_too_long_for_its_card_is_scaled_to_fit(self):
+        """REGRESSION: PORTCONTROL and CLASSICSTUN - single words, which a
+        label never breaks - ran out of a card on a ten-column row. jsdom
+        has no layout, so the label's widths are given."""
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""
+            var root = document.createElement('div');
+            root.innerHTML = '<div class="stat-label">PORTCONTROL</div><div class="stat-label">FLOWS</div>';
+            document.body.appendChild(root);
+            var [long, short] = root.querySelectorAll('.stat-label');
+            long.style.fontSize = '9px';     // left over from a narrower layout: cleared first
+            Object.defineProperty(long, 'clientWidth', {get: () => 100});
+            Object.defineProperty(long, 'scrollWidth', {get: () => parseFloat(long.style.fontSize || '13.6') * 9});
+            Object.defineProperty(short, 'clientWidth', {get: () => 100});
+            Object.defineProperty(short, 'scrollWidth', {get: () => 60});
+            var realStyle = window.getComputedStyle;
+            window.getComputedStyle = el => ({fontSize: el.style.fontSize || '13.6px'});
+            fitStatLabels(root);
+            window.getComputedStyle = realStyle;
+            window.__jsdom_result = {long: parseFloat(long.style.fontSize), short: short.style.fontSize};
+        """)
+        self.assertLessEqual(result['long'] * 9, 100, 'fits its card')
+        self.assertGreater(result['long'], 10.5, 'shrunk only as far as it needs')
+        self.assertEqual(result['short'], '', 'a label that fits keeps its size')
+
+    def test_switched_off_there_is_no_tshark_line(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""
+            document.getElementById('tsharkLineContainer').innerHTML = tsharkLineHtml();
+            sharkStatus = {status: 'disabled'};
+            updateTsharkLine();
+            window.__jsdom_result = {tabs: document.querySelectorAll('[data-action="switch-view"]').length,
+                                     hidden: document.querySelector('.tshark-line').hidden};
+        """)
+        self.assertEqual(result, {'tabs': 0, 'hidden': True})
+
+    def test_the_tshark_switch_is_saved_to_the_server_only_when_changed(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""
+            var posts = [];
+            window.fetch = async function(url, opts) {
+                if (opts && opts.method === 'POST') posts.push([url, JSON.parse(opts.body)]);
+                return {ok: true, json: async () => ({enabled: true})};
+            };
+            var input = document.getElementById('sharkEnabledInput');
+            input.disabled = false; input.dataset.saved = 'true'; input.checked = true;
+            var unchanged = await saveSharkSetting();
+            input.checked = false;
+            var changed = await saveSharkSetting();
+            window.__jsdom_result = {unchanged: unchanged, changed: changed, posts: posts, saved: input.dataset.saved};
+        """)
+        self.assertEqual(result['unchanged'], 'unchanged')
+        self.assertEqual(result['changed'], 'saved')
+        self.assertEqual(result['posts'], [['/api/shark-settings', {'enabled': False}]])
+        self.assertEqual(result['saved'], 'false')
+
+    def test_no_dot_without_tshark_types(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""
+            eventTypes = ['flow', 'dns', 'anomaly', 'fileinfo', 'stats', 'protocol_decode'];
+            eventStats = Object.fromEntries(eventTypes.map(t => [t, 1]));
+            tsharkTypes = new Set();
+            buildStats(null);
+            window.__jsdom_result = document.querySelectorAll('.stat-badge').length;
+        """)
+        self.assertEqual(result, 0)
+
+    def test_connection_cards_follow_the_records_and_stay_out_of_all_events(self):
+        """One card order: alerts, ALL EVENTS - which doesn't count
+        connections, each already one of Suricata's flows - then the
+        record types alphabetically (Suricata's and tshark's mixed), then
+        Flows and the connection cards."""
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""
+            eventTypes = sortEventTypes(['flow', 'conn_rsh', 's7comm', 'alert', 'dns', 'conn_prp', 'nbns']);
+            eventStats = {flow: 10, conn_rsh: 2, s7comm: 3, alert: 1, dns: 4, conn_prp: 5, nbns: 1};
+            tsharkTypes = new Set(['s7comm', 'nbns', 'conn_rsh', 'conn_prp']);
+            buildStats(null);
+            window.__jsdom_result = [...document.querySelectorAll('.stat-card')].map(c => [c.dataset.section.replace('section-', ''),
+                c.querySelector('.stat-number').getAttribute('aria-label')]);
+        """)
+        self.assertEqual([t for t, _ in result], ['alert', 'all', 'dns', 'nbns', 's7comm', 'flow', 'conn_prp', 'conn_rsh'])
+        self.assertEqual(dict(result)['all'], '19', 'alert, dns, flow, nbns and s7comm - not the connections')
+
+    def test_column_filters_count_connection_rows_like_any_type(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""
+            eventTypes = ['flow', 'conn_s7comm'];
+            currentFilters = {'Dest Port': {include: ['102'], exclude: []}};
+            allEvents = [
+                {event_type: 'flow', dest_port: 102},
+                {event_type: 'conn_s7comm', app_proto: 's7comm', dest_port: 102},
+                {event_type: 'conn_s7comm', app_proto: 's7comm', dest_port: 102},
+                {event_type: 'flow', dest_port: 53},
+            ];
+            ensureCappedBatch = async function() {};
+            eventMatchesFilters = function(e) { return e.dest_port === 102; };
+            window.__jsdom_result = await computeFilteredStats();
+        """)
+        self.assertEqual(result, {'flow': 1, 'conn_s7comm': 2})
+
+    TSHARK_RECORDS = {
+        'llmnr': {'event_type': 'llmnr', 'llmnr': {'type': 'response', 'queries': [{'rrname': 'wpad', 'rrtype': 'A'}],
+                                                   'answers': [{'rrname': 'wpad', 'rrtype': 'A', 'rdata': '10.1.0.70'}]}},
+        'nbns': {'event_type': 'nbns', 'nbns': {'type': 'request', 'opcode': 'registration', 'name': 'DESKTOP-TEST01',
+                                                'suffix': '20', 'service': 'Server service', 'address': '10.1.0.10'}},
+        's7comm': {'event_type': 's7comm', 's7comm': {'type': 'job', 'function': 'Read Var',
+                                                      'items': [{'area': 'Data blocks', 'db': 1, 'address': '10.0'}],
+                                                      'response': {'error_class': 'Error on supplies'}}},
+        'browser': {'event_type': 'browser', 'browser': {'message': 'Local Master Announcement', 'source_name': 'DC1',
+                                                      'destination_name': 'FIXTUREDOM', 'os_version': '10.0',
+                                                      'roles': ['workstation', 'domain controller'], 'count': 3}},
+        'coap': {'event_type': 'coap', 'coap': {'method': 'GET', 'type': 'Confirmable', 'uri': '/sensors/temp', 'query': 'unit=c',
+                                                'response_code': '2.05 Content', 'response_content_format': 'application/json',
+                                                'response_length': 10, 'resources': ['/sensors/temp']}},
+        'xdmcp': {'event_type': 'xdmcp', 'xdmcp': {'version': 1, 'messages': ['Query', 'Willing'], 'result': 'willing',
+                                                  'server_host_name': 'labsrv', 'server_status': 'Linux, load: 0.08',
+                                                  'display_addresses': ['10.1.0.40'],
+                                                  'authentication_names': ['XDM-AUTHENTICATION-1'],
+                                                  'authorization_names': ['MIT-MAGIC-COOKIE-1']}},
+        'tunnel': {'event_type': 'tunnel', 'tunnel': {'type': 'IP-in-IP', 'packets_toserver': 1, 'packets_toclient': 0,
+                                                      'inner_flows': 1, 'inner_hosts': ['10.1.0.1', '198.51.100.19'],
+                                                      'returns_to_sender': True}},
+        'rip': {'event_type': 'rip', 'rip': {'version': 'RIPv2', 'command': 'response', 'messages': 2, 'route_count': 3,
+                                              'routes': ['10.2.0.0/16 metric 1'], 'withdrawn': 1, 'metric_changes': 1,
+                                              'authentication': 'simple password'}},
+        'l2tp': {'event_type': 'l2tp', 'l2tp': {'version': 2, 'messages': ['SCCRQ', 'StopCCN'], 'client_host_name': 'l2tpscan',
+                                                'client_vendor': 'driftnet', 'client_firmware': '0x0123',
+                                                'server_host_name': 'vpn-gw', 'state': 'refused',
+                                                'stop_result': 'general error', 'calls': 2}},
+        'ipmi': {'event_type': 'ipmi', 'ipmi': {'requests': ['channel authentication capabilities'], 'result': 'answered',
+                                                'requested_privilege': 'administrator', 'ipmi_versions': ['1.5'],
+                                                'auth_types': ['none', 'MD5'], 'anonymous_login': True,
+                                                'cipher_accepted': {'authentication': 'RAKP-none'},
+                                                'weaknesses': ['anonymous login', 'no authentication offered']}},
+        'slp': {'event_type': 'slp', 'slp': {'version': 2, 'function': 'Service Request', 'xid': 2,
+                                              'service_type': 'service:VMwareInfrastructure', 'scopes': 'DEFAULT',
+                                              'response': 'Service Reply', 'status': 'OK',
+                                              'urls': ['service:VMwareInfrastructure://esx01.example.org']}},
+        'stun': {'event_type': 'stun', 'stun': {'method': 'Allocate', 'result': 'success', 'requests': 2, 'successes': 1,
+                                                'errors': 1, 'error_codes': ['401 Unauthorized'],
+                                                'mapped_addresses': ['203.0.113.50:40002'],
+                                                'relayed_addresses': ['192.0.2.30:50000'],
+                                                'client_software': 'fixture-client 1.0', 'username': 'turnuser'}},
+        'radius': {'event_type': 'radius', 'radius': {'message': 'Access-Request', 'user': 'alice', 'calling_station': 'AA-BB-CC-DD-EE-01',
+                                                    'nas_identifier': 'wlc-1', 'nas_ip': '10.1.0.2', 'result': 'accepted',
+                                                    'eap_methods': ['EAP-PEAP'], 'reply_message': 'Welcome, alice',
+                                                    'challenges': 1, 'response_time': 3.0}},
+        'socks': {'event_type': 'socks', 'socks': {'version': '5', 'command': 'connect', 'request_name': 'files.example.net',
+                                                  'request_port': 80, 'status': 'succeeded', 'user': 'proxyuser',
+                                                  'tunneled': 'http', 'bound_host': '192.0.2.10', 'bound_port': 50123}},
+        'rpc': {'event_type': 'rpc', 'rpc': {'program': 'mountd', 'program_number': 100005, 'version': 3, 'procedure': 'MNT',
+                                             'reply': 'RPC executed successfully', 'machine_name': 'client1',
+                                             'uid': 1000, 'gid': 1000, 'path': '/export/home'}},
+        'tls_failure': {'event_type': 'tls_failure', 'proto': 'TCP',
+                        'tls_failure': {'alert': 'Unknown CA', 'sent_by': 'client', 'alerts': ['client: Unknown CA'],
+                                        'sni': 'vpn.example', 'version': 'TLS 1.2',
+                                        'subject': 'C=US, O=Fixture Ltd, CN=dtls.example',
+                                        'issuerdn': 'C=US, O=Fixture Ltd, CN=dtls.example'}},
+        'dtls': {'event_type': 'dtls', 'dtls': {'sni': 'dtls.example', 'version': 'DTLS 1.2', 'handshake': 'completed',
+                                                'subject': 'C=US, O=Fixture Ltd, CN=dtls.example',
+                                                'ja4': 'dd2d0105wc_648b5c445417_7d72a171e567'}},
+        'syslog': {'event_type': 'syslog', 'syslog': {'severity': 'info', 'facility': 'auth', 'hostname': 'sw-core',
+                                                    'program': 'sshd', 'pid': '812', 'format': 'RFC 3164',
+                                                    'message': 'Failed password for admin from 10.1.0.77'}},
+        'dhcpv6': {'event_type': 'dhcpv6', 'dhcpv6': {'message': 'Request', 'reply': 'Reply', 'hostname': 'LAPTOP.example.com',
+                                                    'client_mac': '00:1b:21:00:00:10',
+                                                    'assigned_addresses': ['2001:0db8:0000:0000:0000:0000:0000:0010'],
+                                                    'vendor_class': 'MSFT 5.0', 'status': 'Success'}},
+        'lldp': {'event_type': 'lldp', 'lldp': {'system_name': 'sw1.example', 'chassis_id': '00:1b:21:00:00:01',
+                                                'port_id': 'Gi1/0/1', 'capabilities': ['bridge', 'router'],
+                                                'management_addresses': ['10.1.0.1'], 'vlan': 10, 'count': 2}},
+        'cdp': {'event_type': 'cdp', 'cdp': {'device_id': 'sw1', 'port_id': 'GigabitEthernet1/0/1',
+                                             'platform': 'cisco WS-C2960-24TT', 'capabilities': ['switch', 'IGMP'],
+                                             'addresses': ['10.1.0.1'], 'native_vlan': 10, 'count': 1}},
+        'goose': {'event_type': 'goose', 'goose': {'gocb_ref': 'IED1LD0/LLN0$GO$gcb1', 'dataset': 'IED1LD0/LLN0$Trips', 'stnum': 10,
+                                                  'repeats': 0, 'values': [True, '40', 7], 'stnum_gap': 7,
+                                                  'anomaly': 'stNum skipped 7'}},
+        'opcua': {'event_type': 'opcua', 'opcua': {'endpoint': 'opc.tcp://10.1.0.48:4840/fixture', 'security_policy': 'None',
+                                                  'security_mode': 'None', 'client_application': 'Fixture Client',
+                                                  'username': 'user1', 'password': 's3cret', 'activation': 'Good',
+                                                  'services': {'Write': 1}, 'errors': 0}},
+        'opcua_action': {'event_type': 'opcua_action', 'opcua_action': {'service': 'Call', 'node': 'ns=1;i=62541', 'object': 'i=85',
+                                                                        'arguments': ['Hello'], 'result': 'BadNodeIdUnknown'}},
+        'bacnet': {'event_type': 'bacnet', 'bacnet': {'service': 'reinitializeDevice', 'kind': 'confirmed', 'state': 'warmstart',
+                                                      'password': 'filister', 'result': 'error: services: password-failure'}},
+        'bacnet_property': {'event_type': 'bacnet_property', 'bacnet_property': {
+            'service': 'readProperty', 'object': 'analog-value,1', 'property': 'present-value', 'count': 2, 'errors': 1,
+            'last_value': 72.5, 'last_error': 'error: property: unknown-property'}},
+        'bacnet_device': {'event_type': 'bacnet_device', 'bacnet_device': {'device': 1047, 'vendor_id': 42, 'announcements': 2,
+                                                                           'vendor': 'Acuity Brands Lighting, Inc.'}},
+        'iec104': {'event_type': 'iec104', 'iec104': {'type_id': 45, 'type': 'C_SC_NA_1', 'action': 'Single command', 'cause': 'act',
+                                                      'station': 7, 'ioa': 2001, 'value': 'on', 'result': 'confirmed, terminated',
+                                                      'response': {'cause': 'actcon', 'negative': False}, 'terminated': True}},
+        'iec104_point': {'event_type': 'iec104_point', 'iec104_point': {'station': 7, 'ioa': 1001, 'type_id': 13, 'type': 'M_ME_NC_1',
+                                                                        'updates': 2, 'causes': {'spont': 2}, 'last_value': 231.0}},
+        'telnet': {'event_type': 'telnet', 'telnet': {'banner': 'MOXA EtherDevice Switch EDS-508A', 'username': 'admin',
+                                                      'password': 'admin', 'login': 'failed', 'commands': ['ls', 'exit']}},
+        'ssdp': {'event_type': 'ssdp', 'ssdp': {'type': 'request', 'method': 'M-SEARCH', 'search_target': 'upnp:rootdevice',
+                                                'location': 'http://10.1.0.60/d.xml', 'server': 'TestGateway/1.0'}},
+    }
+    TSHARK_EXPECTED = {
+        'llmnr': ['wpad', 'A'],
+        'nbns': ['registration', 'DESKTOP-TEST01', 'Server service', '10.1.0.10'],
+        's7comm': ['job', 'Read Var', 'Data blocks', 'Error on supplies'],
+        'ssdp': ['M-SEARCH', 'upnp:rootdevice', 'http://10.1.0.60/d.xml', 'TestGateway/1.0'],
+        'telnet': ['MOXA EtherDevice Switch EDS-508A', 'admin', 'admin', 'failed'],
+        'iec104': ['Single command', '7', '2001', 'on', 'confirmed, terminated'],
+        'browser': ['Local Master Announcement', 'DC1', 'FIXTUREDOM', '10.0', 'workstation, domain controller', '3'],
+        'rpc': ['mountd', '3', 'MNT', 'RPC executed successfully', 'client1'],
+        'coap': ['GET', '/sensors/temp', 'unit=c', '2.05 Content', 'application/json', 'Confirmable'],
+        'xdmcp': ['willing', 'labsrv', 'Linux, load: 0.08', 'Query, Willing', '10.1.0.40', 'XDM-AUTHENTICATION-1',
+                  'MIT-MAGIC-COOKIE-1'],
+        'tunnel': ['IP-in-IP', '1', '0', '1', '10.1.0.1', 'yes'],
+        'rip': ['response', 'RIPv2', '3', '10.2.0.0/16 metric 1', '1', '1', 'simple password'],
+        'l2tp': ['l2tpscan', 'driftnet', '0x0123', 'vpn-gw', 'refused', 'general error', '2'],
+        'ipmi': ['channel authentication capabilities', 'answered', '1.5', 'none, MD5', 'administrator', 'RAKP-none',
+                 'anonymous login, no authentication offered'],
+        'slp': ['Service Request', 'service:VMwareInfrastructure', 'DEFAULT',
+                'service:VMwareInfrastructure://esx01.example.org', 'Service Reply', 'OK', '2'],
+        'stun': ['Allocate', 'success', '2', '203.0.113.50:40002', '192.0.2.30:50000', 'fixture-client 1.0', 'turnuser'],
+        'radius': ['Access-Request', 'alice', 'AA-BB-CC-DD-EE-01', 'wlc-1', 'accepted', 'EAP-PEAP', 'Welcome, alice'],
+        'socks': ['5', 'connect', 'files.example.net', '80', 'succeeded', 'proxyuser', 'http'],
+        'tls_failure': ['Unknown CA', 'client', 'vpn.example', 'C=US, O=Fixture Ltd, CN=dtls.example',
+                        'C=US, O=Fixture Ltd, CN=dtls.example'],
+        'dtls': ['dtls.example', 'DTLS 1.2', 'completed', 'C=US, O=Fixture Ltd, CN=dtls.example',
+                 'dd2d0105wc_648b5c445417_7d72a171e567'],
+        'syslog': ['info', 'auth', 'sw-core', 'sshd', 'Failed password for admin from 10.1.0.77'],
+        'dhcpv6': ['Request', 'Reply', 'LAPTOP.example.com', '00:1b:21:00:00:10',
+                   '2001:0db8:0000:0000:0000:0000:0000:0010', 'MSFT 5.0', 'Success'],
+        'lldp': ['sw1.example', '00:1b:21:00:00:01', 'Gi1/0/1', 'bridge, router', '10.1.0.1', '10', '2'],
+        'cdp': ['sw1', 'GigabitEthernet1/0/1', 'cisco WS-C2960-24TT', 'switch, IGMP', '10.1.0.1', '10', '1'],
+        'goose': ['IED1LD0/LLN0$GO$gcb1', 'IED1LD0/LLN0$Trips', '10', '0', 'stNum skipped 7'],
+        'opcua': ['opc.tcp://10.1.0.48:4840/fixture', 'None', 'Fixture Client', 'user1', 's3cret', 'Good'],
+        'opcua_action': ['Call', 'ns=1;i=62541', 'Hello', 'BadNodeIdUnknown'],
+        'bacnet': ['reinitializeDevice', '', '', '', 'filister', 'error: services: password-failure'],
+        'bacnet_property': ['readProperty', 'analog-value,1', 'present-value', '2', '1', '72.5'],
+        'bacnet_device': ['1047', 'Acuity Brands Lighting, Inc.', '2'],
+        'iec104_point': ['7', '1001', 'M_ME_NC_1', '2', '231'],
+    }
+
+    def test_tshark_record_types_render_their_columns(self):
+        """LLMNR, NBNS, S7comm and SSDP: a row cell per column (plus the
+        row-note cell) holding extractValue's value, and a detail panel."""
+        from tests.jsdom_helper import js_statements
+        result = js_statements(f"""
+            var records = {json.dumps(self.TSHARK_RECORDS)};
+            var out = {{}};
+            Object.keys(records).forEach(function(t) {{
+                var e = Object.assign({{id: 1, timestamp: '2026-01-01T00:00:00', proto: 'UDP', src_ip: '10.1.0.10',
+                                        dest_ip: '10.1.0.20', src_port: 1, dest_port: 2}}, records[t]);
+                var cols = getColumnsForType(t);
+                var tb = document.createElement('tbody');
+                tb.innerHTML = buildRowForEvent(e);
+                out[t] = {{cols: cols, cells: [...tb.querySelector('tr').children].map(td => td.textContent),
+                          values: cols.slice(6).map(c => extractValue(e, c)),
+                          // just its section titles: the helper's output is limited to 64 KB
+                          detail: (formatEvent(e).match(/[^<>]+ Details(?=<)/g) || []).join('|'),
+                          label: eventTypeLabel(t)}};
+            }});
+            window.__jsdom_result = out;
+        """)
+        for t, expected in self.TSHARK_EXPECTED.items():
+            with self.subTest(event_type=t):
+                r = result[t]
+                self.assertEqual(r['values'], expected)
+                self.assertEqual(len(r['cells']), len(r['cols']) + 1)
+                self.assertEqual(r['cells'][6:6 + len(expected)], expected)
+                # one record per point, so its section is a point's
+                section = {'iec104_point': 'IEC 104 Point', 'bacnet_property': 'BACnet Property',
+                           'bacnet_device': 'BACnet Device', 'opcua_action': 'OPC UA Action',
+                           'tls_failure': 'TLS Failure'}.get(t, r['label'])
+                self.assertIn(f'{section} Details', r['detail'])
+
+    def test_telnet_details_list_the_commands_one_per_line(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""
+            var e = {id: 1, event_type: 'telnet', timestamp: '2026-01-01T00:00:00', proto: 'TCP', source: 'tshark',
+                     telnet: {banner: 'Ubuntu', username: 'admin', password: 's3cret', commands: ['ls -la', '<b>exit</b>']}};
+            var d = document.createElement('div'); d.innerHTML = formatEvent(e);
+            var block = [...d.querySelectorAll('.detail-label')].find(l => l.textContent === 'Commands').nextElementSibling;
+            window.__jsdom_result = {text: block.textContent, html: block.innerHTML, label: eventTypeLabel('telnet')};
+        """)
+        self.assertEqual(result['text'], 'ls -la\n<b>exit</b>', 'escaped, one per line')
+        self.assertNotIn('<b>', result['html'])
+        self.assertEqual(result['label'], 'Telnet')
+
+    def test_llmnr_details_show_transmissions_and_responses(self):
+        """tshark folds an LLMNR query's resends and repeated answers into
+        one record; its details give both counts, when there are any."""
+        from tests.jsdom_helper import js_statements
+        result = js_statements("""
+            var base = {id: 1, timestamp: '2026-01-01T00:00:00', event_type: 'llmnr', proto: 'UDP',
+                        src_ip: '10.1.0.10', dest_ip: '224.0.0.252', src_port: 53012, dest_port: 5355};
+            var many = Object.assign({}, base, {llmnr: {type: 'response', id: 1, transmissions: 2, responses: 3,
+                                                        queries: [{rrname: 'wpad', rrtype: 'A'}]}});
+            var once = Object.assign({}, base, {llmnr: {type: 'response', id: 1, queries: [{rrname: 'wpad', rrtype: 'A'}]}});
+            var text = function(e) { var d = document.createElement('div'); d.innerHTML = formatEvent(e); return d.textContent; };
+            window.__jsdom_result = {many: text(many), once: text(once)};
+        """)
+        self.assertIn('Transmissions2', result['many'])
+        self.assertIn('Responses3', result['many'])
+        self.assertNotIn('Transmissions', result['once'])
+        self.assertNotIn('Responses', result['once'])
+
+    def test_tshark_columns_are_all_aggregatable_server_side(self):
+        """Every column past the six shared ones has a JSON path in db.py's
+        AGGREGATION_JSON_PATHS - the server can't aggregate one it lacks."""
+        import db
+        from tests.jsdom_helper import js_statements
+        cols = js_statements("""window.__jsdom_result = Object.fromEntries(
+            ['llmnr', 'nbns', 's7comm', 'ssdp', 'telnet', 'iec104', 'iec104_point', 'bacnet', 'bacnet_property', 'bacnet_device', 'opcua', 'opcua_action', 'goose', 'browser', 'lldp', 'cdp', 'dhcpv6', 'syslog', 'dtls', 'tls_failure', 'rpc', 'socks', 'radius', 'stun', 'coap', 'slp', 'ipmi', 'l2tp', 'rip', 'tunnel', 'xdmcp'].map(t => [t, getColumnsForType(t).slice(6)]));""")
+        for t, columns in cols.items():
+            self.assertEqual(list(db.AGGREGATION_JSON_PATHS[t]), columns, t)
+
+    def test_refresh_falls_back_to_the_first_tab_when_the_open_one_is_gone(self):
+        """REGRESSION: with the open tab's type missing from the new data
+        (Network Alerts open, then a search that matched no alerts), every
+        section was hidden and nothing loaded."""
+        body = JS_CONTENT[JS_CONTENT.index('async function refreshAnalysisData()'):]
+        body = body[:body.index('updateFilterBarVisibility();\n            // See seedVerticalNavSelectionIfStale')]
+        self.assertIn("const sectionEl = activeType && activeType !== eventTypes[0]\n                    ? document.getElementById('section-' + activeType) : null;", body)
+        self.assertIn('if (sectionEl) {', body)
+        self.assertIn('} else if (eventTypes[0]) {\n                    await loadTabData(eventTypes[0], null);', body)
+
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)

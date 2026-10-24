@@ -17,9 +17,8 @@ message's HTML is only ever read, never rendered, and every value is
 displayed escaped. Phishing mail is hostile input, so parsing degrades
 rather than fails: a header the strict parser chokes on is read raw, a
 structure it can't parse falls back to raw headers or to the headers
-alone, and whatever
-the config.MAX_EMAIL_* limits cut off is reported as a warning rather
-than silently dropped. Messages over config.MAX_EMAIL_SIZE never get
+alone, and whatever the config.MAX_EMAIL_* limits cut off is reported as
+a warning rather than silently dropped. Messages over config.MAX_EMAIL_SIZE never get
 here - they're analyzed as plain files (socrates.py's _detect_file_type).
 """
 
@@ -420,13 +419,17 @@ def _parse_into(msg, depth, fallback_ts, events, attachments, budget, skipped, h
             links.append((_clean_url(url), '', 'text'))
 
     link_events = []
+    with_text = set()  # URLs seen with visible <a> text, filled in the loop below
     for url, text, source in links:
         if (url, text) in seen:
             continue
         seen.add((url, text))
+        if text:
+            with_text.add(url)
         # A bare URL in text repeats an <a> already seen - keep the one
-        # that has visible text to compare against.
-        if not text and any(u == url for u, t in seen if t):
+        # that has visible text to compare against. (A set, not a scan of
+        # seen: a message of 20,000 distinct URLs took seconds that way.)
+        if not text and url in with_text:
             continue
         if not budget['links']:
             skipped['links'] += 1

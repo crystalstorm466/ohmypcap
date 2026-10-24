@@ -5,7 +5,7 @@ Every analysis starts on the main screen, which has the sample cards, the Load f
 ![Main screen](../images/so-crates-main.png)
 
 1. **Upload a file** - click **Choose file or drag and drop here** (or drop a file on it) and select a `.pcap`, `.pcapng`, `.cap`, `.trace`, `.evtx`, `.json`, `.jsonl`, `.csv`, `.xml`, `.log`, `.eml`, or any other file type (or a `.zip` containing one). File types are auto-detected:
-    - **PCAP** files → Suricata network analysis
+    - **PCAP** files → Suricata network analysis, with tshark adding the protocols Suricata doesn't parse
     - **Log files** (`.evtx`, `.json`, `.jsonl`, `.csv`, `.xml`, `.log`) → Zircolite Sigma rule detection
     - **Email messages** (`.eml`, or any file that starts with an email's headers) → email analysis of headers, links, and attachments, with each attachment YARA-scanned. A message over 100 MB gets YARA binary scanning instead, and anything past the per-message limits (100 attachments, 1,000 links, 50 forwarded messages, 5 levels of forwarding) is reported as a warning on the email
     - **Other files** → YARA binary scanning

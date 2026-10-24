@@ -75,7 +75,10 @@ def parse_follow_raw(output, src, sport, direction):
             sent_by_src = sent_by_node0 == (node0 == src_endpoint)
             if sent_by_src != (direction == 'src'):
                 continue
-        chunks.append(bytes.fromhex(line.strip()))
+        try:
+            chunks.append(bytes.fromhex(line.strip()))
+        except ValueError:
+            continue  # skip a malformed hex line rather than fail the whole read
     return b''.join(chunks)
 
 

