@@ -1381,28 +1381,37 @@ def analyze(dir_path, pcap_path, on_start=None):
     unless the run was cancelled, whose directory is being cleared or
     removed. on_start is called with the child process (the queue kills
     its process group to cancel it)."""
-    _remove(os.path.join(dir_path, SHARK_ERROR))
+    error_path = os.path.join(dir_path, SHARK_ERROR)
+    _remove(error_path)
     with _lock:
         _unwritten_errors.pop(dir_path, None)
+    # Where the build puts a copy of the capture if tshark may not read it
+    # in place (_run_from_tmp_copy) - made here, so it's removed even when
+    # the build is killed, and unique, so no other run shares it
+    copy_dir = tempfile.mkdtemp(prefix='shark-copy-')
     try:
-        _analyze(dir_path, pcap_path, on_start)
+        succeeded = _analyze(dir_path, pcap_path, on_start, copy_dir)
     finally:
-        # The build removes its copy of the capture itself, unless it was killed
-        shutil.rmtree(_tmp_copy_dir(dir_path), ignore_errors=True)
-    if not os.path.exists(shark_db_path(dir_path)) and not os.path.exists(os.path.join(dir_path, SHARK_ERROR)) \
-            and not _was_cancelled(dir_path) and not os.access(dir_path, os.W_OK):
-        # Failed where neither the build nor _analyze could say why: without
-        # this, status() would read it as never started, and each status
-        # request would queue it again
+        shutil.rmtree(copy_dir, ignore_errors=True)
+    if not succeeded and not os.path.exists(error_path):
+        # Failed where neither the build nor _analyze could say why (an
+        # unwritable folder, a full disk): without this, status() would read
+        # it as never started, and each status request would queue it again
+        message = ("tshark couldn't write to this analysis's folder - its files may belong to another user, "
+                   'from an earlier run of SO-CRATES' if not os.access(dir_path, os.W_OK)
+                   else "tshark's run failed, and why couldn't be saved in this analysis's folder - is the disk full?")
         with _lock:
-            _unwritten_errors[dir_path] = ("tshark couldn't write to this analysis's folder - its files may "
-                                           'belong to another user, from an earlier run of SO-CRATES')
+            if dir_path not in _cancelled:
+                _unwritten_errors[dir_path] = message
 
 
-def _analyze(dir_path, pcap_path, on_start):
+def _analyze(dir_path, pcap_path, on_start, copy_dir):
+    """analyze's child process and what it says when it fails. Returns
+    whether the build succeeded."""
     with tempfile.TemporaryFile(mode='w+', errors='replace') as stderr_file:
         proc = subprocess.Popen(_child_command(dir_path, pcap_path), cwd=os.path.dirname(os.path.abspath(__file__)),
                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=stderr_file,
+                                env=dict(os.environ, SHARK_COPY_DIR=copy_dir),
                                 preexec_fn=_low_priority, start_new_session=True)
         if on_start:
             on_start(proc)
@@ -1418,9 +1427,10 @@ def _analyze(dir_path, pcap_path, on_start):
             _kill_group(proc)
             proc.wait()
         watchdog.join()
+        succeeded = not too_big.is_set() and proc.returncode == 0
         if not too_big.is_set() and (proc.returncode == 0 or _was_cancelled(dir_path)
                                      or os.path.exists(os.path.join(dir_path, SHARK_ERROR))):
-            return
+            return succeeded
         stderr_file.seek(0)
         lines = stderr_file.read()[-64 * 1024:].strip().splitlines()
     if too_big.is_set():
@@ -1438,9 +1448,10 @@ def _analyze(dir_path, pcap_path, on_start):
             f.write(f'tshark analysis stopped: {detail}'[:500])
     except OSError:
         pass
+    return False
 
 
-def build(dir_path, pcap_path):
+def build(dir_path, pcap_path, copy_dir=None):
     """analyze's child process: run tshark and write its records into
     shark.db as they're built, committing as it goes. On failure, writes
     the reason to .shark_error. Returns whether it succeeded."""
@@ -1457,7 +1468,7 @@ def build(dir_path, pcap_path):
             # Not allowed to read it here: from a copy in /tmp, which tshark may read
             for name in (tmp_path, tmp_path + '-wal', tmp_path + '-shm'):
                 _remove(name)
-            _run_from_tmp_copy(dir_path, pcap_path, tmp_path, notes)
+            _run_from_tmp_copy(copy_dir, pcap_path, tmp_path, notes)
         conn = sqlite3.connect(tmp_path)
         try:
             conn.execute(f'PRAGMA user_version = {SHARK_FORMAT_VERSION}')
@@ -1481,35 +1492,58 @@ def build(dir_path, pcap_path):
         return False
 
 
-def _tmp_copy_dir(dir_path):
-    """Where build copies an analysis's capture for tshark to read when it
-    can't read it in place - one per analysis, so analyze can remove one
-    that a killed build left behind."""
-    return os.path.join(tempfile.gettempdir(), 'shark-copy-' + os.path.basename(os.path.normpath(dir_path)))
-
-
-def _run_from_tmp_copy(dir_path, pcap_path, tmp_path, notes):
-    """build's run_tshark again, from a copy of the capture in /tmp - for a
-    tshark not allowed to read the analysis's directory (see
-    _DENIED_CAPTURE). The copy is removed when the run ends."""
-    copy_dir = _tmp_copy_dir(dir_path)
-    shutil.rmtree(copy_dir, ignore_errors=True)
+def _run_from_tmp_copy(copy_dir, pcap_path, tmp_path, notes):
+    """build's run_tshark again, from the capture placed in copy_dir, a
+    folder in /tmp that analyze made for this run (or one made here, for
+    a build run directly) - for a tshark not allowed to read the
+    analysis's directory (see _DENIED_CAPTURE). The copy is removed when
+    the run ends."""
+    own_dir = copy_dir is None
+    if own_dir:
+        copy_dir = tempfile.mkdtemp(prefix='shark-copy-')
+    copy = os.path.join(copy_dir, os.path.basename(pcap_path))
     try:
-        os.makedirs(copy_dir, mode=0o700)
-        copy = os.path.join(copy_dir, os.path.basename(pcap_path))
-        try:
-            shutil.copyfile(pcap_path, copy)
-        except OSError as e:
-            raise RuntimeError("tshark isn't allowed to read the capture where it is, and copying it to "
-                               f'{tempfile.gettempdir()} failed: {e.strerror or e}') from e
+        _place_copy(pcap_path, copy)
         try:
             run_tshark(copy, consume=lambda records: create_shark_db(tmp_path, records), notes=notes)
         except CaptureDenied as e:
             raise RuntimeError("tshark isn't allowed to read the capture, even from a copy in "
-                               f'{tempfile.gettempdir()} - a security policy on this computer, most likely '
+                               f'{os.path.dirname(copy_dir)} - a security policy on this computer, most likely '
                                "AppArmor's profile for tshark, blocks it") from e
     finally:
-        shutil.rmtree(copy_dir, ignore_errors=True)
+        _remove(copy)
+        if own_dir:
+            shutil.rmtree(copy_dir, ignore_errors=True)
+
+
+def _place_copy(pcap_path, copy):
+    """Put the capture at copy: a hard link where it can be - free, and
+    tshark's profile allows it by its /tmp path, but only for a file of
+    this user's own (the rule is owner /tmp/**) on the same filesystem -
+    else a copy, if there's room for one (/tmp is often RAM)."""
+    tmp_dir = os.path.dirname(os.path.dirname(copy))
+    try:
+        if os.stat(pcap_path).st_uid == os.getuid():
+            os.link(pcap_path, copy)
+            return
+    except OSError:
+        pass
+    try:
+        src = open(pcap_path, 'rb')
+    except OSError as e:
+        raise RuntimeError(f"tshark couldn't read the capture, and neither could SO-CRATES: {e.strerror or e}") from e
+    with src:
+        size, free = os.fstat(src.fileno()).st_size, shutil.disk_usage(os.path.dirname(copy)).free
+        if size > free:
+            raise RuntimeError(f"tshark isn't allowed to read the capture where it is, and {tmp_dir} has too little "
+                               f'free space for a copy ({size / 1024 ** 2:,.0f} MB needed, '
+                               f'{free / 1024 ** 2:,.0f} MB free)')
+        try:
+            with open(copy, 'wb') as dst:
+                shutil.copyfileobj(src, dst, 1024 * 1024)
+        except OSError as e:
+            raise RuntimeError(f"tshark isn't allowed to read the capture where it is, and copying it to {tmp_dir} "
+                               f'failed: {e.strerror or e}') from e
 
 
 def _remove(path):
@@ -1588,6 +1622,7 @@ def cancel(dir_path):
     """Stop this analysis's tshark run (reanalyze/delete): drop it
     from the queue, or kill its tshark if it's running."""
     with _lock:
+        _unwritten_errors.pop(dir_path, None)
         if dir_path in _pending:
             del _pending[dir_path]
             _queue.remove(dir_path)
@@ -1933,5 +1968,5 @@ def wait_idle(timeout=60):
 if __name__ == '__main__':
     # analyze's child: python3 -m shark_analyzer build <analysis dir> <pcap>
     if len(sys.argv) == 4 and sys.argv[1] == 'build':
-        sys.exit(0 if build(sys.argv[2], sys.argv[3]) else 1)
+        sys.exit(0 if build(sys.argv[2], sys.argv[3], os.environ.get('SHARK_COPY_DIR')) else 1)
     sys.exit('usage: python3 -m shark_analyzer build <analysis dir> <pcap>')

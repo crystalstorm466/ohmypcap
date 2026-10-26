@@ -2215,18 +2215,31 @@ class TestAnalyze(unittest.TestCase):
         self.assertIn('tshark failed', status['message'])
 
     def _denying_tshark(self, deny):
-        """PATH for a tshark that, like one under AppArmor 5's profile for
-        it, may not read captures under deny ('' for anywhere)."""
+        """os.environ for a tshark that, like one under AppArmor 5's profile
+        for it, may not read captures under deny ('' for anywhere) - each
+        refusal noted in self.denials - and a temp directory of the test's
+        own (self.tmp), so what's left in it can be checked."""
         bin_dir = os.path.join(self.dir, 'bin')
         os.makedirs(bin_dir)
         script = os.path.join(bin_dir, 'tshark')
         with open(script, 'w') as f:
             f.write('#!/bin/sh\nprev=\nfor a in "$@"; do\n'
                     '  if [ "$prev" = -r ]; then case "$a" in "$DENY"/*)\n'
+                    '    echo "$a" >> "$DENY_LOG"\n'
                     '    echo "tshark: You don\'t have permission to read the file \\"$a\\"." >&2; exit 2;; esac; fi\n'
                     '  prev=$a\ndone\nexec "$REAL_TSHARK" "$@"\n')
         os.chmod(script, 0o755)
-        return {'PATH': bin_dir + os.pathsep + os.environ['PATH'], 'DENY': deny, 'REAL_TSHARK': shutil.which('tshark')}
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.denials = os.path.join(self.tmp, 'denials')
+        patcher = mock.patch.object(tempfile, 'tempdir', self.tmp)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return {'PATH': bin_dir + os.pathsep + os.environ['PATH'], 'DENY': deny, 'DENY_LOG': self.denials,
+                'REAL_TSHARK': shutil.which('tshark'), 'TMPDIR': self.tmp}
+
+    def _left_in_tmp(self):
+        return [name for name in os.listdir(self.tmp) if name != 'denials']
 
     def test_a_capture_tshark_may_not_read_in_place_is_read_from_a_copy_in_tmp(self):
         """REGRESSION: on Ubuntu 26.04, AppArmor's profile for tshark kept
@@ -2234,9 +2247,11 @@ class TestAnalyze(unittest.TestCase):
         'You don't have permission to read the file'."""
         with mock.patch.dict(os.environ, self._denying_tshark(self.dir)):
             shark_analyzer.analyze(self.dir, self.pcap)
+        with open(self.denials) as f:
+            self.assertEqual(f.read().split(), [self.pcap], 'tshark was refused the capture in place, once')
         self.assertEqual(len(query_events_sqlite(shark_analyzer.shark_db_path(self.dir), 'flow')), 10)
         self.assertEqual(shark_analyzer.status(self.dir, self.pcap)['status'], 'ready')
-        self.assertFalse(os.path.exists(shark_analyzer._tmp_copy_dir(self.dir)), 'the copy is removed')
+        self.assertEqual(self._left_in_tmp(), [], 'the copy and its folder are removed')
 
     def test_a_capture_tshark_may_not_read_even_in_tmp_says_so(self):
         with mock.patch.dict(os.environ, self._denying_tshark('')):
@@ -2245,13 +2260,30 @@ class TestAnalyze(unittest.TestCase):
         self.assertEqual(status['status'], 'error')
         self.assertIn('even from a copy in', status['message'])
         self.assertIn('AppArmor', status['message'])
-        self.assertFalse(os.path.exists(shark_analyzer._tmp_copy_dir(self.dir)))
+        self.assertEqual(self._left_in_tmp(), [])
+
+    def test_the_capture_is_copied_where_it_cant_be_linked_if_there_is_room(self):
+        copy_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, copy_dir, True)
+        copy = os.path.join(copy_dir, 'sample.pcap')
+        with mock.patch.object(shark_analyzer.os, 'link', side_effect=OSError(18, 'Invalid cross-device link')):
+            shark_analyzer._place_copy(self.pcap, copy)
+        with open(self.pcap, 'rb') as a, open(copy, 'rb') as b:
+            self.assertEqual(a.read(), b.read())
+        self.assertNotEqual(os.stat(copy).st_ino, os.stat(self.pcap).st_ino, 'a copy, not a link')
+        os.unlink(copy)
+        with mock.patch.object(shark_analyzer.os, 'link', side_effect=OSError(18, 'Invalid cross-device link')), \
+                mock.patch.object(shark_analyzer.shutil, 'disk_usage', return_value=shutil._ntuple_diskusage(10, 10, 10)):
+            with self.assertRaisesRegex(RuntimeError, 'too little free space for a copy'):
+                shark_analyzer._place_copy(self.pcap, copy)
+        self.assertFalse(os.path.exists(copy))
 
     @unittest.skipIf(os.geteuid() == 0, 'root can write anywhere')
     def test_a_run_that_cannot_write_its_folder_is_an_error_not_queued_again(self):
         """REGRESSION: a folder the run couldn't write (files left by a
         run as another user) had no .shark_error either, so it read as
         never started - and each status request queued it again."""
+        self.addCleanup(shark_analyzer._unwritten_errors.pop, self.dir, None)
         os.chmod(self.dir, 0o555)
         try:
             shark_analyzer.analyze(self.dir, self.pcap)
@@ -2260,9 +2292,30 @@ class TestAnalyze(unittest.TestCase):
             self.assertIn("couldn't write to this analysis's folder", status['message'])
             self.assertTrue(shark_analyzer.enqueue(self.dir, self.pcap), 'Try again still queues it')
             self.assertTrue(shark_analyzer.wait_idle())
+            self.assertEqual(shark_analyzer.status(self.dir, self.pcap)['status'], 'error', 'and fails the same way')
         finally:
             os.chmod(self.dir, 0o755)
-        shark_analyzer._unwritten_errors.pop(self.dir, None)
+        shark_analyzer.cancel(self.dir)
+        self.assertEqual(shark_analyzer.status(self.dir, self.pcap)['status'], 'not_started',
+                         'cancel (reanalyze, delete) forgets it')
+
+    @unittest.skipIf(os.geteuid() == 0, 'root can write anywhere')
+    def test_an_unwritable_folder_with_an_older_shark_db_is_an_error_too(self):
+        """The older shark.db status() can't remove is no sign the run worked."""
+        self.addCleanup(shark_analyzer._unwritten_errors.pop, self.dir, None)
+        shark_analyzer.analyze(self.dir, self.pcap)
+        db_path = shark_analyzer.shark_db_path(self.dir)
+        conn = sqlite3.connect(db_path)
+        conn.execute('PRAGMA user_version = 1')
+        conn.commit()
+        conn.close()
+        os.chmod(self.dir, 0o555)
+        try:
+            self.assertEqual(shark_analyzer.status(self.dir, self.pcap), {'status': 'not_started'})
+            shark_analyzer.analyze(self.dir, self.pcap)
+            self.assertEqual(shark_analyzer.status(self.dir, self.pcap)['status'], 'error')
+        finally:
+            os.chmod(self.dir, 0o755)
 
     def test_timeout(self):
         with mock.patch.object(shark_analyzer, 'tshark_command', return_value=['sleep', '30']):
