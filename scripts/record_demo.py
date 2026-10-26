@@ -65,7 +65,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MP4_OUTPUT = os.path.join(REPO_ROOT, 'docs', 'videos', 'demo.mp4')
 WEBM_FALLBACK_OUTPUT = os.path.join(REPO_ROOT, 'docs', 'videos', 'demo.webm')
 POSTER_OUTPUT = os.path.join(REPO_ROOT, 'docs', 'videos', 'demo-poster.jpg')
-POSTER_TIMESTAMP_SECONDS = 80  # lands on the full merged All Events Sankey diagram, pointer arrow included - re-tune this if the recorded workflow's timing shifts (e.g. steps added/removed/re-ordered)
+POSTER_TIMESTAMP_SECONDS = 18  # lands on "Analysis complete": the three card sections and the full Sankey diagram, before the demo collapses it - re-tune this if the recorded workflow's timing shifts (e.g. steps added/removed/re-ordered)
 # Playwright's raw recording's very first frame can be captured before the
 # page has fully painted into the configured viewport - observed as a
 # corrupted frame 0 showing only a small upper-left region of real content
@@ -229,7 +229,7 @@ def find_chromium():
 
 
 
-async def _arrow_down_to(page, target, max_presses=5):
+async def _arrow_down_to(page, target, max_presses=10):
     """Press Down until target is the keyboard selection. With nothing
     selected yet, Down starts from the first navigable item - the filter
     bar or the active stat card (see getVerticalNavItems in
@@ -387,20 +387,61 @@ async def main(base_url):
         # No single target - "Analysis complete" is a general status, not a
         # reference to one specific element.
         await caption(page, "Analysis complete")
+        # tshark's cards join Suricata's when it finishes (usually first) -
+        # wait for them, so the cards walked below are all there is. They
+        # don't join while the pointer is over the cards (the heading offers
+        # "Show them" instead), so it's moved off them first.
+        await page.mouse.move(2, VIEWPORT['height'] - 2)
+        try:
+            await page.wait_for_function(
+                "() => { const t = (document.getElementById('tsharkHeadingStatus') || {}).textContent || ''; "
+                "return /tshark (parsed|found no)/.test(t) && !/Show them|Update the cards/.test(t); }",
+                timeout=120000)
+        except Exception:
+            print('WARNING: tshark never finished - walking only the cards shown', file=sys.stderr)
         await page.wait_for_timeout(2500)
 
+        # Collapse the Sankey Diagram before walking the cards, so each
+        # card's records show below the three card sections instead of the
+        # Sankey filling the screen. Via the keyboard, not a click - Down
+        # selects the toggle bar (getVerticalNavItems in static/socrates.js)
+        # and Enter activates it exactly like a click would
+        # (activateKeyboardSelection's plain verticalNavSelection.click()
+        # fallback for anything that isn't a data row/filter chip/previous-
+        # analysis row).
+        selected = page.locator('.keyboard-selected')
+        sankey_toggle = page.locator('.section-toggle-bar', has_text='Sankey Diagram').first
+        if await sankey_toggle.count() > 0:
+            await _arrow_down_to(page, sankey_toggle)
+            await caption(page, "Arrow keys navigate the whole page too - Down selects the "
+                                "Sankey Diagram toggle, Enter collapses it to make room for "
+                                "the Data Table", selected)
+            await page.wait_for_timeout(3800)
+            await page.keyboard.press('Enter')
+            await page.wait_for_timeout(1400)
+
         # Look at each of the individual data types (not a collapsed
-        # section's - hidden, they can't be clicked)
-        cards = '.stat-card:not(.stat-disabled):not(.stat-card-collapsed)'
-        card_count = await page.locator(cards).count()
-        for i in range(card_count):
-            card = page.locator(cards).nth(i)
+        # section's - hidden, they can't be clicked). Each card is found
+        # again by its section, not its position: REGRESSION - .nth(i) of
+        # the visible cards, re-resolved after the click, could be a
+        # different card once the click showed or hid one (the
+        # Acknowledged Alerts card), so "Viewing FILE INFO" pointed at an
+        # empty spot in the first section.
+        sections = await page.locator('.stat-card:not(.stat-disabled):not(.stat-card-collapsed)').evaluate_all(
+            "cards => cards.map(c => c.dataset.section)")
+        for section in sections:
+            card = page.locator(f'.stat-card[data-section="{section}"]')
             label = (await card.inner_text()).strip().split('\n')[-1]
             if label == 'ALL EVENTS':
                 continue
-            await card.click()
+            # Caption first, so it never lags the click; the arrow is drawn
+            # again after it, since the click can move the cards (the
+            # filter bar appears)
             await caption(page, f"Viewing {label}", card)
-            await page.wait_for_timeout(3200)
+            await card.click()
+            await page.wait_for_timeout(400)
+            await point_to(page, card)
+            await page.wait_for_timeout(2800)
 
             # Drill into a real Suricata alert to show the Playbook section -
             # only reachable from here, since Network Alerts is the one card
@@ -537,28 +578,10 @@ async def main(base_url):
         await caption(page, "Switching to the merged All Events view", all_events_card)
         await page.wait_for_timeout(2800)
 
-        # Collapse the Sankey Diagram via the keyboard, not a click - Down
-        # selects the toggle bar (getVerticalNavItems in static/socrates.js)
-        # and Enter activates it exactly like a click would
-        # (activateKeyboardSelection's plain verticalNavSelection.click()
-        # fallback for anything that isn't a data row/filter chip/previous-
-        # analysis row) - so the Aggregation Tables and Data Table have room
-        # to show, now that we're ready to expand them.
-        selected = page.locator('.keyboard-selected')
-        sankey_toggle = page.locator('.section-toggle-bar', has_text='Sankey Diagram').first
-        if await sankey_toggle.count() > 0:
-            await _arrow_down_to(page, sankey_toggle)
-            await caption(page, "Arrow keys navigate the whole page too - Down selects the "
-                                "Sankey Diagram toggle, Enter collapses it to make room for "
-                                "the Data Table", selected)
-            await page.wait_for_timeout(3800)
-            await page.keyboard.press('Enter')
-            await page.wait_for_timeout(1400)
-
-        # Expand Aggregation Tables the same way - Down moves to the next
-        # toggle bar, Enter expands it.
+        # Expand Aggregation Tables with the keyboard, as the Sankey Diagram
+        # was collapsed above - Down to its toggle bar, Enter expands it.
         await _arrow_down_to(page, page.locator('.section-toggle-bar', has_text='Aggregation Tables').first)
-        await caption(page, "Down again, Enter again - expanding Aggregation Tables", selected)
+        await caption(page, "Down to Aggregation Tables, Enter expands them", selected)
         await page.wait_for_timeout(2800)
         await page.keyboard.press('Enter')
         await page.wait_for_timeout(600)
