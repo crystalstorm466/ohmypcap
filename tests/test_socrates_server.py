@@ -4925,10 +4925,10 @@ bright_magenta = "#D9B9D9"
             on_progress('suricata rules updated (fake)')
         mock_suricata.side_effect = fake_suricata
 
-        status, body = self._post('/api/update-rules', {'ruleset': 'suricata', 'sources': ['et/open', 'abuse.ch/urlhaus']})
+        status, body = self._post('/api/update-rules', {'ruleset': 'suricata', 'sources': ['et/open', 'abuse.ch/feodotracker']})
         self.assertEqual(status, 200)
         mock_suricata.assert_called_once()
-        self.assertEqual(mock_suricata.call_args.kwargs.get('enabled_sources'), ['et/open', 'abuse.ch/urlhaus'])
+        self.assertEqual(mock_suricata.call_args.kwargs.get('enabled_sources'), ['et/open', 'abuse.ch/feodotracker'])
 
     @unittest.mock.patch('socrates.threading.Thread', new=SyncThread)
     @unittest.mock.patch('socrates.setup_suricata_config')

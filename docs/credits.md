@@ -16,7 +16,6 @@ SO-CRATES is built on many excellent open-source projects and freely available r
 | [Abuse.ch SSL Blacklist](https://sslbl.abuse.ch/) | CC0-1.0 | Suricata network rules (optional) |
 | [Abuse.ch JA3 Fingerprints](https://sslbl.abuse.ch/ja3-fingerprints/) | CC0-1.0 | Suricata network rules (optional) |
 | [Abuse.ch Feodo Tracker](https://feodotracker.abuse.ch/) | CC0-1.0 | Suricata network rules (optional) |
-| [Abuse.ch URLhaus](https://urlhaus.abuse.ch/) | CC0-1.0 | Suricata network rules (optional) |
 | [Etnetera Aggressive IP Blacklist](https://security.etnetera.cz/) | MIT | Suricata network rules (optional) |
 | [Positive Technologies PT Rules (Open)](https://rules.ptsecurity.com) | Custom | Suricata network rules (optional) |
 | [PAW Patrules](https://pawpatrules.fr/) | CC-BY-SA-4.0 | Suricata network rules (optional) |
