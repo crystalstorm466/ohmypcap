@@ -28,7 +28,7 @@ CREATE INDEX idx_dest_port ON events(event_type, dest_port);
 CREATE INDEX idx_src_port ON events(event_type, src_port);
 
 -- Expression indexes for flow's JSON-extracted aggregation columns
--- (Pkts/Bytes/State/Alerted) - built dynamically from the same SQL
+-- (Pkts/Bytes/State/Alerted, and App Proto for tshark's flows) - built dynamically from the same SQL
 -- expression the query itself uses, so they can never drift out of sync
 -- (see db.py's _ensure_flow_json_indexes). CAST(...AS TEXT) is required
 -- for SQLite to treat the index as covering - a bare json_extract() has
@@ -39,6 +39,7 @@ CREATE INDEX idx_flow_bytes_toserver ON events(event_type, CAST(COALESCE(json_ex
 CREATE INDEX idx_flow_bytes_toclient ON events(event_type, CAST(COALESCE(json_extract(json_data, '$.flow.bytes_toclient'), 0) AS TEXT));
 CREATE INDEX idx_flow_state ON events(event_type, CAST(json_extract(json_data, '$.flow.state') AS TEXT));
 CREATE INDEX idx_flow_alerted ON events(event_type, CASE WHEN CAST(json_extract(json_data, '$.flow.alerted') AS TEXT) THEN 'Yes' ELSE 'No' END);
+CREATE INDEX idx_flow_app_proto ON events(event_type, json_extract(json_data, '$.app_proto'));
 
 -- FTS5 virtual table for full-text search (created when FTS5 is available)
 CREATE VIRTUAL TABLE events_fts USING fts5(
@@ -92,6 +93,12 @@ CREATE TABLE acknowledged_alerts (
     UNIQUE(source_table, row_id)
 );
 
+-- PCAP analyses only, written by tshark's merge (db.replace_tshark_events):
+-- one row saying which shark.db the rows from tshark came from (stamp), how
+-- many were added, and their event types as a JSON list (GET /api/stats's
+-- tshark_types). Replaced on every merge.
+CREATE TABLE tshark_merge (stamp TEXT, rows INTEGER, types TEXT);
+
 -- Performance pragmas
 PRAGMA journal_mode = WAL;      -- Better concurrency between readers and writers
 PRAGMA synchronous = NORMAL;    -- Faster writes with WAL crash safety
@@ -109,7 +116,7 @@ New databases build the composite and expression indexes above at ingest. Pre-ex
 
 `get_sankey_data_sqlite` and `get_aggregation_data_sqlite` (`db.py`) run their independent `GROUP BY` queries concurrently via `ThreadPoolExecutor` - one SQLite connection per worker (connections aren't thread-safe to share), safe under WAL mode's multiple-simultaneous-readers guarantee.
 
-Unfiltered (no search query) results from both functions are cached in-memory in `analysis_cache.py` (`SANKEY_CACHE`, keyed by `(md5, event_type)`; `AGGREGATION_CACHE`, keyed by `(md5, event_type, column, page, page_size)`; plus `AGGREGATION_TOTALS_CACHE` for the per-column distinct-value counts - all guarded by a lock), since the underlying data never changes once an analysis finishes ingesting. All three caches are evicted per-analysis (`evict_analysis_cache`) on `/api/delete-analysis`/`/api/reanalyze` and cleared entirely on `/api/delete-all-analyses`. Search-filtered requests are never cached.
+Unfiltered (no search query) results from both functions are cached in-memory in `analysis_cache.py` (`SANKEY_CACHE`, keyed by `(md5, event_type)`; `AGGREGATION_CACHE`, keyed by `(md5, event_type, column, page, page_size)`; plus `AGGREGATION_TOTALS_CACHE` for the per-column distinct-value counts - all guarded by a lock), since the underlying data changes only at a few known points after an analysis finishes ingesting. All three caches are evicted per-analysis (`evict_analysis_cache`) on `/api/delete-analysis`/`/api/reanalyze`, on acknowledging or un-acknowledging rows (`/api/acknowledge-alert`, `/api/acknowledge-alerts-bulk`), and after tshark's merge adds its rows (`shark_analyzer.merge`) - and cleared entirely on `/api/delete-all-analyses`. Search-filtered requests are never cached.
 
 ### Known Limitations / Future Work
 
