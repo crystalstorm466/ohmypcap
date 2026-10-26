@@ -14441,24 +14441,36 @@
             'protocol-decode-toggle': (el) => handleShowProtocolDecodeAlertsToggle(el.checked),
         });
 
+        // Handle left-click actions (existing behavior)
         document.addEventListener('click', e => {
             const el = e.target.closest('[data-action]');
             if (!el) return;
+
             const fn = STATIC_ACTIONS[el.dataset.action];
-            // Unknown names are someone else's data-action (e.g. the
-            // #previousAnalysesList notes buttons handled by their own
-            // delegated listener above) - leave them alone.
             if (!fn) return;
-            // In-page anchors (href="#" links like show-welcome /
-            // show-about-modal) must not scroll-to-top/change the URL;
-            // preventDefault replaces their old "return false;". Anchors
-            // with a REAL href (MITRE tags, the rules modal's "(source)"
-            // links) must keep navigating, so they're left alone - an
-            // action that needs preventDefault despite a real href (e.g.
-            // 'load-analysis') calls it itself.
-            if (el.tagName === 'A' && el.getAttribute('href') === '#') e.preventDefault();
+
+            // Prevent default navigation for dummy anchor links (href="#")
+            if (el.tagName === 'A' && el.getAttribute('href') === '#') {
+                e.preventDefault();
+            }
+
             fn(el, e);
         });
+
+                // Handle right-click (contextmenu) for the same actions, enabling right-click on event logs
+        document.addEventListener('contextmenu', e => {
+            const el = e.target.closest('[data-action]');
+            if (!el) return;
+            const fn = STATIC_ACTIONS[el.dataset.action];
+            if (!fn) return;
+            // Restrict to row‑toggle actions to avoid interfering with unrelated UI elements
+            const allowed = ['toggle-row', 'toggle-log-row', 'toggle-sigma-row'];
+            if (!allowed.includes(el.dataset.action)) return;
+            // Prevent the browser's context menu to allow custom handling
+            e.preventDefault();
+            fn(el, e);
+        });
+
 
         // change/keydown/focus/mouse delegation for generated content -
         // each listener attached ONCE here at startup, so re-rendered
