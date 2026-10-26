@@ -179,10 +179,10 @@ def _run_capped(cmd, max_bytes, timeout, text=False):
 
 
 @contextlib.contextmanager
-def _carved_flow(pcap, src, sport, dst, dport):
+def _carved_flow(pcap, src, sport, dst, dport, max_bytes):
     """One flow, carved out of pcap by tcpdump into a file in /tmp, for
-    tshark to read: (its path, whether the carve was cut off at
-    MAX_STREAM_DOWNLOAD_SIZE). Removed on exit. tshark reads a whole
+    tshark to read: (its path, whether the carve was cut off at max_bytes).
+    Removed on exit. tshark reads a whole
     capture even to follow one flow (~8s on a 1GB pcap, measured), while
     tcpdump's BPF filter carves it out in a fraction of a second - and /tmp
     is the one place AppArmor 5's profile for tshark (Ubuntu 26.04 on) lets
@@ -190,7 +190,7 @@ def _carved_flow(pcap, src, sport, dst, dport):
     shark_analyzer's _DENIED_CAPTURE)."""
     _, carved, truncated = _run_capped(
         ['tcpdump', '-r', pcap, '-w', '-', _stream_bpf_filter(src, sport, dst, dport)],
-        max_bytes=config.MAX_STREAM_DOWNLOAD_SIZE,
+        max_bytes=max_bytes,
         timeout=config.STREAM_TIMEOUT_SECONDS
     )
     with tempfile.NamedTemporaryFile(prefix='socrates-flow-', suffix='.pcap') as tmp:
@@ -1114,7 +1114,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             # Read from the flow carved out (see _carved_flow) - a carve
             # cut off at its size limit still reads up to the cut, as much
             # of a transcript as there's room to show anyway
-            with _carved_flow(pcap, src, sport, dst, dport) as (flow_pcap, truncated):
+            with _carved_flow(pcap, src, sport, dst, dport,
+                              config.MAX_TRANSCRIPT_CARVE_SIZE) as (flow_pcap, truncated):
                 proto = 'tcp'
                 lines = self._extract_payload_lines(flow_pcap, src, sport, dst, dport, 'tcp')
                 if not lines:
@@ -1272,7 +1273,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         pcap, src, sport, dst, dport = (result[k] for k in ('pcap', 'src', 'sport', 'dst', 'dport'))
         try:
             # Followed from the flow carved out (see _carved_flow)
-            with _carved_flow(pcap, src, sport, dst, dport) as (flow_pcap, truncated):
+            with _carved_flow(pcap, src, sport, dst, dport,
+                              config.MAX_STREAM_DOWNLOAD_SIZE) as (flow_pcap, truncated):
                 if truncated:
                     self._send_error(413, 'Stream payload too large')
                     return

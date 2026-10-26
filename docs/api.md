@@ -286,7 +286,7 @@ Carves a single TCP/UDP stream from the PCAP using `tcpdump` and returns it as a
 
 ### `GET /api/ascii-stream`
 
-Extracts ASCII payload from a TCP/UDP stream: the flow is carved with `tcpdump` into a file in `/tmp`, then read with `tshark`. Tries TCP first, falls back to UDP. Capped to the first 500 lines (`MAX_TRANSCRIPT_LINES`) and to 100,000 characters (`MAX_TRANSCRIPT_SIZE`), whichever is hit first - and `truncated` is also true for a flow over 200 MB (`MAX_STREAM_DOWNLOAD_SIZE`), read up to that much.
+Extracts ASCII payload from a TCP/UDP stream: the flow is carved with `tcpdump` into a file in `/tmp`, then read with `tshark`. Tries TCP first, falls back to UDP. Capped to the first 500 lines (`MAX_TRANSCRIPT_LINES`) and to 100,000 characters (`MAX_TRANSCRIPT_SIZE`), whichever is hit first - and `truncated` is also true for a flow over 16 MB (`MAX_TRANSCRIPT_CARVE_SIZE`), read up to that much.
 
 **Query Parameters:**
 

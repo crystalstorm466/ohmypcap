@@ -8531,9 +8531,13 @@ class TestRawBytesEndpoints(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which('tshark'), 'tshark not installed')
     def test_transcript_of_a_flow_past_the_carve_limit_is_marked_truncated(self):
-        with unittest.mock.patch.object(config, 'MAX_STREAM_DOWNLOAD_SIZE', 200):
+        """The transcript's carve has a limit of its own, far below the
+        download's: held in memory, then written to /tmp (often RAM)."""
+        self.assertLess(config.MAX_TRANSCRIPT_CARVE_SIZE, config.MAX_STREAM_DOWNLOAD_SIZE)
+        with unittest.mock.patch.object(config, 'MAX_TRANSCRIPT_CARVE_SIZE', 200):
             data = self._ascii('10.0.0.1', 40000, '10.0.0.2', 80)
         self.assertTrue(data['truncated'])
+        self.assertFalse(self._ascii('10.0.0.1', 40000, '10.0.0.2', 80)['truncated'], 'under the limit, it is not')
 
     def test_raw_stream_rejects_bad_params(self):
         self.assertEqual(self._stream('client')[0], 400)
