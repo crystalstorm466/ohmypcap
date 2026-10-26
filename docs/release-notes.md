@@ -12,6 +12,12 @@
   SO-CRATES among them - it reaches the container's tshark too. When
   tshark isn't allowed to read a capture where it is, it now reads a
   copy in `/tmp`, removed once it's done
+- On the same hosts, a stream's **ASCII Transcript** came back empty and
+  its payload (**Send to CyberChef**) wasn't found: tshark read those
+  from the capture, or a flow carved out under the analysis's folder.
+  Both now read the flow carved into `/tmp` - which also makes the
+  transcript quicker, since tshark no longer reads the whole capture to
+  follow one flow
 - An analysis folder tshark can't write to (its files left by a run as
   another user) is now an error saying so, instead of a tshark run that
   was queued again on every status check and never finished

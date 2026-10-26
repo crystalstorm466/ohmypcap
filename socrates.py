@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import contextlib
 import functools
 import http.server
 import socketserver
@@ -175,6 +176,27 @@ def _run_capped(cmd, max_bytes, timeout, text=False):
     if text:
         data = data.decode('utf-8', errors='replace')
     return proc.returncode, data, truncated
+
+
+@contextlib.contextmanager
+def _carved_flow(pcap, src, sport, dst, dport):
+    """One flow, carved out of pcap by tcpdump into a file in /tmp, for
+    tshark to read: (its path, whether the carve was cut off at
+    MAX_STREAM_DOWNLOAD_SIZE). Removed on exit. tshark reads a whole
+    capture even to follow one flow (~8s on a 1GB pcap, measured), while
+    tcpdump's BPF filter carves it out in a fraction of a second - and /tmp
+    is the one place AppArmor 5's profile for tshark (Ubuntu 26.04 on) lets
+    it read a file at all, in a rootless container too (see
+    shark_analyzer's _DENIED_CAPTURE)."""
+    _, carved, truncated = _run_capped(
+        ['tcpdump', '-r', pcap, '-w', '-', _stream_bpf_filter(src, sport, dst, dport)],
+        max_bytes=config.MAX_STREAM_DOWNLOAD_SIZE,
+        timeout=config.STREAM_TIMEOUT_SECONDS
+    )
+    with tempfile.NamedTemporaryFile(prefix='socrates-flow-', suffix='.pcap') as tmp:
+        tmp.write(carved)
+        tmp.flush()
+        yield tmp.name, truncated
 
 
 # Server-wide rule-update job state, polled by the frontend via
@@ -1089,13 +1111,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         dport = result['dport']
 
         try:
-            proto = 'tcp'
-            lines = self._extract_payload_lines(pcap, src, sport, dst, dport, 'tcp')
-            if not lines:
-                proto = 'udp'
-                lines = self._extract_payload_lines(pcap, src, sport, dst, dport, 'udp')
+            # Read from the flow carved out (see _carved_flow) - a carve
+            # cut off at its size limit still reads up to the cut, as much
+            # of a transcript as there's room to show anyway
+            with _carved_flow(pcap, src, sport, dst, dport) as (flow_pcap, truncated):
+                proto = 'tcp'
+                lines = self._extract_payload_lines(flow_pcap, src, sport, dst, dport, 'tcp')
+                if not lines:
+                    proto = 'udp'
+                    lines = self._extract_payload_lines(flow_pcap, src, sport, dst, dport, 'udp')
 
-            truncated = False
             if len(lines) > config.MAX_TRANSCRIPT_LINES:
                 lines = lines[:config.MAX_TRANSCRIPT_LINES]
                 truncated = True
@@ -1246,25 +1271,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return
         pcap, src, sport, dst, dport = (result[k] for k in ('pcap', 'src', 'sport', 'dst', 'dport'))
         try:
-            # tshark reads the entire capture even to follow one flow (~8s
-            # on a 1GB pcap, measured), while tcpdump's BPF filter carves
-            # the flow out in a fraction of a second - so carve first, the
-            # same way /api/download-stream does, and follow only that.
-            _, carved, truncated = _run_capped(
-                ['tcpdump', '-r', pcap, '-w', '-', _stream_bpf_filter(src, sport, dst, dport)],
-                max_bytes=config.MAX_STREAM_DOWNLOAD_SIZE,
-                timeout=config.STREAM_TIMEOUT_SECONDS
-            )
-            if truncated:
-                self._send_error(413, 'Stream payload too large')
-                return
-            # upload_tmp_dir() is swept at startup, so a hard crash
-            # mid-request can't strand the carved copy.
-            with tempfile.NamedTemporaryFile(dir=upload_tmp_dir(DATA_DIR), suffix='.pcap') as tmp:
-                tmp.write(carved)
-                tmp.flush()
+            # Followed from the flow carved out (see _carved_flow)
+            with _carved_flow(pcap, src, sport, dst, dport) as (flow_pcap, truncated):
+                if truncated:
+                    self._send_error(413, 'Stream payload too large')
+                    return
                 payload, too_large = run_follow_raw(
-                    _run_capped, tmp.name, src, sport, dst, dport, direction,
+                    _run_capped, flow_pcap, src, sport, dst, dport, direction,
                     max_bytes=config.MAX_RAW_STREAM_SIZE,
                     timeout=config.STREAM_TIMEOUT_SECONDS)
             if too_large:

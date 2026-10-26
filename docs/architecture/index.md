@@ -30,7 +30,7 @@ A stdlib-only Python HTTP server (`http.server.SimpleHTTPRequestHandler`). Handl
 
 | File | Responsibility |
 |---|---|
-| `socrates.py` | HTTP request dispatch, stream carving, upload/load-url orchestration |
+| `socrates.py` | HTTP request dispatch, stream carving (a flow tshark reads is carved into `/tmp` first: faster than tshark reading the whole capture, and the one place AppArmor 5's tshark profile lets it read), upload/load-url orchestration |
 | `db.py` | SQLite schema, bulk loading, FTS5 full-text search, query functions |
 | `models.py` | Suricata event field extraction helpers (IP, port, protocol) |
 | `url_fetch.py` | Downloads a "Load from URL" file through only the IPs `validators.py` validated, re-checking every redirect hop |

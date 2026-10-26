@@ -286,7 +286,7 @@ Carves a single TCP/UDP stream from the PCAP using `tcpdump` and returns it as a
 
 ### `GET /api/ascii-stream`
 
-Extracts ASCII payload from a TCP/UDP stream using `tshark`. Tries TCP first, falls back to UDP. Capped to the first 500 lines (`MAX_TRANSCRIPT_LINES`) and to 100,000 characters (`MAX_TRANSCRIPT_SIZE`), whichever is hit first.
+Extracts ASCII payload from a TCP/UDP stream: the flow is carved with `tcpdump` into a file in `/tmp`, then read with `tshark`. Tries TCP first, falls back to UDP. Capped to the first 500 lines (`MAX_TRANSCRIPT_LINES`) and to 100,000 characters (`MAX_TRANSCRIPT_SIZE`), whichever is hit first - and `truncated` is also true for a flow over 200 MB (`MAX_STREAM_DOWNLOAD_SIZE`), read up to that much.
 
 **Query Parameters:**
 
@@ -324,7 +324,7 @@ Extracts per-packet hex dumps from a TCP/UDP stream using `tcpdump -X`. Truncate
 
 ### `GET /api/raw-stream`
 
-Returns a TCP/UDP stream's exact payload bytes - nothing decoded, replaced or trimmed, unlike `/api/ascii-stream`. The flow is carved with `tcpdump`, then reassembled with `tshark`'s `follow ... raw` mode, which drops retransmitted segments and orders out-of-order ones. Tries TCP first, falls back to UDP.
+Returns a TCP/UDP stream's exact payload bytes - nothing decoded, replaced or trimmed, unlike `/api/ascii-stream`. The flow is carved with `tcpdump` into a file in `/tmp`, then reassembled with `tshark`'s `follow ... raw` mode, which drops retransmitted segments and orders out-of-order ones. Tries TCP first, falls back to UDP.
 
 **Query Parameters:**
 
