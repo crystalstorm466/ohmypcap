@@ -18,6 +18,14 @@
   Both now read the flow carved into `/tmp` - which also makes the
   transcript quicker, since tshark no longer reads the whole capture to
   follow one flow
+- **Abuse.ch URLhaus** is no longer a Suricata rule source: abuse.ch has
+  retired its Suricata feed, and the image had been baking it with none
+  of URLhaus's rules in it (suricata-update doesn't fail on a feed that's
+  gone). An install that had it enabled simply stops using it; alerts
+  from its rules in earlier analyses are still labeled URLhaus. The image
+  now bakes in 13 sources, and its build fails if a source gives no rules
+  of its own, so a dead feed can't ship that way again - and it tries
+  each source a few times first, so one slow download doesn't fail it
 - An analysis folder tshark can't write to (its files left by a run as
   another user) is now an error saying so, instead of a tshark run that
   was queued again on every status check and never finished
