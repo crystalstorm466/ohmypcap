@@ -1258,6 +1258,18 @@ def _low_priority():
 _DAMAGED_CAPTURE = ('appears to have been cut short in the middle of a packet', 'appears to be damaged or corrupt')
 
 
+# tshark's words for a capture it wasn't allowed to open. AppArmor 5
+# (Ubuntu 26.04 on) has an enforcing profile for /usr/bin/tshark that lets
+# it read files in /tmp and hardly anywhere else - and in a rootless
+# container, which the host doesn't confine, that profile reaches the
+# container's tshark too, so it can't read the analysis's directory.
+_DENIED_CAPTURE = "You don't have permission to read the file"
+
+
+class CaptureDenied(RuntimeError):
+    """tshark wasn't allowed to open the capture (see _DENIED_CAPTURE)."""
+
+
 def _read_to_damage(returncode, stderr):
     """Whether a tshark run that failed only stopped at a capture's cut-off
     or damaged end, having read all it could."""
@@ -1308,7 +1320,7 @@ def run_tshark(pcap_path, timeout=None, on_start=None, consume=list, notes=None)
         raise RuntimeError('tshark was stopped')
     if proc.returncode != 0 and not _read_to_damage(proc.returncode, stderr):
         detail = stderr.strip().splitlines()[-1] if stderr.strip() else f'exit code {proc.returncode}'
-        raise RuntimeError(f'tshark failed: {detail}')
+        raise (CaptureDenied if _DENIED_CAPTURE in stderr else RuntimeError)(f'tshark failed: {detail}')
     if notes is not None and proc.returncode != 0:
         notes['damaged'] = True      # read up to a cut-off or damaged end
     return events
@@ -1370,6 +1382,24 @@ def analyze(dir_path, pcap_path, on_start=None):
     removed. on_start is called with the child process (the queue kills
     its process group to cancel it)."""
     _remove(os.path.join(dir_path, SHARK_ERROR))
+    with _lock:
+        _unwritten_errors.pop(dir_path, None)
+    try:
+        _analyze(dir_path, pcap_path, on_start)
+    finally:
+        # The build removes its copy of the capture itself, unless it was killed
+        shutil.rmtree(_tmp_copy_dir(dir_path), ignore_errors=True)
+    if not os.path.exists(shark_db_path(dir_path)) and not os.path.exists(os.path.join(dir_path, SHARK_ERROR)) \
+            and not _was_cancelled(dir_path) and not os.access(dir_path, os.W_OK):
+        # Failed where neither the build nor _analyze could say why: without
+        # this, status() would read it as never started, and each status
+        # request would queue it again
+        with _lock:
+            _unwritten_errors[dir_path] = ("tshark couldn't write to this analysis's folder - its files may "
+                                           'belong to another user, from an earlier run of SO-CRATES')
+
+
+def _analyze(dir_path, pcap_path, on_start):
     with tempfile.TemporaryFile(mode='w+', errors='replace') as stderr_file:
         proc = subprocess.Popen(_child_command(dir_path, pcap_path), cwd=os.path.dirname(os.path.abspath(__file__)),
                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=stderr_file,
@@ -1421,7 +1451,13 @@ def build(dir_path, pcap_path):
         for name in (tmp_path, tmp_path + '-wal', tmp_path + '-shm'):
             _remove(name)
         notes = {}
-        run_tshark(pcap_path, consume=lambda records: create_shark_db(tmp_path, records), notes=notes)
+        try:
+            run_tshark(pcap_path, consume=lambda records: create_shark_db(tmp_path, records), notes=notes)
+        except CaptureDenied:
+            # Not allowed to read it here: from a copy in /tmp, which tshark may read
+            for name in (tmp_path, tmp_path + '-wal', tmp_path + '-shm'):
+                _remove(name)
+            _run_from_tmp_copy(dir_path, pcap_path, tmp_path, notes)
         conn = sqlite3.connect(tmp_path)
         try:
             conn.execute(f'PRAGMA user_version = {SHARK_FORMAT_VERSION}')
@@ -1445,6 +1481,37 @@ def build(dir_path, pcap_path):
         return False
 
 
+def _tmp_copy_dir(dir_path):
+    """Where build copies an analysis's capture for tshark to read when it
+    can't read it in place - one per analysis, so analyze can remove one
+    that a killed build left behind."""
+    return os.path.join(tempfile.gettempdir(), 'shark-copy-' + os.path.basename(os.path.normpath(dir_path)))
+
+
+def _run_from_tmp_copy(dir_path, pcap_path, tmp_path, notes):
+    """build's run_tshark again, from a copy of the capture in /tmp - for a
+    tshark not allowed to read the analysis's directory (see
+    _DENIED_CAPTURE). The copy is removed when the run ends."""
+    copy_dir = _tmp_copy_dir(dir_path)
+    shutil.rmtree(copy_dir, ignore_errors=True)
+    try:
+        os.makedirs(copy_dir, mode=0o700)
+        copy = os.path.join(copy_dir, os.path.basename(pcap_path))
+        try:
+            shutil.copyfile(pcap_path, copy)
+        except OSError as e:
+            raise RuntimeError("tshark isn't allowed to read the capture where it is, and copying it to "
+                               f'{tempfile.gettempdir()} failed: {e.strerror or e}') from e
+        try:
+            run_tshark(copy, consume=lambda records: create_shark_db(tmp_path, records), notes=notes)
+        except CaptureDenied as e:
+            raise RuntimeError("tshark isn't allowed to read the capture, even from a copy in "
+                               f'{tempfile.gettempdir()} - a security policy on this computer, most likely '
+                               "AppArmor's profile for tshark, blocks it") from e
+    finally:
+        shutil.rmtree(copy_dir, ignore_errors=True)
+
+
 def _remove(path):
     try:
         os.unlink(path)
@@ -1464,6 +1531,7 @@ _running_since = None     # when it started (time.time()), for status()'s elapse
 _running_proc = None      # its tshark process, once started
 _cancelled = set()        # dir_paths whose running job was cancelled
 _worker = None
+_unwritten_errors = {}    # dir_path -> why its run failed, where .shark_error couldn't be written
 
 
 def _was_cancelled(dir_path):
@@ -1507,6 +1575,7 @@ def enqueue(dir_path, pcap_path):
     with _lock:
         if dir_path in _pending or (dir_path == _running and dir_path not in _cancelled):
             return False
+        _unwritten_errors.pop(dir_path, None)
         _queue.append(dir_path)
         _pending[dir_path] = pcap_path
         if _worker is None:
@@ -1835,6 +1904,8 @@ def status(dir_path, pcap_path=None):
             return {'status': 'running', 'elapsed': max(0, int(time.time() - _running_since))}
         if dir_path in _pending:
             return {'status': 'queued', 'position': list(_queue).index(dir_path) + 1}
+        if dir_path in _unwritten_errors:
+            return {'status': 'error', 'message': _unwritten_errors[dir_path]}
     error_path = os.path.join(dir_path, SHARK_ERROR)
     if os.path.exists(error_path):
         try:

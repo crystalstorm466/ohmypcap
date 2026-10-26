@@ -1,5 +1,21 @@
 # Release Notes
 
+## 5.0.1
+
+### Fixes
+
+- tshark's protocols on hosts where AppArmor confines tshark: every PCAP
+  analysis said "Couldn't add tshark protocols: tshark failed: tshark:
+  You don't have permission to read the file". AppArmor 5 (Ubuntu 26.04
+  and later) has a profile for tshark that lets it read files in `/tmp`
+  and hardly anywhere else, and in rootless Podman or Docker - OhMyDebn's
+  SO-CRATES among them - it reaches the container's tshark too. When
+  tshark isn't allowed to read a capture where it is, it now reads a
+  copy in `/tmp`, removed once it's done
+- An analysis folder tshark can't write to (its files left by a run as
+  another user) is now an error saying so, instead of a tshark run that
+  was queued again on every status check and never finished
+
 ## 5.0.0
 
 ### Protocols from tshark

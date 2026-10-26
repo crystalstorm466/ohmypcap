@@ -2214,6 +2214,56 @@ class TestAnalyze(unittest.TestCase):
         self.assertEqual(status['status'], 'error')
         self.assertIn('tshark failed', status['message'])
 
+    def _denying_tshark(self, deny):
+        """PATH for a tshark that, like one under AppArmor 5's profile for
+        it, may not read captures under deny ('' for anywhere)."""
+        bin_dir = os.path.join(self.dir, 'bin')
+        os.makedirs(bin_dir)
+        script = os.path.join(bin_dir, 'tshark')
+        with open(script, 'w') as f:
+            f.write('#!/bin/sh\nprev=\nfor a in "$@"; do\n'
+                    '  if [ "$prev" = -r ]; then case "$a" in "$DENY"/*)\n'
+                    '    echo "tshark: You don\'t have permission to read the file \\"$a\\"." >&2; exit 2;; esac; fi\n'
+                    '  prev=$a\ndone\nexec "$REAL_TSHARK" "$@"\n')
+        os.chmod(script, 0o755)
+        return {'PATH': bin_dir + os.pathsep + os.environ['PATH'], 'DENY': deny, 'REAL_TSHARK': shutil.which('tshark')}
+
+    def test_a_capture_tshark_may_not_read_in_place_is_read_from_a_copy_in_tmp(self):
+        """REGRESSION: on Ubuntu 26.04, AppArmor's profile for tshark kept
+        it from reading the analysis's directory - every run failed with
+        'You don't have permission to read the file'."""
+        with mock.patch.dict(os.environ, self._denying_tshark(self.dir)):
+            shark_analyzer.analyze(self.dir, self.pcap)
+        self.assertEqual(len(query_events_sqlite(shark_analyzer.shark_db_path(self.dir), 'flow')), 10)
+        self.assertEqual(shark_analyzer.status(self.dir, self.pcap)['status'], 'ready')
+        self.assertFalse(os.path.exists(shark_analyzer._tmp_copy_dir(self.dir)), 'the copy is removed')
+
+    def test_a_capture_tshark_may_not_read_even_in_tmp_says_so(self):
+        with mock.patch.dict(os.environ, self._denying_tshark('')):
+            shark_analyzer.analyze(self.dir, self.pcap)
+        status = shark_analyzer.status(self.dir, self.pcap)
+        self.assertEqual(status['status'], 'error')
+        self.assertIn('even from a copy in', status['message'])
+        self.assertIn('AppArmor', status['message'])
+        self.assertFalse(os.path.exists(shark_analyzer._tmp_copy_dir(self.dir)))
+
+    @unittest.skipIf(os.geteuid() == 0, 'root can write anywhere')
+    def test_a_run_that_cannot_write_its_folder_is_an_error_not_queued_again(self):
+        """REGRESSION: a folder the run couldn't write (files left by a
+        run as another user) had no .shark_error either, so it read as
+        never started - and each status request queued it again."""
+        os.chmod(self.dir, 0o555)
+        try:
+            shark_analyzer.analyze(self.dir, self.pcap)
+            status = shark_analyzer.status(self.dir, self.pcap)
+            self.assertEqual(status['status'], 'error')
+            self.assertIn("couldn't write to this analysis's folder", status['message'])
+            self.assertTrue(shark_analyzer.enqueue(self.dir, self.pcap), 'Try again still queues it')
+            self.assertTrue(shark_analyzer.wait_idle())
+        finally:
+            os.chmod(self.dir, 0o755)
+        shark_analyzer._unwritten_errors.pop(self.dir, None)
+
     def test_timeout(self):
         with mock.patch.object(shark_analyzer, 'tshark_command', return_value=['sleep', '30']):
             start = time.monotonic()
