@@ -157,9 +157,18 @@ class TestConsistencyWithSuricataAnalyzer(unittest.TestCase):
     the production modules have the circularity constraint."""
 
     def test_every_slug_exists_in_suricata_rule_sources(self):
+        """Or is a retired source, kept for alerts from its old rules."""
         import suricata_analyzer
         for _min, _max, slug, _label in sr.SURICATA_SID_RANGES:
-            self.assertIn(slug, suricata_analyzer.SURICATA_RULE_SOURCES, slug)
+            if slug not in sr.RETIRED_SOURCES:
+                self.assertIn(slug, suricata_analyzer.SURICATA_RULE_SOURCES, slug)
+
+    def test_retired_sources_are_really_gone(self):
+        import suricata_analyzer
+        ranged = {slug for _min, _max, slug, _label in sr.SURICATA_SID_RANGES}
+        for slug in sr.RETIRED_SOURCES:
+            self.assertNotIn(slug, suricata_analyzer.SURICATA_RULE_SOURCES, slug)
+            self.assertIn(slug, ranged, slug)
 
     def test_every_curated_source_has_a_range(self):
         """The other direction: a source with no range here shows all its
@@ -172,7 +181,8 @@ class TestConsistencyWithSuricataAnalyzer(unittest.TestCase):
     def test_labels_match_suricata_rule_sources_exactly(self):
         import suricata_analyzer
         for _min, _max, slug, label in sr.SURICATA_SID_RANGES:
-            self.assertEqual(label, suricata_analyzer.SURICATA_RULE_SOURCES[slug]['label'], slug)
+            if slug not in sr.RETIRED_SOURCES:
+                self.assertEqual(label, suricata_analyzer.SURICATA_RULE_SOURCES[slug]['label'], slug)
 
 
 if __name__ == '__main__':

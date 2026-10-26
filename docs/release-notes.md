@@ -1,5 +1,39 @@
 # Release Notes
 
+## 5.0.1
+
+### Fixes
+
+- tshark's protocols on hosts where AppArmor confines tshark: every PCAP
+  analysis said "Couldn't add tshark protocols: tshark failed: tshark:
+  You don't have permission to read the file". AppArmor 5 (Ubuntu 26.04
+  and later) has a profile for tshark that lets it read files in `/tmp`
+  and hardly anywhere else, and in rootless Podman or Docker - OhMyDebn's
+  SO-CRATES among them - it reaches the container's tshark too. When
+  tshark isn't allowed to read a capture where it is, it now reads a
+  copy in `/tmp`, removed once it's done
+- On the same hosts, a stream's **ASCII Transcript** came back empty and
+  its payload (**Send to CyberChef**) wasn't found: tshark read those
+  from the capture, or a flow carved out under the analysis's folder.
+  Both now read the flow carved into `/tmp` - which also makes the
+  transcript quicker, since tshark no longer reads the whole capture to
+  follow one flow
+- **Abuse.ch URLhaus** is no longer a Suricata rule source: abuse.ch has
+  retired its Suricata feed, and the image had been baking it with none
+  of URLhaus's rules in it (suricata-update doesn't fail on a feed that's
+  gone). An install that had it enabled simply stops using it; alerts
+  from its rules in earlier analyses are still labeled URLhaus. The image
+  now bakes in 13 sources, and its build fails if a source gives no rules
+  of its own, so a dead feed can't ship that way again - and it tries
+  each source a few times first, so one slow download doesn't fail it
+- An analysis folder tshark can't write to (its files left by a run as
+  another user) is now an error saying so, instead of a tshark run that
+  was queued again on every status check and never finished
+- A log analysis now has the **Acknowledged Alerts** tab once a Sigma
+  alert is acknowledged - before, an acknowledged Sigma alert was gone
+  from view with no way to see it again or undo it. Un-acknowledging its
+  last alert goes back to Sigma Alerts
+
 ## 5.0.0
 
 ### Protocols from tshark

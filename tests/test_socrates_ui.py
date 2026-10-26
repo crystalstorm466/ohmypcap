@@ -19603,7 +19603,7 @@ RULES_INFO_RESPONSE = {
         'availableSources': {
             'et/open': {'label': 'Emerging Threats Open', 'url': 'https://rules.emergingthreats.net/', 'bakedIn': True},
             'oisf/trafficid': {'label': 'Suricata Traffic ID', 'url': 'https://openinfosecfoundation.org/rules/trafficid/trafficid.rules', 'bakedIn': True},
-            'abuse.ch/urlhaus': {'label': 'Abuse.ch URLhaus', 'url': 'https://urlhaus.abuse.ch/', 'bakedIn': True},
+            'abuse.ch/feodotracker': {'label': 'Abuse.ch Feodo Tracker', 'url': 'https://feodotracker.abuse.ch/', 'bakedIn': True},
             'ipfire/dbl': {'label': 'IPFire DBL', 'url': 'https://www.ipfire.org/dbl/', 'bakedIn': False,
                            'note': 'Large ruleset (~51 MiB) - first fetch can take a while'},
         },
@@ -20050,7 +20050,7 @@ class TestRulesModal(unittest.TestCase):
         self.assertEqual(result['checkboxes'], {
             'et/open': True,
             'oisf/trafficid': False,
-            'abuse.ch/urlhaus': False,
+            'abuse.ch/feodotracker': False,
             'ipfire/dbl': False,
         })
 
@@ -20243,10 +20243,10 @@ class TestRulesModal(unittest.TestCase):
             window.__jsdom_result = { afterEnableAll: afterEnableAll, afterReset: afterReset };
         ''')
         self.assertEqual(result['afterEnableAll'], {
-            'et/open': True, 'oisf/trafficid': True, 'abuse.ch/urlhaus': True, 'ipfire/dbl': False,
+            'et/open': True, 'oisf/trafficid': True, 'abuse.ch/feodotracker': True, 'ipfire/dbl': False,
         })
         self.assertEqual(result['afterReset'], {
-            'et/open': True, 'oisf/trafficid': False, 'abuse.ch/urlhaus': False, 'ipfire/dbl': False,
+            'et/open': True, 'oisf/trafficid': False, 'abuse.ch/feodotracker': False, 'ipfire/dbl': False,
         })
 
     def test_revert_to_default_reads_server_provided_default_not_hardcoded(self):
@@ -20280,7 +20280,7 @@ class TestRulesModal(unittest.TestCase):
             window.__jsdom_result = states;
         ''')
         self.assertEqual(result, {
-            'et/open': False, 'oisf/trafficid': True, 'abuse.ch/urlhaus': False, 'ipfire/dbl': False,
+            'et/open': False, 'oisf/trafficid': True, 'abuse.ch/feodotracker': False, 'ipfire/dbl': False,
         })
 
     def test_suricata_source_toggle_survives_poll_tick(self):
@@ -20300,11 +20300,11 @@ class TestRulesModal(unittest.TestCase):
             };
             await showRulesModal();
             toggleSuricataSources();
-            handleSuricataSourceToggle('abuse.ch/urlhaus', true);
+            handleSuricataSourceToggle('abuse.ch/feodotracker', true);
             await refreshRulesModal();
             var body = document.getElementById('rulesModalBody');
             var cb = Array.from(body.querySelectorAll('input[type=checkbox]')).find(function(el) {
-                return el.dataset.name === 'abuse.ch/urlhaus';
+                return el.dataset.name === 'abuse.ch/feodotracker';
             });
             window.__jsdom_result = { stillChecked: cb ? cb.checked : null };
         ''')
@@ -20631,14 +20631,14 @@ class TestRulesModal(unittest.TestCase):
                 return Promise.resolve({ json: () => Promise.resolve(''' + json.dumps(RULE_UPDATE_STATUS_IDLE) + ''') });
             };
             await showRulesModal();
-            handleSuricataSourceToggle('abuse.ch/urlhaus', true);
+            handleSuricataSourceToggle('abuse.ch/feodotracker', true);
             await triggerRulesetUpdate('suricata');
             var call = fetchCalls.find(c => c.url === '/api/update-rules');
             window.__jsdom_result = { body: call ? JSON.parse(call.body) : null };
         ''')
         self.assertIsNotNone(result['body'])
         self.assertEqual(result['body']['ruleset'], 'suricata')
-        self.assertEqual(sorted(result['body']['sources']), ['abuse.ch/urlhaus', 'et/open'])
+        self.assertEqual(sorted(result['body']['sources']), ['abuse.ch/feodotracker', 'et/open'])
 
     def test_show_protocol_decode_alerts_checkbox_reflects_server_state(self):
         """The 'Show protocol-anomaly noise alerts' checkbox in the
@@ -21549,6 +21549,97 @@ class TestAcknowledgeAlerts(unittest.TestCase):
         self.assertTrue(result['hasCard'])
         self.assertIn('Acknowledged Alerts', result['label'])
         self.assertIn('3', result['label'])
+
+    def test_a_log_analysis_shows_the_acknowledged_alerts_card_for_its_sigma_alerts(self):
+        """REGRESSION: a log analysis offered Acknowledge on a Sigma alert
+        but had no Acknowledged Alerts card, so the alert was gone with no
+        way to see it again or undo it."""
+        from tests.jsdom_helper import js_statements
+        result = js_statements('''
+            await new Promise(function(r) { setTimeout(r, 100); });
+            document.getElementById('inputBoxes').style.display = 'none';
+            currentMd5 = 'abc123';
+            currentFilters = {};
+            advancedMode = true;
+            isLogAnalysisMode = true;
+            var asked = [];
+            window.fetch = function(url) {
+                var u = String(url);
+                asked.push(u);
+                if (u.indexOf('/api/sigma-count') >= 0 && u.indexOf('acknowledged=only') >= 0) {
+                    return Promise.resolve({ ok: true, json: function() { return Promise.resolve({ count: 2 }); } });
+                }
+                return Promise.resolve({ ok: true, json: function() { return Promise.resolve({ count: 0 }); } });
+            };
+            buildStats({});
+            await new Promise(function(r) { setTimeout(r, 100); });
+            var card = document.querySelector('.stat-card[data-section="section-acknowledged"]');
+            window.__jsdom_result = {
+                label: card ? card.textContent : null,
+                askedForSuricataAlerts: asked.some(function(u) { return u.indexOf('/api/count') >= 0 && u.indexOf('type=alert') >= 0; }),
+            };
+        ''')
+        self.assertIsNotNone(result['label'], 'the card shows once a Sigma alert is acknowledged')
+        self.assertIn('Acknowledged Alerts', result['label'])
+        self.assertIn('2', result['label'])
+        self.assertFalse(result['askedForSuricataAlerts'], 'a log analysis has no Suricata alerts to count')
+
+    def _log_view_after_acknowledging_js(self, still_acknowledged):
+        """A log analysis re-rendered (as refreshAnalysisData does after
+        an acknowledge or un-acknowledge) while the Acknowledged Alerts tab
+        was open - with still_acknowledged Sigma alerts left in it."""
+        return '''
+            await new Promise(function(r) { setTimeout(r, 100); });
+            document.getElementById('inputBoxes').style.display = 'none';
+            ['section-log', 'section-sigmaalert'].forEach(function(id) {
+                var s = document.createElement('div');
+                s.id = id;
+                s.className = 'section';
+                document.body.appendChild(s);
+            });
+            var left = ''' + json.dumps(still_acknowledged) + ''';
+            var sigmaRow = { id: 5, rule_title: 'R1', rule_id: 'rid5', severity: 'high', timestamp: 't',
+                             mitre_techniques: '[]', logsource: 'windows', original_log: '{}' };
+            var asked = [];
+            window.fetch = function(url) {
+                var u = String(url);
+                asked.push(u);
+                if (u.indexOf('/api/sigma-alerts') >= 0 && u.indexOf('acknowledged=only') >= 0) {
+                    return Promise.resolve({ ok: true, json: function() { return Promise.resolve(left ? [sigmaRow] : []); } });
+                }
+                if (u.indexOf('/api/sigma-alerts') >= 0) {
+                    return Promise.resolve({ ok: true, json: function() { return Promise.resolve([sigmaRow]); } });
+                }
+                if (u.indexOf('count') >= 0) {
+                    return Promise.resolve({ ok: true, json: function() { return Promise.resolve({ count: left ? 1 : 0 }); } });
+                }
+                return Promise.resolve({ ok: true, json: function() { return Promise.resolve([]); } });
+            };
+            currentMd5 = 'abc123';
+            currentFilters = {};
+            currentSearch = [];
+            advancedMode = false;
+            isLogAnalysisMode = true;
+            await _renderLogAnalysisView({ log: 3, sigmaalert: 1 }, 'acknowledged');
+            var visible = document.querySelector('.section:not(.section-hidden):not(.agg-section)');
+            window.__jsdom_result = {
+                visible: visible ? visible.id : null,
+                askedForSuricataAlerts: asked.some(function(u) { return u.indexOf('/api/events') >= 0 && u.indexOf('type=alert') >= 0; }),
+            };
+        '''
+
+    def test_a_log_analysis_stays_on_acknowledged_alerts_while_it_has_any(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements(self._log_view_after_acknowledging_js(True))
+        self.assertEqual(result['visible'], 'section-acknowledged')
+        self.assertFalse(result['askedForSuricataAlerts'])
+
+    def test_a_log_analysis_goes_back_to_sigma_alerts_once_none_are_acknowledged(self):
+        """Where the un-acknowledged alert reappears - as a PCAP analysis
+        goes back to Network Alerts."""
+        from tests.jsdom_helper import js_statements
+        result = js_statements(self._log_view_after_acknowledging_js(False))
+        self.assertEqual(result['visible'], 'section-sigmaalert')
 
 
 

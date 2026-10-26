@@ -87,6 +87,7 @@ MAX_STRINGS_READ_SIZE = 2 * 1024 * 1024    # 2 MB cap for string extraction
 MAX_ZIP_MEMBERS = 100                      # files per uploaded ZIP - each member becomes its own analysis (and pcaps each spawn a Suricata process), so an unbounded count is a fork-bomb vector
 MAX_STREAM_TEXT_OUTPUT = 4 * 1024 * 1024   # 4 MB cap on raw tshark/tcpdump text read for transcripts/hexdumps - the response is trimmed to MAX_TRANSCRIPT_* far below this; without a read cap a huge stream buffers fully in RAM first
 MAX_STREAM_DOWNLOAD_SIZE = 200 * 1024 * 1024  # 200 MB cap on a carved-stream pcap download; larger streams get a 413 rather than a partial (corrupt) file
+MAX_TRANSCRIPT_CARVE_SIZE = 16 * 1024 * 1024  # 16 MB cap on the flow carved for an ASCII transcript - it's held in memory, and written to /tmp (often RAM), and the transcript shows no more than MAX_TRANSCRIPT_LINES/MAX_TRANSCRIPT_SIZE anyway; a longer flow is read up to the cut and marked truncated
 MAX_ENTROPY_READ_SIZE = 10 * 1024 * 1024   # 10 MB cap for entropy calculation
 MAX_RAW_STREAM_SIZE = 10 * 1024 * 1024     # 10 MB cap on /api/raw-stream's exact payload bytes - it feeds the browser (CyberChef), which gets sluggish well before MAX_STREAM_DOWNLOAD_SIZE; larger payloads get a 413, never a truncated one
 MAX_EXTRACTED_FILE_SIZE = 25 * 1024 * 1024  # 25 MB cap on /api/extracted-file, for the same reason

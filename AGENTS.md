@@ -50,7 +50,7 @@ SO-CRATES's backend is split into domain modules. Do not add new logic directly 
 | `suricata_sid_ranges.py` | Mapping a Suricata SID to the ruleset it came from - shared by `db.py` and the API. |
 | `yara_analyzer.py` | YARA scanning: executable checks, rules download/setup, scanning extracted files, parsing output. |
 | `sigma_analyzer.py` | Sigma rule conversion/execution via Zircolite, importing log events into the events DB. Querying `sigma_alerts` back out is `db.py`'s job, not this module's. |
-| `file_analyzer.py` | Lightweight file metadata extraction (`file`-command magic/MIME type, Shannon entropy, printable strings). No hashing here - MD5/SHA256 are computed in `socrates.py`/`yara_analyzer.py`. |
+| `file_analyzer.py` | Lightweight file metadata extraction (`file`-command magic/MIME type, Shannon entropy, printable strings). No hashing here - an upload's MD5 comes from `storage.hash_file`, a standalone file's SHA256/SHA1 from `yara_analyzer.scan_single_file`, and an email's attachments are hashed in `email_analyzer.py`. |
 | `exif_analyzer.py` | EXIF metadata extraction for image/media files. |
 | `ohmydebn_colors.py` | Deriving a full theme (CSS custom properties) from an OhMyDebn/Aether color palette (`colors.toml`/`alacritty.toml`) for the Themes modal's OhMyDebn sync toggle. Pure functions, no I/O. |
 | `playbook_lookup.py` | Security Onion Playbooks lookup - reading the baked-in gzip-compressed indexes (`BAKED_IN_PLAYBOOKS_DIR`/`PLAYBOOKS_DIR`), exact-rule/engine-fallback resolution, in-process caching. No fetch/refresh logic - see "Detection Rule Freshness" below for why. |
@@ -83,7 +83,7 @@ The frontend is four files - `socrates.html` in the repo root, the rest under `s
 
 | File | Content |
 |---|---|
-| `socrates.html` | HTML shell - no inline CSS or JS at all |
+| `socrates.html` | HTML shell - no inline `<script>` or `<style>` blocks |
 | `static/theme-boot.js` | The theme restore that runs before first paint (prevents a flash of the default theme) |
 | `static/socrates.css` | All styles |
 | `static/socrates.js` | All JavaScript |
@@ -193,9 +193,13 @@ Before cutting a release:
    (one-time; Playwright's video muxing needs its own bundled ffmpeg,
    separate from any system ffmpeg) then `python3 scripts/record_demo.py
    --base-url http://127.0.0.1:<port>/socrates.html` against the container
-   from step 2. This re-records the workflow end-to-end (sample pcap → each
-   data type → All Events → Aggregation Tables filtering → drill-down →
-   ASCII Transcript → Hexdump) and publishes `docs/videos/demo.mp4` (silent,
+   from step 2. This re-records the workflow end-to-end (the URL box's
+   default pcap → wait for tshark's cards → collapse the Sankey Diagram with
+   the keyboard → each card in turn, drilling into a Network Alert along the
+   way: pivot menu, Expand Row, AI Summary, Playbook, acknowledge and
+   un-acknowledge → All Events → expand Aggregation Tables with the keyboard
+   → filter to one event → expand it from its timestamp → ASCII Transcript →
+   Hexdump → the command palette opening Themes) and publishes `docs/videos/demo.mp4` (silent,
    H.264 video only - Playwright's page recording has no audio source, so
    there is no audio track to re-encode) and `docs/videos/demo-poster.jpg`
    (a still frame grabbed from the same raw capture, used as the `<video
@@ -210,7 +214,8 @@ Before cutting a release:
    left untrimmed, that showed up as the thumbnail X/LinkedIn/etc.
    auto-extract when someone uploads `demo.mp4` directly (small upper-left
    region of real content against an otherwise flat grey frame). The video
-   is embedded on the Home page just above Screenshots. If `ffmpeg` isn't on
+   is embedded in the Home page's "See it run" section, above "Follow an
+   investigation". If `ffmpeg` isn't on
    PATH, it falls back to publishing the raw `docs/videos/demo.webm` instead
    with a warning - see the script's module docstring. Re-run whenever the
    recorded workflow's on-screen text/labels change (e.g. a renamed button
@@ -254,7 +259,8 @@ Before cutting a release:
    && python3 scripts/capture_screenshots.py --base-url
    http://127.0.0.1:<port>/socrates.html` against the same container, now
    that step 3's video is done with it. This refreshes all 9
-   `docs/images/so-crates-*.png` (Home page) and all 35
+   `docs/images/so-crates-*.png` (the Usage page's Screenshot Tour; the
+   Home page uses 3 of them) and all 35
    `docs/images/themes/*.png` (Themes page) against the URL box's default
    pcap (`DEFAULT_SAMPLE_URL` in `static/socrates.js` - a real infection's
    traffic on malware-traffic-analysis.net, loaded with the Go button; the

@@ -4,7 +4,7 @@ Four files:
 
 | File | Content |
 |---|---|
-| `socrates.html` | HTML shell (repo root) - no inline CSS or JS |
+| `socrates.html` | HTML shell (repo root) - no inline `<script>` or `<style>` blocks |
 | `static/theme-boot.js` | Restores the saved theme before first paint |
 | `static/socrates.css` | All styles |
 | `static/socrates.js` | All JavaScript |
@@ -25,7 +25,8 @@ Analysis View (analysis loaded)
   ├── Search bar
   ├── File Info card (binary-file analyses only)
   ├── Filter Bar (active search and filters as removable chips)
-  ├── Stats Grid (clickable event-type cards, shows the filtered count alone when a filter is active - see `buildStats()` in filtering.md)
+  ├── Stats Grid (clickable event-type cards, shows the filtered count alone when a filter is active - see `buildStats()` in filtering.md;
+  │               a PCAP analysis's cards are in Triage, Protocol records and Connections sections, All Events last in Triage)
   ├── Sankey Diagram (collapsible section - Source IP → Dest IP → Dest Port, reflects current filters)
   ├── Aggregation Tables (collapsible section - frequency counts per column)
   └── Data Table (the selected tab's rows; a row expands into its detail panel)
@@ -35,8 +36,8 @@ Analysis View (analysis loaded)
 
 **Global state:**
 ```js
-let allEvents = [];          // Loaded for "All Events" tab
-let eventTypes = [];         // available types for current analysis
+var allEvents = [];          // Loaded for "All Events" tab
+var eventTypes = [];         // available types for current analysis
 var currentMd5 = '';         // current analysis MD5 (var, not let - see below)
 var currentFileName = '';    // display name (var, not let - see below)
 var currentNotes = '';       // per-analysis freeform notes (var, not let - see below)
@@ -47,7 +48,7 @@ var advancedMode = false;    // advanced toggle state (var, not let - see below)
 let tabDataCache = {};       // cached event data per type
 ```
 
-`currentMd5`/`currentFileName`/`currentNotes`/`currentFilters`/`advancedMode` (and a couple of others, e.g. `truncatedTypes`) are deliberately declared with `var` rather than `let`/`const` - the JSDOM test harness (`tests/jsdom_helper.py`) assigns/reads them via separate `window.eval()` invocations, and only `var`/function declarations attach to the actual global object persistently across those separate evaluations.
+`allEvents`/`eventTypes`/`currentMd5`/`currentFileName`/`currentNotes`/`currentFilters`/`advancedMode` (and a couple of others, e.g. `truncatedTypes`) are deliberately declared with `var` rather than `let`/`const` - the JSDOM test harness (`tests/jsdom_helper.py`) assigns/reads them via separate `window.eval()` invocations, and only `var`/function declarations attach to the actual global object persistently across those separate evaluations.
 
 **Key function groups:**
 
@@ -69,7 +70,7 @@ let tabDataCache = {};       // cached event data per type
 
 Each event type has its own column set. The "All Events" view uses a unified column set.
 
-**Shared columns (every network event type):** Time, Protocol, Source IP, Source Port, Dest IP, Dest Port. Log events and Sigma alerts have their own, data-dependent columns instead, and an email analysis's tabs (Emails, Links, File Info, File Alerts) have networkless ones (`EMAIL_MODE_COLUMNS`) and no All Events view.
+**Shared columns (every network event type):** Time, Protocol, Source IP, Source Port, Dest IP, Dest Port. Log events and Sigma alerts have their own, data-dependent columns instead, and an email analysis's tabs (Emails, Links, File Info, File Alerts) have networkless ones (`EMAIL_MODE_COLUMNS`). Log and email analyses have no All Events view.
 
 **Per-type columns:** e.g. Alert/Category/Severity (alerts), Query/Type (DNS), Method/Host/URL/Status (HTTP). Every event type on the [Event Types](event-types.md) page has its own set - 30+ types by now - defined in `getColumnsForType()` (`static/socrates.js`), which is the source of truth; this doc intentionally doesn't enumerate all of them; a full list here would just drift out of sync with every new protocol added (the same problem already found and fixed once in `filtering.md`'s old "Column Overlap" table).
 

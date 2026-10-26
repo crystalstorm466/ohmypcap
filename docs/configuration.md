@@ -15,6 +15,7 @@ All analyzed files are stored in `~/socrates-data/`. It holds a set of shared ru
     enabled_sources.json   # Which rule sources are currently enabled
     show_protocol_decode_alerts.json  # Persisted "show protocol/decoder alerts" setting
     disable.conf
+    cache/                 # Suricata's compiled-rule cache (cache/sgh/), so later runs load rules faster
   zircolite/               # Optional: only a fallback zircolite.py copy for manual installs; the app looks
                            # for `zircolite`/`zircolite.py` on PATH first (installed via pip, or baked into
                            # the Docker image at build time) - never auto-cloned at runtime
@@ -23,13 +24,15 @@ All analyzed files are stored in `~/socrates-data/`. It holds a set of shared ru
     linux.json             # Pre-compiled Sigma rules for Linux logs
   yara-rules/              # Downloaded/baked-in YARA rules
   upload-tmp/              # Streaming-upload scratch space; swept on startup
+  shark_settings.json      # Persisted Settings switch for whether tshark runs (absent means on)
   <md5>/
     <original-filename>        # The uploaded file
     .meta                      # Analysis metadata (file type, extracted name, version)
     eve.json                   # Suricata's JSON output (PCAP only) - removed once imported into events.db
     events.db                  # SQLite database (network/log/email events, Sigma alerts, row notes, acknowledgements; for a PCAP also the rows tshark adds)
     shark.db                   # tshark's flows and records, merged into events.db when done (PCAP only)
-    .shark_error               # Present only if the last tshark run failed (PCAP only)
+    .shark_error               # Present if the last tshark run failed and the error could be written here (PCAP only)
+    .warnings                  # Present only if something went wrong without failing the analysis (e.g. a failed YARA scan)
     name.txt                   # Human-readable display name
     notes.txt                  # Freeform analyst notes (absent unless explicitly added)
     filestore/                 # Extracted files from Suricata file-store (PCAP), or an email's message and decoded attachments
@@ -50,7 +53,7 @@ All analyzed files are stored in `~/socrates-data/`. It holds a set of shared ru
 | `MAX_EVE_SIZE` | `5000 MB` | Maximum eve.json size |
 | `MAX_TRANSCRIPT_SIZE` | `100,000 chars` | Maximum ASCII transcript / hexdump length |
 | `MAX_QUERY_LIMIT` | `100,000` | Hard ceiling for the `limit` query param on paginated endpoints, regardless of any user override |
-| `DISK_SPACE_SAFETY_MARGIN` | `100 MB` | Free-space buffer required (on top of the upload size) before an upload is accepted |
+| `DISK_SPACE_SAFETY_MARGIN` | `100 MB` | Free-space buffer required (on top of the upload size limit in effect) before an upload is accepted |
 | `MAX_DISPLAY_NAME_LENGTH` | `255 chars` | Maximum length of a user-renamed analysis display name |
 | `MAX_NOTES_LENGTH` | `10,000 chars` | Maximum length of a per-analysis Notes field |
 | `MAX_ROW_NOTE_LENGTH` | `500 chars` | Maximum length of a per-row note (a short annotation on a single table row) |

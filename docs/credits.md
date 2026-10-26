@@ -16,7 +16,6 @@ SO-CRATES is built on many excellent open-source projects and freely available r
 | [Abuse.ch SSL Blacklist](https://sslbl.abuse.ch/) | CC0-1.0 | Suricata network rules (optional) |
 | [Abuse.ch JA3 Fingerprints](https://sslbl.abuse.ch/ja3-fingerprints/) | CC0-1.0 | Suricata network rules (optional) |
 | [Abuse.ch Feodo Tracker](https://feodotracker.abuse.ch/) | CC0-1.0 | Suricata network rules (optional) |
-| [Abuse.ch URLhaus](https://urlhaus.abuse.ch/) | CC0-1.0 | Suricata network rules (optional) |
 | [Etnetera Aggressive IP Blacklist](https://security.etnetera.cz/) | MIT | Suricata network rules (optional) |
 | [Positive Technologies PT Rules (Open)](https://rules.ptsecurity.com) | Custom | Suricata network rules (optional) |
 | [PAW Patrules](https://pawpatrules.fr/) | CC-BY-SA-4.0 | Suricata network rules (optional) |
@@ -30,7 +29,7 @@ SO-CRATES is built on many excellent open-source projects and freely available r
 | [d3-sankey](https://github.com/d3/d3-sankey) | BSD-3-Clause | Sankey diagram layout |
 | [CyberChef](https://github.com/gchq/CyberChef) | Apache-2.0 | Built-in data decoding and analysis (pivot-menu lookup, Send to CyberChef) |
 | [tcpdump](https://www.tcpdump.org/) | BSD-3-Clause | Stream/hexdump carving |
-| [Wireshark/tshark](https://www.wireshark.org/) | GPL-2.0-only | ASCII transcript extraction |
+| [Wireshark/tshark](https://www.wireshark.org/) | GPL-2.0-only | ASCII transcript extraction, and decoding the protocols Suricata doesn't parse |
 | [ExifTool](https://exiftool.org/) | Perl Artistic License / GPL | EXIF/media metadata extraction |
 | [file](https://www.darwinsys.com/file/) | BSD-2-Clause-alike | MIME/file-type detection |
 

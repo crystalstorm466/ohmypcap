@@ -4925,10 +4925,10 @@ bright_magenta = "#D9B9D9"
             on_progress('suricata rules updated (fake)')
         mock_suricata.side_effect = fake_suricata
 
-        status, body = self._post('/api/update-rules', {'ruleset': 'suricata', 'sources': ['et/open', 'abuse.ch/urlhaus']})
+        status, body = self._post('/api/update-rules', {'ruleset': 'suricata', 'sources': ['et/open', 'abuse.ch/feodotracker']})
         self.assertEqual(status, 200)
         mock_suricata.assert_called_once()
-        self.assertEqual(mock_suricata.call_args.kwargs.get('enabled_sources'), ['et/open', 'abuse.ch/urlhaus'])
+        self.assertEqual(mock_suricata.call_args.kwargs.get('enabled_sources'), ['et/open', 'abuse.ch/feodotracker'])
 
     @unittest.mock.patch('socrates.threading.Thread', new=SyncThread)
     @unittest.mock.patch('socrates.setup_suricata_config')
@@ -8488,6 +8488,56 @@ class TestRawBytesEndpoints(unittest.TestCase):
         status, _, body = self._get(f'/api/ascii-stream?md5={self.MD5}&src=10.0.0.1&sport=40000&dst=10.0.0.2&dport=80')
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)['proto'], 'tcp')
+
+    def _tshark_denied_the_analysis_folder(self):
+        """A tshark that, like one under AppArmor 5's profile for it, may
+        not read a file in the data directory - and a temp directory of the
+        test's own, returned, so what's left in it can be checked."""
+        work = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, work, True)
+        bin_dir = os.path.join(work, 'bin')
+        os.makedirs(bin_dir)
+        with open(os.path.join(bin_dir, 'tshark'), 'w') as f:
+            f.write('#!/bin/sh\nprev=\nfor a in "$@"; do\n'
+                    '  if [ "$prev" = -r ]; then case "$a" in "$DENY"/*)\n'
+                    '    echo "tshark: You don\'t have permission to read the file \\"$a\\"." >&2; exit 2;; esac; fi\n'
+                    '  prev=$a\ndone\nexec "$REAL_TSHARK" "$@"\n')
+        os.chmod(os.path.join(bin_dir, 'tshark'), 0o755)
+        tmp = os.path.join(work, 'tmp')
+        os.makedirs(tmp)
+        for patcher in (unittest.mock.patch.dict(os.environ, {'PATH': bin_dir + os.pathsep + os.environ['PATH'],
+                                                              'DENY': self.tmpdir,
+                                                              'REAL_TSHARK': shutil.which('tshark')}),
+                        unittest.mock.patch.object(tempfile, 'tempdir', tmp)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        return tmp
+
+    @unittest.skipUnless(shutil.which('tshark'), 'tshark not installed')
+    def test_transcript_and_payload_where_tshark_may_not_read_the_analysis_folder(self):
+        """REGRESSION: on Ubuntu 26.04, AppArmor's profile for tshark kept
+        it from reading the analysis's folder - the ASCII transcript came
+        back empty and the stream payload 404'd. Both now read the flow
+        carved into /tmp."""
+        from tests.pcap_fixtures import HTTP_REQUEST, HTTP_RESPONSE
+        tmp = self._tshark_denied_the_analysis_folder()
+        data = self._ascii('10.0.0.1', 40000, '10.0.0.2', 80)
+        self.assertIn('GET', ''.join(l['text'] for l in data['lines'] if l['direction'] == 'src'))
+        self.assertIn('HTTP/1.1 200 OK', ''.join(l['text'] for l in data['lines'] if l['direction'] == 'dst'))
+        status, _, body = self._stream()
+        self.assertEqual(status, 200)
+        self.assertEqual(body, HTTP_REQUEST + HTTP_RESPONSE)
+        self.assertEqual(os.listdir(tmp), [], 'the carved flow is removed')
+
+    @unittest.skipUnless(shutil.which('tshark'), 'tshark not installed')
+    def test_transcript_of_a_flow_past_the_carve_limit_is_marked_truncated(self):
+        """The transcript's carve has a limit of its own, far below the
+        download's: held in memory, then written to /tmp (often RAM)."""
+        self.assertLess(config.MAX_TRANSCRIPT_CARVE_SIZE, config.MAX_STREAM_DOWNLOAD_SIZE)
+        with unittest.mock.patch.object(config, 'MAX_TRANSCRIPT_CARVE_SIZE', 200):
+            data = self._ascii('10.0.0.1', 40000, '10.0.0.2', 80)
+        self.assertTrue(data['truncated'])
+        self.assertFalse(self._ascii('10.0.0.1', 40000, '10.0.0.2', 80)['truncated'], 'under the limit, it is not')
 
     def test_raw_stream_rejects_bad_params(self):
         self.assertEqual(self._stream('client')[0], 400)

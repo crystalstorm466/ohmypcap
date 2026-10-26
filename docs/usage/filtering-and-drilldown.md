@@ -20,7 +20,7 @@ Values in a row's detail panel that aren't also a table column get a shorter men
 
 The menu also works on selected text. Select part of a detail-panel value - a drag or a double-clicked word inside it, such as a domain in an AI Summary or Playbook description - and the menu opens for just that text instead of the whole value. Selecting text in an ASCII transcript opens it too (see [Stream Analysis](#stream-analysis)). A selection gets the shorter menu, since a fragment isn't a value you can filter on.
 
-The **Acknowledged Alerts** stat-card tab (PCAP analyses only) is the only place acknowledged alerts still show, for review or undo - acknowledging is per-analysis and does not affect any other analysis. It groups Network Alerts and Sigma Alerts under separate sub-sections only when both have acknowledged rows; with just one type present, it displays as a single sortable table identical to that type's own tab. Un-acknowledging the last row switches you back to Network Alerts automatically.
+The **Acknowledged Alerts** stat-card tab (PCAP and log analyses, once something is acknowledged) is the only place acknowledged alerts still show, for review or undo - acknowledging is per-analysis and does not affect any other analysis. It groups Network Alerts and Sigma Alerts under separate sub-sections only when both have acknowledged rows; with just one type present, it displays as a single sortable table identical to that type's own tab. Un-acknowledging the last row switches you back to Network Alerts - or, in a log analysis, Sigma Alerts - automatically.
 
 ## AI Summary
 

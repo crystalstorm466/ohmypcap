@@ -41,7 +41,7 @@ def _write_fake_rule_file(path, sid=1, extra_lines=1):
 
 class TestSourceFilename(unittest.TestCase):
     def test_maps_slashes_to_dashes(self):
-        self.assertEqual(suricata_analyzer._source_filename('abuse.ch/urlhaus'), 'abuse.ch-urlhaus.rules')
+        self.assertEqual(suricata_analyzer._source_filename('abuse.ch/feodotracker'), 'abuse.ch-feodotracker.rules')
 
     def test_simple_slug(self):
         self.assertEqual(suricata_analyzer._source_filename('et/open'), 'et-open.rules')
@@ -82,10 +82,10 @@ class TestGetSuricataEnabledSources(unittest.TestCase):
         suricata_dir = os.path.join(self.tmpdir, 'suricata')
         os.makedirs(suricata_dir, exist_ok=True)
         with open(os.path.join(suricata_dir, 'enabled_sources.json'), 'w') as f:
-            json.dump(['et/open', 'abuse.ch/urlhaus'], f)
+            json.dump(['et/open', 'abuse.ch/feodotracker'], f)
         self.assertEqual(
             suricata_analyzer.get_suricata_enabled_sources(self.tmpdir),
-            ['et/open', 'abuse.ch/urlhaus'])
+            ['et/open', 'abuse.ch/feodotracker'])
 
     def test_filters_out_names_no_longer_curated(self):
         suricata_dir = os.path.join(self.tmpdir, 'suricata')
@@ -503,7 +503,7 @@ class TestSeedActiveFromLibrary(unittest.TestCase):
         self.tmpdir = tempfile.mkdtemp()
         self.baked_in_dir = tempfile.mkdtemp()
         _write_fake_rule_file(os.path.join(self.baked_in_dir, 'et-open.rules'))
-        _write_fake_rule_file(os.path.join(self.baked_in_dir, 'abuse.ch-urlhaus.rules'))
+        _write_fake_rule_file(os.path.join(self.baked_in_dir, 'abuse.ch-feodotracker.rules'))
 
     def tearDown(self):
         shutil.rmtree(self.tmpdir, ignore_errors=True)
@@ -514,7 +514,7 @@ class TestSeedActiveFromLibrary(unittest.TestCase):
             self.baked_in_dir, self.tmpdir, ['et/open'], lambda m: None)
         library_dir = os.path.join(self.tmpdir, 'suricata', 'rules-available')
         active_dir = os.path.join(self.tmpdir, 'suricata', 'rules')
-        self.assertEqual(sorted(os.listdir(library_dir)), ['abuse.ch-urlhaus.rules', 'et-open.rules'])
+        self.assertEqual(sorted(os.listdir(library_dir)), ['abuse.ch-feodotracker.rules', 'et-open.rules'])
         self.assertEqual(os.listdir(active_dir), ['et-open.rules'])
 
     def test_writes_enabled_sources_json_matching_actually_activated(self):
@@ -538,10 +538,10 @@ class TestSeedActiveFromLibrary(unittest.TestCase):
 
     def test_activated_set_can_be_a_subset_if_a_requested_file_is_missing(self):
         suricata_analyzer._seed_active_from_library(
-            self.baked_in_dir, self.tmpdir, ['et/open', 'abuse.ch/urlhaus', 'oisf/trafficid'], lambda m: None)
+            self.baked_in_dir, self.tmpdir, ['et/open', 'abuse.ch/feodotracker', 'oisf/trafficid'], lambda m: None)
         self.assertEqual(
             set(suricata_analyzer.get_suricata_enabled_sources(self.tmpdir)),
-            {'et/open', 'abuse.ch/urlhaus'},
+            {'et/open', 'abuse.ch/feodotracker'},
             'oisf/trafficid was never in the fake baked-in dir, so it must not be claimed as active')
 
     def test_decompresses_gzip_baked_in_files(self):
@@ -588,9 +588,9 @@ class TestSetupSuricataConfigEnabledSources(unittest.TestCase):
         """The whole point of the new architecture - reconciliation itself
         doesn't need network for an already-staged source."""
         suricata_analyzer.setup_suricata_config(
-            self.tmpdir, network_allowed=False, enabled_sources=['et/open', 'abuse.ch/urlhaus'])
+            self.tmpdir, network_allowed=False, enabled_sources=['et/open', 'abuse.ch/feodotracker'])
         mock_reconcile.assert_called_once()
-        self.assertEqual(mock_reconcile.call_args.args[2], ['et/open', 'abuse.ch/urlhaus'])
+        self.assertEqual(mock_reconcile.call_args.args[2], ['et/open', 'abuse.ch/feodotracker'])
         self.assertEqual(mock_reconcile.call_args.args[4], False, 'network_allowed must be threaded through')
 
     @unittest.mock.patch('suricata_analyzer._reconcile_suricata_sources')

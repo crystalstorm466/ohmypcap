@@ -8,11 +8,11 @@ All endpoints return `Content-Type: application/json` unless noted. Errors retur
 
 These apply to every request, before any endpoint-specific checks:
 
-- **Host header:** a DNS name other than `localhost` is rejected with `403` unless it's allowed by the `ALLOWED_HOSTS` environment variable (see [Configuration](configuration.md)); IP literals always work
+- **Host header:** a DNS name other than `localhost` or a `*.localhost` name is rejected with `403` unless it's allowed by the `ALLOWED_HOSTS` environment variable (see [Configuration](configuration.md)); IP literals always work, as does a request with no Host header (curl, scripts)
 - **Cross-site POSTs:** a POST whose `Origin` names an untrusted host, or whose `Sec-Fetch-Site` is `cross-site`, is rejected with `403`
 - **JSON bodies:** every POST endpoint that takes a JSON body - all of them except `/api/upload` (multipart) and `/api/csp-report` - requires `Content-Type: application/json` (`415` otherwise) and a JSON object body of at most 1 MB (`MAX_REQUEST_BODY_SIZE`)
 - **Methods:** only GET and POST are served. `HEAD` returns `405` with `Allow: GET, POST` and no body; other methods return `501`
-- **Unknown paths** return `404` with a JSON error
+- **Unknown paths** return `404` with a JSON error - except a missing file under `/socrates.html`, `/static/*` or `/cyberchef/*`, which gets the HTTP server's own HTML `404` page
 
 ## Static Paths
 
@@ -37,15 +37,15 @@ Redirects to `/socrates.html`.
 
 Returns the running SO-CRATES version.
 
-**Response:** `{"version": "5.0.0"}`
+**Response:** `{"version": "5.0.1"}`
 
 ---
 
 ### `GET /api/version-check`
 
-Checks GitHub's releases API for a newer SO-CRATES version. Only ever called by the frontend if the user has opted in (the "Check GitHub for newer releases" checkbox in the About modal, or its manual "Check Now" button) - never fetched automatically otherwise.
+Checks GitHub's releases API for a newer SO-CRATES version. Only ever called by the frontend if the user has opted in (the "Check GitHub for newer SO-CRATES releases" checkbox in the About modal, or its manual "Check Now" button) - never fetched automatically otherwise.
 
-**Response:** `{"currentVersion": "<version>", "latestVersion": <string or null>, "updateAvailable": <boolean>}` - `latestVersion`/`updateAvailable` stay `null`/`false` on any failure to reach GitHub (never surfaces an error to the caller).
+**Response:** `{"currentVersion": "<version>", "latestVersion": <string or null>, "updateAvailable": <boolean>}` - `latestVersion` is `null` unless GitHub's latest release is newer than this one, and `latestVersion`/`updateAvailable` stay `null`/`false` on any failure to reach GitHub (never surfaces an error to the caller).
 
 ---
 
@@ -286,7 +286,7 @@ Carves a single TCP/UDP stream from the PCAP using `tcpdump` and returns it as a
 
 ### `GET /api/ascii-stream`
 
-Extracts ASCII payload from a TCP/UDP stream using `tshark`. Tries TCP first, falls back to UDP. Capped to the first 500 lines (`MAX_TRANSCRIPT_LINES`) and to 100,000 characters (`MAX_TRANSCRIPT_SIZE`), whichever is hit first.
+Extracts ASCII payload from a TCP/UDP stream: the flow is carved with `tcpdump` into a file in `/tmp`, then read with `tshark`. Tries TCP first, falls back to UDP. Capped to the first 500 lines (`MAX_TRANSCRIPT_LINES`) and to 100,000 characters (`MAX_TRANSCRIPT_SIZE`), whichever is hit first - and `truncated` is also true for a flow over 16 MB (`MAX_TRANSCRIPT_CARVE_SIZE`), read up to that much.
 
 **Query Parameters:**
 
@@ -324,7 +324,7 @@ Extracts per-packet hex dumps from a TCP/UDP stream using `tcpdump -X`. Truncate
 
 ### `GET /api/raw-stream`
 
-Returns a TCP/UDP stream's exact payload bytes - nothing decoded, replaced or trimmed, unlike `/api/ascii-stream`. The flow is carved with `tcpdump`, then reassembled with `tshark`'s `follow ... raw` mode, which drops retransmitted segments and orders out-of-order ones. Tries TCP first, falls back to UDP.
+Returns a TCP/UDP stream's exact payload bytes - nothing decoded, replaced or trimmed, unlike `/api/ascii-stream`. The flow is carved with `tcpdump` into a file in `/tmp`, then reassembled with `tshark`'s `follow ... raw` mode, which drops retransmitted segments and orders out-of-order ones. Tries TCP first, falls back to UDP.
 
 **Query Parameters:**
 
@@ -339,7 +339,7 @@ Returns a TCP/UDP stream's exact payload bytes - nothing decoded, replaced or tr
 
 **Response:** `application/octet-stream` download.
 
-**Errors:** `400` for invalid parameters, `404` if the flow has no payload in that direction, `413` if the payload is over 10 MB (`MAX_RAW_STREAM_SIZE`) - never a truncated payload. The size check covers the whole flow, so asking for one small direction of a flow whose other direction is huge also returns `413`.
+**Errors:** `400` for invalid parameters, `404` if the flow has no payload in that direction, `413` if the payload is over 10 MB (`MAX_RAW_STREAM_SIZE`), or the carved flow is over 200 MB (`MAX_STREAM_DOWNLOAD_SIZE`) - never a truncated payload. The size check covers the whole flow, so asking for one small direction of a flow whose other direction is huge also returns `413`.
 
 ---
 
@@ -426,7 +426,7 @@ or, if analysis (Suricata/YARA/Zircolite/email parsing) failed:
 
 `meta` is present whenever `.meta` exists for the analysis (written after the file type is detected) and is omitted otherwise; it's absent entirely from the `error` response.
 
-A `ready` analysis can also have `warnings`, a list of what went wrong without failing it - for now, a YARA scan that failed or timed out, so its File Alerts may be missing (`"The YARA scan of extracted files failed - File Alerts may be missing: <reason>"`). Omitted when there are none.
+A `ready` analysis can also have `warnings`, a list of what went wrong without failing it - for now, a YARA scan that failed or timed out, so its File Alerts may be missing (e.g. `"The YARA scan failed - File Alerts may be missing: <reason>"`; the wording varies with what was scanned). Omitted when there are none.
 
 `hasRowNotes` is `true` if the analysis has at least one row-level note, and always `false` while it isn't ready (see `POST /api/row-note`) - used by the reanalyze confirmation dialog to conditionally warn that reanalyzing deletes them. This field is added only on this GET route, not on the identically-shaped `POST /api/check-status` response below - that endpoint is polled every 2 seconds during active processing, and the extra lookup has no reason to run that often.
 
@@ -436,7 +436,7 @@ A `ready` analysis can also have `warnings`, a list of what went wrong without f
 
 ### `GET /api/shark-status`
 
-Where tshark stands for a PCAP analysis. Alongside Suricata, tshark decodes the capture (captures up to `SHARK_BACKGROUND_MAX_PACKETS`, 3 million packets by default; bigger ones only on request - see `POST /api/shark-start`. A run whose processes pass `SHARK_MAX_MEMORY_BYTES`, 4 GB by default, is stopped with an error), and once both are done, what Suricata lacks - records of protocols it doesn't parse, and connection rows (`conn_<protocol>`) - joins Suricata's in the analysis's `events.db`, so every data endpoint returns it (`GET /api/stats`'s `tshark_types` lists those types). Rows from tshark carry `"source": "tshark"`. An analysis that has never been queued (one from before tshark ran alongside Suricata, or whose queued run was lost to a server restart) is queued by its first status request, if it's under the packet limit. While tshark is switched off (`POST /api/shark-settings`), every status is `disabled` and nothing runs.
+Where tshark stands for a PCAP analysis. Alongside Suricata, tshark decodes the capture (captures up to `SHARK_BACKGROUND_MAX_PACKETS`, 3 million packets by default; bigger ones only on request - see `POST /api/shark-start`. A run whose processes pass `SHARK_MAX_MEMORY_BYTES`, 4 GB by default, is stopped with an error), and once both are done, what Suricata lacks - records of protocols it doesn't parse, and connection rows (`conn_<protocol>`) - joins Suricata's in the analysis's `events.db`, so every data endpoint returns it (`GET /api/stats`'s `tshark_types` lists those types). Rows from tshark carry `"source": "tshark"`. An analysis that has never been queued (one from before tshark ran alongside Suricata, or whose queued run was lost to a server restart) is queued by its first status request, if it's under the packet limit. While tshark is switched off (`POST /api/shark-settings`), every PCAP analysis's status is `disabled` and nothing runs.
 
 **Query Parameters:**
 
@@ -448,10 +448,10 @@ Where tshark stands for a PCAP analysis. Alongside Suricata, tshark decodes the 
 
 | Status | Meaning |
 |---|---|
-| `ready` | Done. Adds `seconds` (how long the run took - absent for a `shark.db` built before runs recorded it) and `merged` (whether its rows have joined Suricata's in the analysis's `events.db`; a status request that finds them not yet merged starts the merge) - and, once merged, `types`: the event types tshark added, as `GET /api/stats`'s `tshark_types` lists them (`[]` when it added nothing) |
+| `ready` | Done. Adds `seconds` (how long the run took - absent for a `shark.db` built before runs recorded it) and `merged` (whether its rows have joined Suricata's in the analysis's `events.db`; a status request that finds them not yet merged starts the merge) - and, once merged, `types`: the event types tshark added, as `GET /api/stats`'s `tshark_types` lists them (`[]` when it added nothing). Adds `damaged: true` when tshark read the capture only up to a cut-off or damaged end |
 | `queued` | Waiting for another analysis's run to finish. Adds `position` (1 = next) |
 | `running` | tshark is analyzing the capture. Adds `elapsed` (whole seconds since the run started) |
-| `waiting` | Suricata hasn't finished yet (tshark, which starts alongside it, has finished or not started); while both run, the status is tshark's own - `queued` or `running` |
+| `waiting` | Suricata hasn't finished yet (tshark, which starts alongside it, has finished or not started); while both run, the status is tshark's own - `queued`, `running`, `error` or `too_large` |
 | `too_large` | Over the background size limit - start it with `POST /api/shark-start` |
 | `error` | The last run failed. Adds `message` |
 | `not_started` | Not queued yet |
@@ -562,7 +562,7 @@ Uploads a file for analysis. Accepts multipart form data.
 
 **Request:** Multipart form with a file field. Accepts any file type, detected by content rather than name: PCAPs (by magic bytes, whatever the extension - e.g. `.pcap`, `.pcapng`, `.cap`, `.trace`, or none at all) get full Suricata network analysis; log files (recognized by content, or by a `.evtx`, `.json`, `.jsonl`, `.csv`, `.xml` or `.log` extension) get Zircolite Sigma detection; email messages (an `.eml` extension, or content that starts with an email's header block) get email analysis - headers, links and decoded attachments, each YARA-scanned - unless over 100 MB (`MAX_EMAIL_SIZE`), when they're scanned as a plain file; everything else gets YARA scanning. A known extension decides before content does. The same detection applies to each member of an uploaded ZIP.
 
-**Size limit:** 1000 MB by default (`DEFAULT_UPLOAD_SIZE`). An `X-Max-Upload-Size` header (in bytes) can raise it, up to 5000 MB (`MAX_UPLOAD_SIZE`). A body over the limit is rejected with `400` ("Invalid Content-Length"), and `507` means the server doesn't have the disk space for it. A ZIP with more than 100 members (`MAX_ZIP_MEMBERS`) is rejected with `400`; files whose own names start with `.` or `__` (e.g. `.DS_Store`, or anything under `__MACOSX/`) are ignored, whatever their type, but still count toward that limit.
+**Size limit:** 1000 MB by default (`DEFAULT_UPLOAD_SIZE`). An `X-Max-Upload-Size` header (in bytes) can raise it, up to 5000 MB (`MAX_UPLOAD_SIZE`). A body over the limit is rejected with `400` ("Invalid Content-Length"), and `507` means the server's free space is less than that limit (not the file's own size) plus 100 MB (`DISK_SPACE_SAFETY_MARGIN`). A ZIP with more than 100 members (`MAX_ZIP_MEMBERS`) is rejected with `400`; files whose own names start with `.` or `__` (e.g. `.DS_Store`, or anything under `__MACOSX/`) are ignored, whatever their type, but still count toward that limit.
 
 **Response (new file):**
 ```json
@@ -743,7 +743,7 @@ The name is trimmed, has embedded newlines collapsed to spaces, and is capped at
 {"success": true, "name": "<new display name>"}
 ```
 
-**Errors:** `400` for invalid MD5, unsafe path, or an empty/whitespace-only name. `404` if analysis not found.
+**Errors:** `400` for invalid MD5, unsafe path, a `name` that isn't a string ("Invalid name"), or an empty/whitespace-only name. `404` if analysis not found.
 
 ---
 
@@ -878,7 +878,7 @@ Deletes all historical analyses (every MD5-shaped directory under the data root)
 
 Sink for Content-Security-Policy violation reports - every response's CSP names it as its `report-uri`, so browsers POST here when they block something. Accepts any `Content-Type` (browsers send `application/csp-report`), reads at most 64 KB, and logs each distinct violation (by directive, blocked URI, source file and line) once to the server's console. The one violation the bundled CyberChef causes on every load - `frame-src`, from its loading animation - is expected and not logged.
 
-**Response:** `204`, no body - even for a malformed report. A missing, invalid or over-64 KB `Content-Length` gets `400`.
+**Response:** `204`, no body - even for a malformed report. An invalid or over-64 KB `Content-Length` gets `400`; a missing one reads as an empty report (`204`).
 
 ---
 
@@ -890,7 +890,7 @@ Sink for Content-Security-Policy violation reports - every response's CSP names 
 | `403` | Untrusted `Host` header, or a cross-site POST - see [Request Requirements](#request-requirements) |
 | `404` | Resource not found (no file, no analysis, no packets) |
 | `405` | `HEAD` request |
-| `409` | Conflict - analysis already in progress for this MD5 |
+| `409` | Conflict - analysis already in progress for this MD5, or a rule update already in progress |
 | `413` | Too large to return in full (a carved stream, stream payload or extracted file) or to download (`/api/load-url`) |
 | `415` | A JSON POST without `Content-Type: application/json` |
 | `500` | Internal server error (no stack traces or server paths leaked) |

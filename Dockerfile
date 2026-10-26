@@ -302,67 +302,105 @@ PY
 RUN mkdir -p /usr/share/suricata/rules-available && python3 - <<'PY'
 import gzip
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, '/app')
 from suricata_analyzer import BAKED_IN_SURICATA_SOURCES, _source_filename
 
+ATTEMPTS = 3
+SID = re.compile(r'\bsid\s*:\s*(\d+)')
+
+# suricata-update adds Suricata's own bundled rules (decoder, stream,
+# app-layer events...) to every output, so a source counts as baked only
+# with rules of its own beyond those. REGRESSION: suricata-update exits 0
+# when a fetch fails (HTTP 410 from abuse.ch's retired URLhaus feed), so
+# the image shipped a "URLhaus" file of nothing but the bundled rules.
+bundled_sids = set()
+for name in os.listdir('/etc/suricata/rules'):
+    if name.endswith('.rules'):
+        with open(os.path.join('/etc/suricata/rules', name), encoding='utf-8', errors='replace') as f:
+            bundled_sids.update(SID.findall(f.read()))
+
+
+def own_rules(path):
+    with open(path, encoding='utf-8', errors='replace') as f:
+        return sum(1 for sid in SID.findall(f.read()) if sid not in bundled_sids)
+
+
 for slug in BAKED_IN_SURICATA_SOURCES:
-    scratch_data = tempfile.mkdtemp()
-    scratch_out = tempfile.mkdtemp()
-    try:
-        # Populates the local source-index cache that enable-source resolves
-        # slugs against - required for any slug not already in
-        # suricata-update's own bundled index (e.g. the-hunters-ledger/open,
-        # a much less common source than the long-established ones like
-        # et/open). Without this, enable-source on a brand-new --data-dir
-        # fails with a StopIteration deep in suricata-update's own
-        # get_sources_from_dir() (empty/nonexistent index directory) for any
-        # slug that isn't bundled - confirmed for real in CI. Mirrors
-        # _fetch_single_source()'s equivalent runtime call in
-        # suricata_analyzer.py exactly, just with check=True instead of a
-        # swallowed failure - a build-time network hiccup should fail the
-        # image build loudly, not silently ship an incomplete bake.
-        subprocess.run(
-            ['suricata-update', 'update-sources', '--data-dir', scratch_data],
-            check=True,
-        )
-        subprocess.run(
-            ['suricata-update', 'enable-source', slug, '--data-dir', scratch_data],
-            check=True,
-        )
-        # enable-source on a brand-new --data-dir always ALSO silently
-        # auto-enables et/open as its own "default source" regardless of
-        # what was actually requested - must be explicitly disabled again
-        # for every other source, or this isolated single-source fetch
-        # isn't actually isolated (verified: an unpatched fetch of
-        # oisf/trafficid alone produced a merged file with et/open's full
-        # ~52k rules mixed in, not just trafficid's 34).
-        if slug != 'et/open':
+    # A few attempts each, a growing pause between them: one source's
+    # server timing out mid-download failed a real CI build, which a
+    # moment later fetched fine. Still a failed build, never an incomplete
+    # bake, once they're spent.
+    for attempt in range(1, ATTEMPTS + 1):
+        scratch_data = tempfile.mkdtemp()
+        scratch_out = tempfile.mkdtemp()
+        try:
+            # Populates the local source-index cache that enable-source resolves
+            # slugs against - required for any slug not already in
+            # suricata-update's own bundled index (e.g. the-hunters-ledger/open,
+            # a much less common source than the long-established ones like
+            # et/open). Without this, enable-source on a brand-new --data-dir
+            # fails with a StopIteration deep in suricata-update's own
+            # get_sources_from_dir() (empty/nonexistent index directory) for any
+            # slug that isn't bundled - confirmed for real in CI. Mirrors
+            # _fetch_single_source()'s equivalent runtime call in
+            # suricata_analyzer.py exactly, just with check=True instead of a
+            # swallowed failure - a build-time network hiccup should fail the
+            # image build loudly, not silently ship an incomplete bake.
             subprocess.run(
-                ['suricata-update', 'disable-source', 'et/open', '--data-dir', scratch_data],
+                ['suricata-update', 'update-sources', '--data-dir', scratch_data],
                 check=True,
             )
-        subprocess.run(
-            ['suricata-update', '--no-test', '--suricata-conf', '/etc/suricata/suricata.yaml',
-             '--data-dir', scratch_data, '--output', scratch_out],
-            check=True,
-        )
-        # Baked in gzip-compressed - plain-text Suricata rules compress
-        # ~93% (measured 2026-09-25: ~84MB -> ~6MB across the 14 baked-in
-        # sources) - see
-        # _seed_active_from_library() in suricata_analyzer.py for the
-        # matching decompress-on-read.
-        dest = f'/usr/share/suricata/rules-available/{_source_filename(slug)}.gz'
-        with open(os.path.join(scratch_out, 'suricata.rules'), 'rb') as f_in, gzip.open(dest, 'wb') as f_out:
-            shutil.copyfileobj(f_in, f_out)
-        print(f'Baked in {slug} -> {dest}')
-    finally:
-        shutil.rmtree(scratch_data, ignore_errors=True)
-        shutil.rmtree(scratch_out, ignore_errors=True)
+            subprocess.run(
+                ['suricata-update', 'enable-source', slug, '--data-dir', scratch_data],
+                check=True,
+            )
+            # enable-source on a brand-new --data-dir always ALSO silently
+            # auto-enables et/open as its own "default source" regardless of
+            # what was actually requested - must be explicitly disabled again
+            # for every other source, or this isolated single-source fetch
+            # isn't actually isolated (verified: an unpatched fetch of
+            # oisf/trafficid alone produced a merged file with et/open's full
+            # ~52k rules mixed in, not just trafficid's 34).
+            if slug != 'et/open':
+                subprocess.run(
+                    ['suricata-update', 'disable-source', 'et/open', '--data-dir', scratch_data],
+                    check=True,
+                )
+            subprocess.run(
+                ['suricata-update', '--no-test', '--suricata-conf', '/etc/suricata/suricata.yaml',
+                 '--data-dir', scratch_data, '--output', scratch_out],
+                check=True,
+            )
+            rules_path = os.path.join(scratch_out, 'suricata.rules')
+            count = own_rules(rules_path)
+            if not count:
+                raise RuntimeError('no rules of its own beyond Suricata\'s bundled ones - its fetch failed')
+            # Baked in gzip-compressed - plain-text Suricata rules compress
+            # ~93% (measured 2026-09-25: ~84MB -> ~6MB across the baked-in
+            # sources) - see
+            # _seed_active_from_library() in suricata_analyzer.py for the
+            # matching decompress-on-read.
+            dest = f'/usr/share/suricata/rules-available/{_source_filename(slug)}.gz'
+            with open(rules_path, 'rb') as f_in, gzip.open(dest, 'wb') as f_out:
+                shutil.copyfileobj(f_in, f_out)
+            print(f'Baked in {slug} ({count} rules of its own) -> {dest}', flush=True)
+            break
+        except (subprocess.CalledProcessError, RuntimeError, OSError) as e:
+            if attempt == ATTEMPTS:
+                sys.exit(f'Could not bake {slug} after {ATTEMPTS} attempts: {e}. If its feed is gone '
+                         'for good, remove it from SURICATA_RULE_SOURCES in suricata_analyzer.py.')
+            print(f'{slug}: attempt {attempt} failed ({e}) - trying again in {attempt * 20}s', flush=True)
+            time.sleep(attempt * 20)
+        finally:
+            shutil.rmtree(scratch_data, ignore_errors=True)
+            shutil.rmtree(scratch_out, ignore_errors=True)
 PY
 
 # YARA Forge and Sigma rules, baked in for air-gapped deployments - fetched

@@ -28,7 +28,6 @@ SURICATA_RULE_SOURCES = {
     'abuse.ch/sslbl-blacklist': {'label': 'Abuse.ch SSL Blacklist', 'url': 'https://sslbl.abuse.ch/'},
     'abuse.ch/sslbl-ja3': {'label': 'Abuse.ch JA3 Fingerprints', 'url': 'https://sslbl.abuse.ch/ja3-fingerprints/'},
     'abuse.ch/feodotracker': {'label': 'Abuse.ch Feodo Tracker', 'url': 'https://feodotracker.abuse.ch/'},
-    'abuse.ch/urlhaus': {'label': 'Abuse.ch URLhaus', 'url': 'https://urlhaus.abuse.ch/'},
     'etnetera/aggressive': {'label': 'Etnetera Aggressive IP Blacklist', 'url': 'https://security.etnetera.cz/'},
     'ptrules/open': {'label': 'Positive Technologies PT Rules (Open)', 'url': 'https://rules.ptsecurity.com'},
     'pawpatrules': {'label': 'PAW Patrules', 'url': 'https://pawpatrules.fr/'},
@@ -44,11 +43,18 @@ SURICATA_RULE_SOURCES = {
     # list rather than alphabetized in with the rest.
     'ipfire/dbl': {'label': 'IPFire DBL', 'url': 'https://www.ipfire.org/dbl/', 'note': 'Large ruleset (~51 MiB) - first fetch can take a while'},
 }
+# abuse.ch/urlhaus was here until 5.0.1: abuse.ch retired its Suricata
+# feed (410 Gone), and suricata-update exits 0 on a failed fetch, so the
+# image baked a URLhaus file holding nothing but Suricata's own bundled
+# rules. suricata_sid_ranges.py still names its sid range, for alerts in
+# analyses run with older rules; an old enabled_sources.json naming it is
+# filtered by get_suricata_enabled_sources(), and suricata.yaml's
+# rule-files list no longer includes its file.
 DEFAULT_SURICATA_SOURCES = ['et/open']
 
 # ipfire/dbl deliberately excluded from what the Docker image bakes in -
 # it's the single biggest source in the curated set (~51 MiB on its own,
-# via its dataset:-based domain lists - the other 14 together are ~84 MB
+# via its dataset:-based domain lists - the other 13 together are ~84 MB
 # uncompressed, measured 2026-09-25) and is actually a content-*filtering*
 # blocklist (ads/dating/gambling/social/streaming/etc. categories), not
 # threat detection - most of it would just add alert noise on ordinary
@@ -61,7 +67,7 @@ BAKED_IN_SURICATA_SOURCES = [s for s in SURICATA_RULE_SOURCES if s != 'ipfire/db
 
 def _source_filename(slug):
     """Map a SURICATA_RULE_SOURCES key to its on-disk rules filename (e.g.
-    'abuse.ch/urlhaus' -> 'abuse.ch-urlhaus.rules') - single source of
+    'abuse.ch/feodotracker' -> 'abuse.ch-feodotracker.rules') - single source of
     truth for naming, used by both the Dockerfile's per-source bake loop
     and every runtime path that reads/writes a source's file (the
     rules-available/ library, the active rules/ dir, and the static

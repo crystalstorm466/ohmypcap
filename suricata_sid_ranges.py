@@ -58,6 +58,12 @@ SURICATA_SID_RANGES = [
     (906200000, 906200096, 'abuse.ch/sslbl-ja3', 'Abuse.ch JA3 Fingerprints'),
 ]
 
+# Sources no longer offered (no longer in suricata_analyzer's
+# SURICATA_RULE_SOURCES) whose ranges stay above, so the alerts in an
+# analysis run with their rules still name them: abuse.ch retired
+# URLhaus's Suricata feed (dropped in 5.0.1).
+RETIRED_SOURCES = {'abuse.ch/urlhaus'}
+
 # Suricata's own bundled decoder/stream/app-layer/file rules - always
 # loaded from /etc/suricata/rules/* regardless of which curated online
 # sources are enabled, so not a "ruleset" in SURICATA_RULE_SOURCES at all.
