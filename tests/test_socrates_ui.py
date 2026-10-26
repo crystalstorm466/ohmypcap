@@ -21550,6 +21550,97 @@ class TestAcknowledgeAlerts(unittest.TestCase):
         self.assertIn('Acknowledged Alerts', result['label'])
         self.assertIn('3', result['label'])
 
+    def test_a_log_analysis_shows_the_acknowledged_alerts_card_for_its_sigma_alerts(self):
+        """REGRESSION: a log analysis offered Acknowledge on a Sigma alert
+        but had no Acknowledged Alerts card, so the alert was gone with no
+        way to see it again or undo it."""
+        from tests.jsdom_helper import js_statements
+        result = js_statements('''
+            await new Promise(function(r) { setTimeout(r, 100); });
+            document.getElementById('inputBoxes').style.display = 'none';
+            currentMd5 = 'abc123';
+            currentFilters = {};
+            advancedMode = true;
+            isLogAnalysisMode = true;
+            var asked = [];
+            window.fetch = function(url) {
+                var u = String(url);
+                asked.push(u);
+                if (u.indexOf('/api/sigma-count') >= 0 && u.indexOf('acknowledged=only') >= 0) {
+                    return Promise.resolve({ ok: true, json: function() { return Promise.resolve({ count: 2 }); } });
+                }
+                return Promise.resolve({ ok: true, json: function() { return Promise.resolve({ count: 0 }); } });
+            };
+            buildStats({});
+            await new Promise(function(r) { setTimeout(r, 100); });
+            var card = document.querySelector('.stat-card[data-section="section-acknowledged"]');
+            window.__jsdom_result = {
+                label: card ? card.textContent : null,
+                askedForSuricataAlerts: asked.some(function(u) { return u.indexOf('/api/count') >= 0 && u.indexOf('type=alert') >= 0; }),
+            };
+        ''')
+        self.assertIsNotNone(result['label'], 'the card shows once a Sigma alert is acknowledged')
+        self.assertIn('Acknowledged Alerts', result['label'])
+        self.assertIn('2', result['label'])
+        self.assertFalse(result['askedForSuricataAlerts'], 'a log analysis has no Suricata alerts to count')
+
+    def _log_view_after_acknowledging_js(self, still_acknowledged):
+        """A log analysis re-rendered (as refreshAnalysisData does after
+        an acknowledge or un-acknowledge) while the Acknowledged Alerts tab
+        was open - with still_acknowledged Sigma alerts left in it."""
+        return '''
+            await new Promise(function(r) { setTimeout(r, 100); });
+            document.getElementById('inputBoxes').style.display = 'none';
+            ['section-log', 'section-sigmaalert'].forEach(function(id) {
+                var s = document.createElement('div');
+                s.id = id;
+                s.className = 'section';
+                document.body.appendChild(s);
+            });
+            var left = ''' + json.dumps(still_acknowledged) + ''';
+            var sigmaRow = { id: 5, rule_title: 'R1', rule_id: 'rid5', severity: 'high', timestamp: 't',
+                             mitre_techniques: '[]', logsource: 'windows', original_log: '{}' };
+            var asked = [];
+            window.fetch = function(url) {
+                var u = String(url);
+                asked.push(u);
+                if (u.indexOf('/api/sigma-alerts') >= 0 && u.indexOf('acknowledged=only') >= 0) {
+                    return Promise.resolve({ ok: true, json: function() { return Promise.resolve(left ? [sigmaRow] : []); } });
+                }
+                if (u.indexOf('/api/sigma-alerts') >= 0) {
+                    return Promise.resolve({ ok: true, json: function() { return Promise.resolve([sigmaRow]); } });
+                }
+                if (u.indexOf('count') >= 0) {
+                    return Promise.resolve({ ok: true, json: function() { return Promise.resolve({ count: left ? 1 : 0 }); } });
+                }
+                return Promise.resolve({ ok: true, json: function() { return Promise.resolve([]); } });
+            };
+            currentMd5 = 'abc123';
+            currentFilters = {};
+            currentSearch = [];
+            advancedMode = false;
+            isLogAnalysisMode = true;
+            await _renderLogAnalysisView({ log: 3, sigmaalert: 1 }, 'acknowledged');
+            var visible = document.querySelector('.section:not(.section-hidden):not(.agg-section)');
+            window.__jsdom_result = {
+                visible: visible ? visible.id : null,
+                askedForSuricataAlerts: asked.some(function(u) { return u.indexOf('/api/events') >= 0 && u.indexOf('type=alert') >= 0; }),
+            };
+        '''
+
+    def test_a_log_analysis_stays_on_acknowledged_alerts_while_it_has_any(self):
+        from tests.jsdom_helper import js_statements
+        result = js_statements(self._log_view_after_acknowledging_js(True))
+        self.assertEqual(result['visible'], 'section-acknowledged')
+        self.assertFalse(result['askedForSuricataAlerts'])
+
+    def test_a_log_analysis_goes_back_to_sigma_alerts_once_none_are_acknowledged(self):
+        """Where the un-acknowledged alert reappears - as a PCAP analysis
+        goes back to Network Alerts."""
+        from tests.jsdom_helper import js_statements
+        result = js_statements(self._log_view_after_acknowledging_js(False))
+        self.assertEqual(result['visible'], 'section-sigmaalert')
+
 
 
 class TestEmailAnalysisUI(unittest.TestCase):

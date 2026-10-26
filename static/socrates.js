@@ -10325,18 +10325,21 @@
         }
 
         async function refreshAcknowledgedAlertsCount() {
-            if (isLogAnalysisMode || isEmailAnalysisMode || !currentMd5) {
+            if (isEmailAnalysisMode || !currentMd5) {
                 acknowledgedAlertsCount = 0;
                 acknowledgedAlertsCountMd5 = currentMd5;
                 return;
             }
             const md5 = currentMd5;
             try {
+                // A log analysis has no Suricata alerts - only its Sigma
+                // alerts can be acknowledged
                 const [alertResp, sigmaResp] = await Promise.all([
-                    fetch(`/api/count?md5=${encodeURIComponent(md5)}&type=alert&acknowledged=only&t=${Date.now()}`),
+                    isLogAnalysisMode ? null
+                        : fetch(`/api/count?md5=${encodeURIComponent(md5)}&type=alert&acknowledged=only&t=${Date.now()}`),
                     fetch(`/api/sigma-count?md5=${encodeURIComponent(md5)}&acknowledged=only&t=${Date.now()}`)
                 ]);
-                const alertCount = (await alertResp.json()).count || 0;
+                const alertCount = alertResp ? (await alertResp.json()).count || 0 : 0;
                 const sigmaCount = (await sigmaResp.json()).count || 0;
                 if (currentMd5 !== md5) {
                     // See refreshDnsHeuristicsCount - result belongs to a
@@ -10625,6 +10628,11 @@
                     color: 'var(--text-bright)',
                     title: hasConnections ? "Every record except tshark's connection rows, which list connections by protocol the way Flows does" : '',
                 });
+            }
+            if (!isEmailAnalysisMode) {
+                // A log analysis's acknowledged Sigma alerts too: without
+                // the card, an acknowledged one was gone with no way to see
+                // it again or undo it.
                 // Not filtered by the current search/filter bar the way
                 // every other card above is (filteredStats has no entry
                 // for it - there's nothing to filter, acknowledged rows
@@ -10837,11 +10845,13 @@
             const qParam = buildSearchQuery();
             const limit = getUserQueryLimit();
             const [alertResp, sigmaResp] = await Promise.all([
-                fetch(`/api/events?md5=${encodeURIComponent(currentMd5)}&type=alert&acknowledged=only&limit=${limit}${qParam}&t=${Date.now()}`),
+                // (a log analysis has Sigma alerts only)
+                isLogAnalysisMode ? null
+                    : fetch(`/api/events?md5=${encodeURIComponent(currentMd5)}&type=alert&acknowledged=only&limit=${limit}${qParam}&t=${Date.now()}`),
                 fetch(`/api/sigma-alerts?md5=${encodeURIComponent(currentMd5)}&acknowledged=only&limit=${limit}${qParam}&t=${Date.now()}`)
             ]);
             acknowledgedAlertsCache = {
-                alert: await alertResp.json(),
+                alert: alertResp ? await alertResp.json() : [],
                 sigmaalert: await sigmaResp.json(),
             };
             renderAcknowledgedAlertsGroups();
@@ -12849,18 +12859,28 @@
         // tab's data is left uncached until (if ever) the user switches to it
         // via showTab().
         // Callers must set baseEventStats first (baseline or same-as-filtered).
-        async function _renderLogAnalysisView(counts) {
+        async function _renderLogAnalysisView(counts, preferredType) {
             eventStats = counts;
 
             eventTypes = sortEventTypes(Object.keys(baseEventStats));
             buildStats(await computeFilteredStats());
             buildSections();
 
-            const defaultType = counts.sigmaalert > 0 ? 'sigmaalert' : 'log';
-            document.querySelectorAll('.section').forEach(s => s.classList.add('section-hidden'));
-            const defaultSection = document.getElementById('section-' + defaultType);
-            if (defaultSection) defaultSection.classList.remove('section-hidden');
-            await loadTabData(defaultType, null);
+            // Back on the Acknowledged Alerts tab after acknowledging or
+            // un-acknowledging from it, while it still has alerts, as a
+            // PCAP analysis stays on it - otherwise the tab a fresh load
+            // opens on, which is also where an un-acknowledged alert
+            // reappears
+            const openTab = async type => {
+                document.querySelectorAll('.section').forEach(s => s.classList.add('section-hidden'));
+                const section = document.getElementById('section-' + type);
+                if (section) section.classList.remove('section-hidden');
+                await loadTabData(type, null);
+            };
+            if (preferredType === 'acknowledged') await openTab('acknowledged');
+            if (preferredType !== 'acknowledged' || acknowledgedAlertsCache.sigmaalert.length === 0) {
+                await openTab(counts.sigmaalert > 0 ? 'sigmaalert' : 'log');
+            }
 
             // loadTabData already builds the aggregation table itself when
             // advancedMode is true (for whichever type is defaultType) - the
@@ -12952,6 +12972,7 @@
                 // Read before the sections are cleared below - see
                 // _renderEmailAnalysisView's preferredType.
                 const emailTabBeforeRefresh = isEmailAnalysisMode ? getVisibleEventType() : null;
+                const logTabBeforeRefresh = isLogFile ? getVisibleEventType() : null;
 
                 if (isFileOnly) {
                 document.querySelectorAll('.file-info-card').forEach(c => c.remove());
@@ -12975,7 +12996,7 @@
                         } else {
                             counts = baseEventStats = await _fetchLogAnalysisCounts('');
                         }
-                        await _renderLogAnalysisView(counts);
+                        await _renderLogAnalysisView(counts, logTabBeforeRefresh);
                     } catch(e) {
                         console.error('Failed to load log analysis:', e);
                         document.getElementById('sections').innerHTML = '<div class="log-events-section"><h3>📋 Log Events</h3><div class="no-matches">Error loading log events</div></div>';

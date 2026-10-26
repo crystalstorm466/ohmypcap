@@ -15,6 +15,10 @@
 - An analysis folder tshark can't write to (its files left by a run as
   another user) is now an error saying so, instead of a tshark run that
   was queued again on every status check and never finished
+- A log analysis now has the **Acknowledged Alerts** tab once a Sigma
+  alert is acknowledged - before, an acknowledged Sigma alert was gone
+  from view with no way to see it again or undo it. Un-acknowledging its
+  last alert goes back to Sigma Alerts
 
 ## 5.0.0
 
